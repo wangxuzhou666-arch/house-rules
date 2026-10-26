@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Findings ledger event (v1)",
+  "description": "One JSON object per line of an append-only, repo-local ledger (default `.style-findings.jsonl` at the main worktree root). Three event kinds share the file: `finding` (something was flagged), `outcome` (what became of it), `gate_pass` (an automated gate passed over these files). The current state of a finding is the fold of its events in file order: it is open until an `outcome` for its id appears; a later `finding` with the same id after an outcome re-opens it (gate source only; l1/l2 re-adds are ignored). `rule_id` is one of: a clause id defined in the repo's configured rules files, `unmapped`, or `<tool>:<code>` (for example `ruff:F811`). This schema only checks the shape of a rule id; whether a clause exists is checked against the rules files when an event is written, not when old events are read. IDs: l1/l2 -> `<repo>:<source>:<run_id>:<display_id>`; gate -> `<repo>:gate:<sha1 of file|rule_code|whitespace-stripped line text, first 12 hex>`, so repeats of one issue fold into one finding (gate events carry run_id `gate` and a display_id equal to the 12-hex hash). `ts` is local time without a timezone. Fields added after the first v1 ledgers (`discovered_at`, `also_matches`, `rule_id_source`) are optional, and every line of an older v1 ledger still validates.",
+  "oneOf": [
+    { "$ref": "#/$defs/finding" },
+    { "$ref": "#/$defs/outcome" },
+    { "$ref": "#/$defs/gate_pass" }
+  ],
+  "$defs": {
+    "ts": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}$" },
+    "sha": { "type": "string", "pattern": "^([0-9a-f]{7,40}|none)$" },
+    "severity": { "enum": ["blocker", "should-fix", "nice"] },
+    "rule_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "description": "A clause id from the configured rules files (for example P0E.2, R.7), `unmapped`, or `<tool>:<code>` (for example ruff:F811)."
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "kind", "id", "display_id", "run_id", "repo", "source", "ts", "sha", "file", "line", "rule_code", "rule_id", "category", "severity", "summary", "failure_scenario", "verdict"],
+      "properties": {
+        "v": { "const": 1 },
+        "kind": { "const": "finding" },
+        "id": { "type": "string", "minLength": 1 },
+        "display_id": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$", "description": "Short handle for humans; the value to put in a `Fixes-Finding:` commit trailer." },
+        "run_id": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+        "repo": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+        "source": { "enum": ["gate", "l1", "l2"] },
+        "ts": { "$ref": "#/$defs/ts", "description": "When the event was written to the ledger." },
+        "sha": { "$ref": "#/$defs/sha" },
+        "file": { "type": "string", "minLength": 1 },
+        "line": { "type": "integer", "minimum": 1 },
+        "rule_code": { "type": "string", "minLength": 1, "description": "What the detector called it: a tool code, a gate code, or the category text a reviewer gave." },
+        "rule_id": { "$ref": "#/$defs/rule_id" },
+        "category": { "type": "string", "minLength": 1, "description": "Free-form grouping label. Older ledgers use a fixed set (exception, fallback, complexity, ...); new events carry the clause family (P0E), the tool name (ruff) or `unmapped`." },
+        "severity": { "$ref": "#/$defs/severity" },
+        "summary": { "type": "string", "minLength": 1 },
+        "failure_scenario": { "type": "string", "minLength": 1 },
+        "verdict": { "enum": ["CONFIRMED", "PLAUSIBLE"] },
+        "snippet": { "type": "string", "description": "Optional code context captured when the finding was recorded." },
+        "discovered_at": { "$ref": "#/$defs/ts", "description": "Optional. When the reviewer produced the finding, if that differs from `ts` (the ledger write time)." },
+        "also_matches": {
+          "type": "array",
+          "description": "Optional. Other findings on the same file and line that were collapsed into this one (this event is the most severe).",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["rule_id", "severity", "summary", "failure_scenario"],
+            "properties": {
+              "rule_id": { "$ref": "#/$defs/rule_id" },
+              "severity": { "$ref": "#/$defs/severity" },
+              "summary": { "type": "string", "minLength": 1 },
+              "failure_scenario": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "rule_id_source": { "enum": ["model", "human", "tool", "attributed"], "description": "Optional. Where the rule_id came from: a model's category, a human, a tool code mapped through tool_rule_map, or a later attribution step. Absent on older events." }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "source": { "const": "gate" } } },
+          "then": {
+            "properties": {
+              "id": { "pattern": "^[a-z0-9-]+:gate:[0-9a-f]{12}$" },
+              "run_id": { "const": "gate" },
+              "display_id": { "pattern": "^[0-9a-f]{12}$" }
+            }
+          },
+          "else": {
+            "properties": { "id": { "pattern": "^[a-z0-9-]+:(l1|l2):[A-Za-z0-9._-]+:[A-Za-z0-9._-]+$" } }
+          }
+        }
+      ]
+    },
+    "outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "kind", "id", "outcome", "outcome_by", "evidence", "ts"],
+      "properties": {
+        "v": { "const": 1 },
+        "kind": { "const": "outcome" },
+        "id": { "type": "string", "minLength": 1 },
+        "outcome": { "enum": ["fixed", "dismissed", "false_positive"] },
+        "outcome_by": { "enum": ["auto:commit", "auto:gate_pass", "human"] },
+        "evidence": { "type": "string", "minLength": 1 },
+        "ts": { "$ref": "#/$defs/ts" }
+      }
+    },
+    "gate_pass": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "kind", "repo", "ts", "sha", "files"],
+      "properties": {
+        "v": { "const": 1 },
+        "kind": { "const": "gate_pass" },
+        "repo": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+        "ts": { "$ref": "#/$defs/ts" },
+        "sha": { "$ref": "#/$defs/sha" },
+        "files": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+      }
+    }
+  }
+}

@@ -1,0 +1,287 @@
+"""Clause registry parsed from the rules files named in the config.
+
+A clause is *defined* by a line that starts with its id in one of two notations:
+  - bracketed:   `1. **[P0E.1]** text`, `- [P3.2] text`, `### [R.7] title`
+  - table row:   `| P0E.1 | blocker | text |`
+An id mentioned mid-line (a cross reference) does not define anything. An optional severity tag on the defining
+line - `(blocker)`, `[should-fix]`, `` `nice` ``, a table cell, or `severity: blocker` - becomes that clause's own
+severity. Lines inside code fences are ignored.
+
+A family severity table maps whole clause families to a severity; it is the default for clauses without their own tag:
+  | family | severity |
+  |---|---|
+  | P0E, P0F | blocker |
+A family is the part of a clause id before the dot (`P0E.1` -> `P0E`) and matches exactly.
+
+Rules files are layered in config order (global first, project last). A later file may add clauses and table rows
+but never redefine either: that is an error.
+"""
+from __future__ import annotations
+
+import hashlib
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterator
+
+from .config import Config
+from .errors import RatchetError
+from .ledger import SEVERITIES, UNMAPPED
+
+TOOL_ID_RE = re.compile(r"^[a-z][a-z0-9_-]*:[A-Za-z0-9_.@/-]+$")
+
+_SEVERITY_WORDS = "blocker|should-fix|nice"
+_SEVERITY_TAG_RE = re.compile(
+    rf"[(\[`]\s*({_SEVERITY_WORDS})\s*[)\]`]"
+    rf"|\|\s*({_SEVERITY_WORDS})\s*(?=\|)"
+    rf"|\bseverity\s*[:=]\s*({_SEVERITY_WORDS})\b",
+    re.IGNORECASE,
+)
+_FENCE_RE = re.compile(r"^\s*(```|~~~)")
+_COMMENT_RE = re.compile(r"<!--.*?-->")
+_DIGEST_OVERRIDE_RE = re.compile(r"<!--\s*digest:\s*(\S.*?)\s*-->")
+_BOLD_CLOSE_RE = re.compile(r"^(?:\*\*|__)")
+_SEPARATOR_CELL_RE = re.compile(r"^:?-+:?$")
+_SEVERITY_TABLE_HEADER = ["family", "severity"]
+
+
+@dataclass(frozen=True)
+class Clause:
+    id: str
+    tag: str | None  # severity written on the defining line, if any
+    line: int
+    text: str  # what follows the id on the defining line, minus comments and severity tags
+    digest_override: str | None  # from an inline `<!-- digest: ... -->` comment
+
+
+@dataclass(frozen=True)
+class RulesSource:
+    path: Path
+    sha12: str  # first 12 hex of the sha256 of the file bytes
+
+
+def family_of(clause_id: str) -> str:
+    return clause_id.split(".", 1)[0]
+
+
+def _definition_regexes(id_pattern: str) -> tuple[re.Pattern[str], re.Pattern[str]]:
+    bracketed = re.compile(rf"^\s*(?:[-*+]\s+|\d+[.)]\s+|#{{1,6}}\s+)?(?:\*\*|__)?\[(?P<id>(?:{id_pattern}))\]")
+    table_row = re.compile(rf"^\s*\|\s*(?:\*\*|`)?(?P<id>(?:{id_pattern}))(?:\*\*|`)?\s*\|")
+    return bracketed, table_row
+
+
+def _severity_tag(line: str, where: str) -> str | None:
+    tags = {next(group for group in match.groups() if group).lower() for match in _SEVERITY_TAG_RE.finditer(line)}
+    if len(tags) > 1:
+        raise RatchetError(f"{where}: conflicting severity tags {sorted(tags)} on one clause line")
+    return tags.pop() if tags else None
+
+
+def _content_lines(text: str) -> Iterator[tuple[int, str]]:
+    """(line number, line) for every line outside a code fence."""
+    in_fence = False
+    for number, line in enumerate(text.splitlines(), start=1):
+        if _FENCE_RE.match(line):
+            in_fence = not in_fence
+        elif not in_fence:
+            yield number, line
+
+
+def _row_cells_text(rest: str) -> str:
+    """The cells after the id cell of a table-row clause, minus any severity cell."""
+    cells = [cell.strip() for cell in rest.split("|")]
+    return " - ".join(cell for cell in cells if cell and cell.lower() not in SEVERITIES)
+
+
+def _clause_text(rest: str, is_table_row: bool) -> tuple[str, str | None]:
+    """(text, digest override) from what follows the id on a defining line."""
+    override_match = _DIGEST_OVERRIDE_RE.search(rest)
+    text = _COMMENT_RE.sub("", rest)
+    text = _row_cells_text(text) if is_table_row else _BOLD_CLOSE_RE.sub("", text.lstrip())
+    text = _SEVERITY_TAG_RE.sub("", text)
+    return " ".join(text.split()), override_match.group(1) if override_match else None
+
+
+def parse_rules_text(text: str, name: str, id_pattern: str) -> dict[str, Clause]:
+    """{clause id: Clause} for one rules file, in file order."""
+    bracketed, table_row = _definition_regexes(id_pattern)
+    found: dict[str, Clause] = {}
+    for number, line in _content_lines(text):
+        bracketed_match = bracketed.match(line)
+        match = bracketed_match or table_row.match(line)
+        if match is None:
+            continue
+        is_table_row = bracketed_match is None
+        clause_id = match.group("id")
+        where = f"{name}:{number}"
+        if clause_id in found:
+            raise RatchetError(f"{where}: clause {clause_id} is already defined at {name}:{found[clause_id].line}")
+        clause_text, override = _clause_text(line[match.end():], is_table_row)
+        found[clause_id] = Clause(clause_id, _severity_tag(line, where), number, clause_text, override)
+    return found
+
+
+# ---- family severity table ------------------------------------------------------------------------------------
+
+def _cells(line: str) -> list[str] | None:
+    stripped = line.strip()
+    if not stripped.startswith("|"):
+        return None
+    return [cell.strip().strip("`*").strip() for cell in stripped.strip("|").split("|")]
+
+
+def _table_blocks(text: str) -> list[list[tuple[int, list[str]]]]:
+    """Runs of adjacent table lines outside code fences, as (line number, cells)."""
+    blocks: list[list[tuple[int, list[str]]]] = []
+    current: list[tuple[int, list[str]]] = []
+    for number, line in _content_lines(text):
+        cells = _cells(line)
+        if cells is not None and (not current or current[-1][0] == number - 1):
+            current.append((number, cells))
+            continue
+        if current:
+            blocks.append(current)
+        current = [] if cells is None else [(number, cells)]
+    if current:
+        blocks.append(current)
+    return blocks
+
+
+def _set_family(mapping: dict[str, tuple[str, str]], family: str, severity: str, where: str) -> None:
+    """Record family -> (severity, origin); a second, different severity for the same family is an error."""
+    if family in mapping and mapping[family][0] != severity:
+        raise RatchetError(
+            f"{where}: family {family} is {severity} here but {mapping[family][0]} at {mapping[family][1]}")
+    mapping.setdefault(family, (severity, where))
+
+
+def parse_severity_table(text: str, name: str) -> dict[str, tuple[str, str]]:
+    """{family: (severity, origin)} from every `| family | severity |` table in one rules file."""
+    mapping: dict[str, tuple[str, str]] = {}
+    for block in _table_blocks(text):
+        if [cell.lower() for cell in block[0][1]] != _SEVERITY_TABLE_HEADER:
+            continue
+        header_line = block[0][0]
+        if len(block) < 2 or not all(_SEPARATOR_CELL_RE.match(cell) for cell in block[1][1]):
+            raise RatchetError(f"{name}:{header_line}: the severity table header must be followed by a separator row such as |---|---|")
+        for number, cells in block[2:]:
+            where = f"{name}:{number}"
+            if len(cells) != 2:
+                raise RatchetError(f"{where}: a severity table row has two cells (families, severity), got {len(cells)}")
+            severity = cells[1].lower()
+            if severity not in SEVERITIES:
+                raise RatchetError(f"{where}: severity {cells[1]!r} is not one of {list(SEVERITIES)}")
+            families = [family.strip().strip("`*").strip() for family in cells[0].split(",")]
+            if not all(families):
+                raise RatchetError(f"{where}: empty family name in {cells[0]!r}")
+            for family in families:
+                _set_family(mapping, family, severity, where)
+    return mapping
+
+
+# ---- registry -------------------------------------------------------------------------------------------------
+
+def _kebab_key(text: str) -> str:
+    return re.sub(r"[.\s_]+", "-", text.strip().lower())
+
+
+@dataclass(frozen=True)
+class Rules:
+    clauses: dict[str, Clause]  # definition order: files in config order, lines in file order
+    family_severity: dict[str, str]
+    tool_rule_map: dict[str, str]
+    scenarios: dict[str, str]
+    id_by_kebab: dict[str, str]
+    sources: tuple[RulesSource, ...]
+
+    def is_known_clause(self, rule_id: str) -> bool:
+        return rule_id in self.clauses
+
+    def severity_of(self, rule_id: str) -> str | None:
+        """The clause's own tag, else its family's severity from the table, else None."""
+        clause = self.clauses.get(rule_id)
+        if clause is None:
+            return None
+        return clause.tag or self.family_severity.get(family_of(rule_id))
+
+    def from_kebab(self, text: str) -> str | None:
+        """`p0e-6` -> `P0E.6`; None when it names no known clause."""
+        return self.id_by_kebab.get(_kebab_key(text))
+
+    def resolve_reported(self, raw: str) -> tuple[str, str | None]:
+        """(rule_id, rule_id_source) for an id supplied in a report. Unknown clause ids are rejected, never coerced."""
+        if raw in self.tool_rule_map:
+            return self.tool_rule_map[raw], "tool"
+        if raw == UNMAPPED or self.is_known_clause(raw):
+            return raw, None
+        if TOOL_ID_RE.match(raw):
+            return raw, "tool"
+        hint = "no rules_files configured" if not self.clauses else f"{len(self.clauses)} known clauses"
+        raise RatchetError(
+            f"unknown rule_id {raw!r}: expected a clause defined in rules_files ({hint}), "
+            f"{UNMAPPED!r}, or '<tool>:<code>' such as 'ruff:F811'")
+
+
+def category_of(rule_id: str) -> str:
+    """Grouping label: clause family (`P0E.3` -> `P0E`), tool name (`ruff:F811` -> `ruff`) or `unmapped`."""
+    if rule_id == UNMAPPED:
+        return UNMAPPED
+    if ":" in rule_id:
+        return rule_id.split(":", 1)[0]
+    return family_of(rule_id)
+
+
+def _read_rules_file(path: Path) -> tuple[str, str]:
+    """(text, sha12 of the bytes)."""
+    try:
+        raw_bytes = path.read_bytes()
+    except OSError as exc:
+        raise RatchetError(f"cannot read rules file {path}: {exc}") from exc
+    try:
+        text = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RatchetError(f"rules file {path} is not valid UTF-8: {exc}") from exc
+    return text, hashlib.sha256(raw_bytes).hexdigest()[:12]
+
+
+def load_rules(config: Config) -> Rules:
+    clauses: dict[str, Clause] = {}
+    origin: dict[str, str] = {}
+    families: dict[str, tuple[str, str]] = {}
+    sources: list[RulesSource] = []
+    for path in config.rules_files:
+        text, sha12 = _read_rules_file(path)
+        parsed = parse_rules_text(text, str(path), config.clause_id_pattern)
+        if not parsed:
+            raise RatchetError(f"{path}: no clause definitions found with clause_id_pattern {config.clause_id_pattern!r}")
+        for clause_id, clause in parsed.items():
+            if clause_id in origin:
+                raise RatchetError(f"{path}:{clause.line}: clause {clause_id} is already defined in {origin[clause_id]}")
+            origin[clause_id] = f"{path}:{clause.line}"
+            clauses[clause_id] = clause
+        for family, (severity, where) in parse_severity_table(text, str(path)).items():
+            _set_family(families, family, severity, where)
+        sources.append(RulesSource(path, sha12))
+
+    id_by_kebab: dict[str, str] = {}
+    for clause_id in clauses:
+        key = _kebab_key(clause_id)
+        if key in id_by_kebab:
+            raise RatchetError(f"clauses {id_by_kebab[key]} and {clause_id} collide when normalized to {key!r}")
+        id_by_kebab[key] = clause_id
+
+    family_severity = {family: severity for family, (severity, _) in families.items()}
+    rules = Rules(clauses, family_severity, dict(config.tool_rule_map), dict(config.scenarios), id_by_kebab, tuple(sources))
+    _check_config_references(rules)
+    return rules
+
+
+def _check_config_references(rules: Rules) -> None:
+    for tool_id, clause_id in rules.tool_rule_map.items():
+        if not TOOL_ID_RE.match(tool_id):
+            raise RatchetError(f"config tool_rule_map key {tool_id!r} must look like '<tool>:<code>'")
+        if not rules.is_known_clause(clause_id):
+            raise RatchetError(f"config tool_rule_map maps {tool_id!r} to {clause_id!r}, which no rules file defines")
+    for rule_id in rules.scenarios:
+        if not (rule_id == UNMAPPED or rules.is_known_clause(rule_id) or TOOL_ID_RE.match(rule_id)):
+            raise RatchetError(f"config scenarios key {rule_id!r} is not a known clause, 'unmapped' or '<tool>:<code>'")
