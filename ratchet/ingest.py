@@ -55,6 +55,55 @@ def extract_review_items(text: str) -> list[dict[str, Any]]:
                        f"(whole-input parse: {whole_problem}){detail}")
 
 
+# One string field on its own line, as a pretty-printed review prints them. The value runs to the last quote on the line.
+_STRING_FIELD_RE = re.compile(r'^(?P<head>\s*"(?:file|summary|failure_scenario|category|severity)"\s*:\s*")(?P<value>.*?)(?P<tail>"\s*,?\s*)$')
+
+
+def _escape_stray_quotes(value: str) -> tuple[str, int]:
+    """`value` with every double quote that is not already escaped escaped, and how many that was."""
+    out: list[str] = []
+    fixed = 0
+    escaped = False
+    for char in value:
+        if char == '"' and not escaped:
+            out.append("\\")
+            fixed += 1
+        out.append(char)
+        escaped = char == "\\" and not escaped
+    return "".join(out), fixed
+
+
+def escape_stray_quotes(text: str) -> tuple[str, int]:
+    """Models quote code in their findings (`config["key"]`) and sometimes forget to escape the quotes, which makes the
+    whole array invalid JSON. Escape them inside the one-line string fields of the known schema; touch nothing else."""
+    lines: list[str] = []
+    total = 0
+    for line in text.splitlines(keepends=True):
+        match = _STRING_FIELD_RE.match(line.rstrip("\r\n"))
+        if match is None:
+            lines.append(line)
+            continue
+        value, fixed = _escape_stray_quotes(match.group("value"))
+        total += fixed
+        lines.append(match.group("head") + value + match.group("tail") + line[len(line.rstrip("\r\n")):])
+    return "".join(lines), total
+
+
+def extract_review_items_lenient(text: str) -> tuple[list[dict[str, Any]], int]:
+    """(items, number of stray quotes escaped). The strict reading is tried first and decides every input that already
+    parses; only a failure is retried on the repaired text, and if that still fails the original error is the one raised."""
+    try:
+        return extract_review_items(text), 0
+    except RatchetError as strict_error:
+        repaired, fixed = escape_stray_quotes(text)
+        if fixed == 0:
+            raise
+        try:
+            return extract_review_items(repaired), fixed
+        except RatchetError:
+            raise strict_error from None
+
+
 def _text_field(item: dict[str, Any], key: str, number: int) -> str:
     value = item.get(key)
     if not isinstance(value, str) or not value.strip():
@@ -133,6 +182,7 @@ class _Candidate:
     failure_scenario: str
     rule_code: str
     rule_id: str
+    rule_id_source: str  # "model" or "attributed"
     severity: str
     severity_defaulted: bool
 
@@ -142,14 +192,32 @@ class IngestResult:
     events: list[Event]
     merged_count: int  # reviewer items folded into another finding's also_matches
     unmapped_count: int
+    attributed_count: int  # no category given; the clause was read out of the summary or failure scenario
     severity_filled_count: int  # reviewer gave no usable severity; taken from the rules file or defaulted
+
+
+def _label(item: dict[str, Any], summary: str, rules: Rules) -> tuple[str, str, str]:
+    """(rule_id, rule_code, rule_id_source) for one review item.
+
+    A `category` the model gave is its answer, right or wrong: a known clause id in kebab-case, else `unmapped`, and
+    `rule_code` keeps what it wrote. Without one (missing, empty, not a string) the first known clause id mentioned in
+    the summary, then in the failure scenario, is taken instead (`attributed`); no mention at all is `unmapped`.
+    """
+    category = item.get("category")
+    category_text = category.strip() if isinstance(category, str) else ""
+    if category_text:
+        return rules.from_kebab(category_text) or UNMAPPED, category_text, "model"
+    scenario = item.get("failure_scenario")
+    mention = rules.first_clause_mention(summary) or rules.first_clause_mention(scenario if isinstance(scenario, str) else "")
+    if mention is None:
+        return UNMAPPED, UNMAPPED, "model"
+    return mention[0], mention[1], "attributed"
 
 
 def _candidate(number: int, item: dict[str, Any], rules: Rules) -> _Candidate:
     """Normalize one review item. `category` and `severity` are optional extras the model may get wrong."""
-    category = item.get("category")
-    category_text = category if isinstance(category, str) else ""
-    rule_id = rules.from_kebab(category_text) or UNMAPPED
+    summary = _text_field(item, "summary", number)
+    rule_id, rule_code, rule_id_source = _label(item, summary, rules)
     claimed_severity = item.get("severity")
     severity_defaulted = claimed_severity not in SEVERITIES
     severity = (rules.severity_of(rule_id) or "should-fix") if severity_defaulted else claimed_severity
@@ -157,10 +225,11 @@ def _candidate(number: int, item: dict[str, Any], rules: Rules) -> _Candidate:
         order=number,
         file=_text_field(item, "file", number).strip(),
         line=_line_field(item, number),
-        summary=_text_field(item, "summary", number),
+        summary=summary,
         failure_scenario=_scenario(item, rule_id, rules, number),
-        rule_code=category_text.strip() or UNMAPPED,
+        rule_code=rule_code,
         rule_id=rule_id,
+        rule_id_source=rule_id_source,
         severity=severity,
         severity_defaulted=severity_defaulted,
     )
@@ -170,7 +239,7 @@ def code_review_events(items: list[dict[str, Any]], *, config: Config, rules: Ru
                        verdict: str, sha: str, ts: str, discovered_at: str | None) -> IngestResult:
     """Findings on the same file+line collapse into one: the most severe is primary, the rest go to also_matches.
 
-    display_ids are `<run_id>-001`, `-002`, ... in input order after collapsing, so re-ingesting the same review is a no-op.
+    display_ids are `<run_id>-1`, `-2`, ... in input order after collapsing, so re-ingesting the same review is a no-op.
     """
     candidates = [_candidate(number, item, rules) for number, item in enumerate(items, start=1)]
     groups: dict[tuple[str, int], list[_Candidate]] = {}
@@ -180,14 +249,14 @@ def code_review_events(items: list[dict[str, Any]], *, config: Config, rules: Ru
     events: list[Event] = []
     for position, group in enumerate(groups.values(), start=1):
         primary = min(group, key=lambda c: (SEVERITIES.index(c.severity), c.order))
-        display_id = f"{run_id}-{position:03d}"
+        display_id = f"{run_id}-{position}"
         finding: Event = {
             "v": 1, "kind": "finding", "id": f"{config.repo_slug}:{source}:{run_id}:{display_id}",
             "display_id": display_id, "run_id": run_id, "repo": config.repo_slug, "source": source, "ts": ts,
             "sha": sha, "file": primary.file, "line": primary.line, "rule_code": primary.rule_code,
             "rule_id": primary.rule_id, "category": category_of(primary.rule_id), "severity": primary.severity,
             "summary": primary.summary, "failure_scenario": primary.failure_scenario, "verdict": verdict,
-            "rule_id_source": "model",
+            "rule_id_source": primary.rule_id_source,
         }
         if discovered_at is not None:
             finding["discovered_at"] = discovered_at
@@ -202,5 +271,6 @@ def code_review_events(items: list[dict[str, Any]], *, config: Config, rules: Ru
         events=events,
         merged_count=len(candidates) - len(groups),
         unmapped_count=sum(1 for c in candidates if c.rule_id == UNMAPPED),
+        attributed_count=sum(1 for c in candidates if c.rule_id_source == "attributed"),
         severity_filled_count=sum(1 for c in candidates if c.severity_defaulted),
     )

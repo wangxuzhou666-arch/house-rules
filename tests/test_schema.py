@@ -4,7 +4,7 @@ import unittest
 
 import support  # noqa: F401  (puts the repo root on sys.path)
 import schema_check
-from support import FIXTURES, REPO_ROOT, gate_finding, gate_pass, review_finding
+from support import FIXTURES, REPO_ROOT, gate_finding, gate_pass, review_finding, review_round
 
 from ratchet import ledger
 
@@ -34,6 +34,12 @@ class LegacyLedgerTest(unittest.TestCase):
         new_fields = {"discovered_at", "also_matches", "rule_id_source"}
         self.assertFalse(any(new_fields & set(event) for event in self.lines))
 
+    def test_review_run_events_change_neither_the_fold_nor_what_is_open(self) -> None:
+        events = ledger.read_events(self.path)
+        with_rounds = [review_round("main@abc", run="r1"), *events, review_round("main@abc", run="r2", round=2)]
+        self.assertEqual(ledger.fold(with_rounds), ledger.fold(events))
+        self.assertEqual(ledger.open_findings(with_rounds), ledger.open_findings(events))
+
     def test_loads_and_folds(self) -> None:
         events = ledger.read_events(self.path)
         self.assertEqual(len(events), 9)
@@ -56,7 +62,9 @@ class SchemaAgreementTest(unittest.TestCase):
                    "outcome_by": "auto:commit", "evidence": "commit 1234abcd subject", "ts": "2026-01-08T00:00:00"}
         unmapped = review_finding("R2-002", run="R2", rule_id="unmapped", category="unmapped")
         tool = gate_finding("src/x.py", rule_id="eslint:no-unused-vars", rule_code="no-unused-vars")
-        return [full, outcome, unmapped, tool, gate_pass(["a.py"])]
+        rounds = [review_round(), review_round("target:42", run="R7", round=4, over_cap=True, finding_count=3, source="file"),
+                  review_round("main@unborn", max_rounds=1)]
+        return [full, outcome, unmapped, tool, gate_pass(["a.py"]), *rounds]
 
     def bad_events(self) -> list[dict]:
         base = review_finding()
@@ -80,6 +88,12 @@ class SchemaAgreementTest(unittest.TestCase):
         cases += [gate_finding("a.py", run_id="not-gate"), gate_finding("a.py", display_id="short"),
                   gate_pass([]), gate_pass(["a.py"], ts="bad"), {"v": 1, "kind": "outcome", "id": "x"},
                   {"v": 1, "kind": "mystery"}, "not an object"]
+        cases += [review_round(round=0), review_round(round=True), review_round(round="1"), review_round(max_rounds=0),
+                  review_round(over_cap="yes"), review_round(over_cap=1), review_round(finding_count=-1),
+                  review_round(finding_count=True), review_round(source="human"), review_round(round_key=""),
+                  review_round(run="has space"), review_round(repo="Has Caps"), review_round(ts="today"),
+                  review_round(extra_field=1), {k: v for k, v in review_round().items() if k != "round_key"},
+                  {k: v for k, v in review_round().items() if k != "over_cap"}, {**review_round(), "v": 2}]
         return cases
 
     def test_accepted_events_agree(self) -> None:
@@ -101,9 +115,10 @@ class SchemaAgreementTest(unittest.TestCase):
         self.assertEqual(tuple(SCHEMA["$defs"]["severity"]["enum"]), ledger.SEVERITIES)
         self.assertEqual(tuple(outcome["outcome"]["enum"]), ledger.OUTCOMES)
         self.assertEqual(tuple(outcome["outcome_by"]["enum"]), ledger.OUTCOME_BY)
+        self.assertEqual(tuple(SCHEMA["$defs"]["review_run"]["properties"]["source"]["enum"]), ledger.REVIEW_RUN_SOURCES)
 
     def test_field_sets_in_code_match_the_schema_file(self) -> None:
-        for kind in ("finding", "outcome", "gate_pass"):
+        for kind in ("finding", "outcome", "gate_pass", "review_run"):
             definition = SCHEMA["$defs"][kind]
             checks, optional = ledger._FIELDS_BY_KIND[kind]
             self.assertEqual(set(checks), set(definition["properties"]), kind)

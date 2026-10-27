@@ -11,6 +11,7 @@ from typing import Any
 _TYPES = {
     "string": lambda v: isinstance(v, str),
     "integer": lambda v: type(v) is int,
+    "boolean": lambda v: type(v) is bool,
     "array": lambda v: isinstance(v, list),
     "object": lambda v: isinstance(v, dict),
 }

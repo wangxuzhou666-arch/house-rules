@@ -219,3 +219,11 @@ def review_finding(display_id: str = "R1-001", source: str = "l1", run: str = "R
 
 def gate_pass(files: list[str], ts: str = "2026-01-06T10:00:00", sha: str = "1f2e3d4c") -> dict:
     return {"v": 1, "kind": "gate_pass", "repo": "demo-repo", "ts": ts, "sha": sha, "files": files}
+
+
+def review_round(key: str = "main@0a1b2c3d4e5f", **overrides: object) -> dict:
+    """A `review_run` ledger event: one review round of the change named `key`."""
+    event = {"v": 1, "kind": "review_run", "repo": "demo-repo", "ts": "2026-01-07T11:00:00", "run": "r1", "round_key": key,
+             "round": 1, "max_rounds": 3, "over_cap": False, "finding_count": 0, "source": "claude"}
+    event.update(overrides)
+    return event

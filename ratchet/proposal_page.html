@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; base-uri 'none'; form-action 'none'">
+<title>规则调整确认 · Rule proposals</title>
+<style>
+body{font:16px/1.6 system-ui,sans-serif;background:#f5f5f2;color:#222;margin:0;padding:32px}main{max-width:1000px;margin:auto}h1{font-size:28px}h2{font-size:21px;margin:0}article{background:white;border:1px solid #d6d9d2;border-radius:12px;padding:24px;margin:24px 0}pre,textarea{white-space:pre-wrap;overflow-wrap:anywhere;background:#f7f8f5;padding:14px;border:1px solid #d6d9d2;border-radius:6px;font:14px/1.5 ui-monospace,monospace}textarea{width:100%;box-sizing:border-box;min-height:110px}label{display:block;margin:8px 0}select,input,button{font:inherit;padding:8px;border:1px solid #9da69d;border-radius:5px}button{background:#1d4938;color:white;cursor:pointer}button:disabled{opacity:.45;cursor:default}.muted{color:#58645d}.columns{display:grid;grid-template-columns:1fr 1fr;gap:16px}#output{height:160px}#status{min-height:26px}details{margin:12px 0}summary{cursor:pointer}@media(max-width:700px){body{padding:16px}.columns{grid-template-columns:1fr}}
+</style>
+<main><h1>逐条确认规则调整</h1><p>每条提案都需要你的选择。默认不批准；页面只生成确认结果，不修改文件。改写后请再次核对完整规则文本。</p><p class="muted">Review each proposal. Nothing is pre-approved. This offline page exports decisions; the CLI validates the saved baseline before applying them.</p><div id="cards"></div><label>确认人 / Confirmed by <input id="person" autocomplete="off" placeholder="你的名字或本地代号"></label><button id="export" disabled>生成确认 JSON / Generate decisions</button> <button id="copy" disabled>复制 / Copy</button><p id="status" role="status"></p><textarea id="output" readonly aria-label="确认 JSON"></textarea></main>
+<script id="batch" type="application/json">__BATCH_JSON__</script>
+<script>
+'use strict';
+const batch = JSON.parse(document.getElementById('batch').textContent);
+const cards = document.getElementById('cards'), choices = [];
+function element(tag, text, parent) { const node = document.createElement(tag); if(text !== undefined) node.textContent = text; if(parent) parent.append(node); return node; }
+function invalidate() { document.getElementById('output').value=''; document.getElementById('copy').disabled=true; document.getElementById('export').disabled=!document.getElementById('person').value.trim() || choices.some(x=>!x.select.value || (x.select.value==='rewrite'&&!x.edit.value.trim())); }
+for(const p of batch.proposals) {
+ const card = element('article',undefined,cards); element('h2',p.id+' · '+p.rule_id+' · '+p.action,card); element('p',p.rationale,card); element('p','文件 / File: '+p.file,card);
+ const columns=element('div',undefined,card); columns.className='columns'; const before=element('div',undefined,columns), after=element('div',undefined,columns);
+ element('strong','当前规则 / Before',before); element('pre',p.before||'（新增 / New clause）',before);
+ element('strong','提案规则 / Proposed',after); element('pre',p.action==='retire'?'退役，保留 ID / Retire and reserve ID':p.after,after);
+ const evidence=element('details',undefined,card); element('summary','查看证据 / Evidence ('+p.evidence_ids.length+')',evidence);
+ for(const id of p.evidence_ids) {const item=batch.evidence[id],f=item.finding; element('pre',id+'\n'+f.file+':'+f.line+'\n'+f.summary+'\n'+f.failure_scenario+'\nOutcome: '+(item.outcome?item.outcome.outcome:'unlabeled'),evidence);}
+ const label=element('label','你的决定 / Decision ',card), select=element('select',undefined,label);
+ for(const [v,t] of [['','请选择 / Choose'],['accept','采纳原提案 / Accept'],['rewrite','改写后采纳 / Rewrite'],['reject','驳回 / Reject']]) {if(p.action==='retire'&&v==='rewrite')continue; const option=element('option',t,select); option.value=v;}
+ const edit=element('textarea',undefined,card); edit.value=p.after; edit.hidden=true; edit.setAttribute('aria-label',p.id+' 改写全文 / Full replacement');
+ select.addEventListener('change',()=>{edit.hidden=select.value!=='rewrite';invalidate();});edit.addEventListener('input',invalidate);choices.push({p,select,edit});
+}
+document.getElementById('person').addEventListener('input',invalidate);
+document.getElementById('export').addEventListener('click',()=>{
+ if(document.getElementById('export').disabled)return;
+ const decisions=choices.map(({p,select,edit})=>{const d={id:p.id,decision:select.value};if(d.decision==='rewrite')d.after=edit.value;return d;});
+ document.getElementById('output').value=JSON.stringify({v:1,batch_id:batch.id,confirmed_by:document.getElementById('person').value.trim(),decisions},null,2);document.getElementById('copy').disabled=false;document.getElementById('status').textContent='结果已生成；请交回执行工具。 / Generated; return this JSON to the CLI operator.';
+});
+document.getElementById('copy').addEventListener('click',async()=>{const output=document.getElementById('output');try{await navigator.clipboard.writeText(output.value);document.getElementById('status').textContent='已复制 / Copied';}catch(e){output.focus();output.select();document.getElementById('status').textContent='请按 Cmd/Ctrl+C 复制 / Press Cmd/Ctrl+C';}});
+</script></html>

@@ -75,6 +75,41 @@ class DryRunTest(RepoCase):
         self.assertEqual(printed, written)
 
 
+class CountByRuleTest(RepoCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.with_sample_rules()
+
+    def ingest(self, *items: dict) -> None:
+        self.cli_ok("ingest-code-review", "--source", "l1", "--run", "R1", stdin=json.dumps(list(items)))
+
+    def test_by_rule_alone_prints_plain_counts(self) -> None:
+        self.ingest(review_item(category="p0e-1"), review_item(line=2, summary="Breaks P0E.1"))
+        self.assertIn("  P0E.1: 2\n", self.cli_ok("count", "--by-rule"))
+
+    def test_label_source_splits_each_rule_by_how_it_was_labeled(self) -> None:
+        self.ingest(review_item(category="p0e-1"), review_item(line=2, category="p0e-1"), review_item(line=3, summary="Breaks P0E.1"),
+                    review_item(line=4, summary="No clause named"))
+        out = self.cli_ok("count", "--by-rule", "--label-source")
+        self.assertIn("  P0E.1: 3 (model 2, attributed 1)\n", out)
+        self.assertIn("  unmapped: 1 (model 1)\n", out)
+
+    def test_events_from_before_the_field_existed_are_counted_as_none(self) -> None:
+        self.append_raw(review_finding("R1-001", rule_id="P1.1"), review_finding("R1-002", rule_id="P1.1", line=11, rule_id_source="human"))
+        self.assertIn("  P1.1: 2 (human 1, none 1)\n", self.cli_ok("count", "--by-rule", "--label-source"))
+
+    def test_label_source_without_by_rule_is_refused(self) -> None:
+        code, _, err = self.cli("count", "--label-source")
+        self.assertEqual(code, 1)
+        self.assertIn("add --by-rule", err)
+
+    def test_only_open_findings_are_counted(self) -> None:
+        self.ingest(review_item(category="p0e-1"))
+        self.commit("fix: x", "Fixes-Finding: R1-1")
+        self.cli_ok("infer")
+        self.assertNotIn("P0E.1", self.cli_ok("count", "--by-rule", "--label-source"))
+
+
 class ConfigTest(RepoCase):
     def slug_of_new_finding(self) -> str:
         self.add_findings([report_item(rule_id="unmapped")])

@@ -21,12 +21,14 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 from typing import Iterator
 
 from .config import Config
 from .errors import RatchetError
 from .ledger import SEVERITIES, UNMAPPED
+from .sources import DiskReader, FileReader
 
 TOOL_ID_RE = re.compile(r"^[a-z][a-z0-9_-]*:[A-Za-z0-9_.@/-]+$")
 
@@ -185,6 +187,15 @@ def _kebab_key(text: str) -> str:
     return re.sub(r"[.\s_]+", "-", text.strip().lower())
 
 
+def _mention_pattern(kebab_keys: list[str]) -> re.Pattern[str]:
+    """One regex for "a known clause id as a whole token, in any of the notations `P0E.2`, `p0e-2`, `P0E_2`".
+
+    Neighbouring letters or digits disqualify a hit, so `P1.1` is not found inside `P1.10`; a sentence-ending dot does not.
+    """
+    parts_joined = ["[.\\-_]".join(re.escape(part) for part in key.split("-")) for key in kebab_keys]
+    return re.compile(rf"(?<![A-Za-z0-9])(?:{'|'.join(parts_joined)})(?![A-Za-z0-9])", re.IGNORECASE)
+
+
 @dataclass(frozen=True)
 class Rules:
     clauses: dict[str, Clause]  # definition order: files in config order, lines in file order
@@ -207,6 +218,19 @@ class Rules:
     def from_kebab(self, text: str) -> str | None:
         """`p0e-6` -> `P0E.6`; None when it names no known clause."""
         return self.id_by_kebab.get(_kebab_key(text))
+
+    @cached_property
+    def _mention_re(self) -> re.Pattern[str]:
+        return _mention_pattern(list(self.id_by_kebab))
+
+    def first_clause_mention(self, text: str) -> tuple[str, str] | None:
+        """(clause id, the token as written) for the first known clause id found in free text, else None."""
+        if not self.id_by_kebab:
+            return None
+        match = self._mention_re.search(text)
+        if match is None:
+            return None
+        return self.id_by_kebab[_kebab_key(match.group())], match.group()
 
     def resolve_reported(self, raw: str) -> tuple[str, str | None]:
         """(rule_id, rule_id_source) for an id supplied in a report. Unknown clause ids are rejected, never coerced."""
@@ -231,12 +255,11 @@ def category_of(rule_id: str) -> str:
     return family_of(rule_id)
 
 
-def _read_rules_file(path: Path) -> tuple[str, str]:
+def _read_rules_file(path: Path, reader: FileReader) -> tuple[str, str]:
     """(text, sha12 of the bytes)."""
-    try:
-        raw_bytes = path.read_bytes()
-    except OSError as exc:
-        raise RatchetError(f"cannot read rules file {path}: {exc}") from exc
+    raw_bytes = reader.read(path)
+    if raw_bytes is None:
+        raise RatchetError(f"cannot read rules file {path}: not found in {reader.label}{reader.missing_hint}")
     try:
         text = raw_bytes.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -244,13 +267,13 @@ def _read_rules_file(path: Path) -> tuple[str, str]:
     return text, hashlib.sha256(raw_bytes).hexdigest()[:12]
 
 
-def load_rules(config: Config) -> Rules:
+def load_rules(config: Config, reader: FileReader = DiskReader()) -> Rules:
     clauses: dict[str, Clause] = {}
     origin: dict[str, str] = {}
     families: dict[str, tuple[str, str]] = {}
     sources: list[RulesSource] = []
     for path in config.rules_files:
-        text, sha12 = _read_rules_file(path)
+        text, sha12 = _read_rules_file(path, reader)
         parsed = parse_rules_text(text, str(path), config.clause_id_pattern)
         if not parsed:
             raise RatchetError(f"{path}: no clause definitions found with clause_id_pattern {config.clause_id_pattern!r}")

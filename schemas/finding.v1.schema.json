@@ -1,11 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Findings ledger event (v1)",
-  "description": "One JSON object per line of an append-only, repo-local ledger (default `.style-findings.jsonl` at the main worktree root). Three event kinds share the file: `finding` (something was flagged), `outcome` (what became of it), `gate_pass` (an automated gate passed over these files). The current state of a finding is the fold of its events in file order: it is open until an `outcome` for its id appears; a later `finding` with the same id after an outcome re-opens it (gate source only; l1/l2 re-adds are ignored). `rule_id` is one of: a clause id defined in the repo's configured rules files, `unmapped`, or `<tool>:<code>` (for example `ruff:F811`). This schema only checks the shape of a rule id; whether a clause exists is checked against the rules files when an event is written, not when old events are read. IDs: l1/l2 -> `<repo>:<source>:<run_id>:<display_id>`; gate -> `<repo>:gate:<sha1 of file|rule_code|whitespace-stripped line text, first 12 hex>`, so repeats of one issue fold into one finding (gate events carry run_id `gate` and a display_id equal to the 12-hex hash). `ts` is local time without a timezone. Fields added after the first v1 ledgers (`discovered_at`, `also_matches`, `rule_id_source`) are optional, and every line of an older v1 ledger still validates.",
+  "description": "One JSON object per line of an append-only, repo-local ledger (default `.style-findings.jsonl` at the main worktree root). Four event kinds share the file: `finding` (something was flagged), `outcome` (what became of it), `gate_pass` (an automated gate passed over these files), `review_run` (one review round of a change happened; it counts toward the round cap and does not change any finding). The current state of a finding is the fold of its events in file order: it is open until an `outcome` for its id appears; a later `finding` with the same id after an outcome re-opens it (gate source only; l1/l2 re-adds are ignored). `rule_id` is one of: a clause id defined in the repo's configured rules files, `unmapped`, or `<tool>:<code>` (for example `ruff:F811`). This schema only checks the shape of a rule id; whether a clause exists is checked against the rules files when an event is written, not when old events are read. IDs: l1/l2 -> `<repo>:<source>:<run_id>:<display_id>`; gate -> `<repo>:gate:<sha1 of file|rule_code|whitespace-stripped line text, first 12 hex>`, so repeats of one issue fold into one finding (gate events carry run_id `gate` and a display_id equal to the 12-hex hash). `ts` is local time without a timezone. Fields added after the first v1 ledgers (`discovered_at`, `also_matches`, `rule_id_source`) are optional, the `review_run` kind is additive, and every line of an older v1 ledger still validates.",
   "oneOf": [
     { "$ref": "#/$defs/finding" },
     { "$ref": "#/$defs/outcome" },
-    { "$ref": "#/$defs/gate_pass" }
+    { "$ref": "#/$defs/gate_pass" },
+    { "$ref": "#/$defs/review_run" }
   ],
   "$defs": {
     "ts": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}$" },
@@ -56,7 +57,7 @@
             }
           }
         },
-        "rule_id_source": { "enum": ["model", "human", "tool", "attributed"], "description": "Optional. Where the rule_id came from: a model's category, a human, a tool code mapped through tool_rule_map, or a later attribution step. Absent on older events." }
+        "rule_id_source": { "enum": ["model", "human", "tool", "attributed"], "description": "Optional. Where the rule_id came from: `model` (the category a reviewing model gave, or its lack of one when nothing could be read from its text: then rule_id is unmapped), `human`, `tool` (a tool code, possibly mapped through tool_rule_map), or `attributed` (the model gave no category and the clause id was read out of its summary or failure scenario). Absent on older events." }
       },
       "allOf": [
         {
@@ -99,6 +100,24 @@
         "ts": { "$ref": "#/$defs/ts" },
         "sha": { "$ref": "#/$defs/sha" },
         "files": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "review_run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["v", "kind", "repo", "ts", "run", "round_key", "round", "max_rounds", "over_cap", "finding_count", "source"],
+      "properties": {
+        "v": { "const": 1 },
+        "kind": { "const": "review_run" },
+        "repo": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+        "ts": { "$ref": "#/$defs/ts" },
+        "run": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$", "description": "The review's run id (the prefix of its findings' display_ids)." },
+        "round_key": { "type": "string", "minLength": 1, "description": "Names the change under review: `target:<T>` for a --target, else `<branch>@<first 12 hex of the fork point from the default branch>` (`<branch>@unborn` before the first commit). Rounds are counted per key." },
+        "round": { "type": "integer", "minimum": 1, "description": "1 + the review_run events with this round_key written before this one." },
+        "max_rounds": { "type": "integer", "minimum": 1, "description": "The max_review_rounds in force when the review ran." },
+        "over_cap": { "type": "boolean", "description": "True when round > max_rounds, which only a run with --over-cap gets to." },
+        "finding_count": { "type": "integer", "minimum": 0, "description": "Findings the review contained, whether or not they were new to the ledger." },
+        "source": { "enum": ["claude", "file"], "description": "`claude` (ratchet ran the review) or `file` (--from-file)." }
       }
     }
   }

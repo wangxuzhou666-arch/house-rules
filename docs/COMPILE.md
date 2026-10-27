@@ -34,13 +34,14 @@ P3.1 | nice | Explain why, not what
 R.1 | Standards come from this file, not from the reviewer
 
 ## Labeling
-...
+
+When you report findings as a JSON array, every finding object MUST carry two keys ...
 ```
 
 - **Header**: a single comment naming every rules file, relative to the repo root, with the first 12 hex digits of the sha256 of its bytes. Edit a source and its hash changes, so a stale digest is visible at a glance.
 - **Violations**: `ID | severity | short rule` for every clause that has a severity (see below), in rules-file order.
 - **Reviewer rules**: `ID | short rule` for the clauses that have none: guidance about how to review, not code defects.
-- **Labeling**: fixed text telling the reporter to set `category` to the violated clause id in kebab-case (`P0E.6` becomes `p0e-6`, which is what `ingest-code-review` reads) and `severity` to the one listed under Violations; to use `unmapped` rather than stretch a clause to fit; and to file one finding per defect, naming other matching ids in the summary.
+- **Labeling**: fixed text, the same for every repo. It says that every finding object in the JSON array a reviewer prints MUST carry two keys besides `file`, `line`, `summary` and `failure_scenario`: `"category"`, the violated clause id in kebab-case (`P0E.6` becomes `p0e-6`, which is what `ingest-code-review` reads) or `"unmapped"` when no clause truly matches (better than stretching a clause), and `"severity"`, one of `blocker`, `should-fix`, `nice`, as listed for that clause under Violations. A one-line example object shows the shape, and the text ends with: one finding per defect, other matching ids named in the summary. The wording is an order, not a suggestion, because a model that is only asked to label tends to cite ids in the summary ("(P0E.2, ...)") and leave the keys out. `ingest-code-review` reads such prose as a fallback ([LEDGER.md](LEDGER.md#commands)), but the keys are the reliable path.
 
 A section with no lines shows `(none)`.
 
@@ -84,6 +85,7 @@ The text of a clause line after its id, reduced deterministically:
 3. The text is cut at the first sentence end: the CJK full stop (U+3002), the CJK semicolon (U+FF1B), or `.` / `;` followed by whitespace or the end of the text. (`os.path` and `1.5` are not cut.) A sentence end inside an open bracket pair does not count, so a parenthetical is never cut in half. Tracked pairs: `()`, `[]` and the full-width parentheses (U+FF08/U+FF09), lenticular brackets (U+3010/U+3011) and corner brackets (U+300C/U+300D); nesting is followed. If a bracket is never closed, the text is not cut at all.
 4. Trailing whitespace, `:` and the full-width colon (U+FF1A) are removed. A clause line that ends in a colon introducing sub-bullets (which the digest does not carry) would otherwise end mid-sentence.
 5. If it is longer than `digest_max_chars` characters (default 90; characters, not bytes), it is cut to `digest_max_chars - 1` characters plus an ellipsis character (U+2026), so the result is never longer than the cap. The cap may land inside a bracket; the ellipsis marks the truncation.
+6. If that cut lands inside a backtick code span, it backs off to just before the span's opening backticks (trailing spaces dropped), then the ellipsis, so a rule does not end in an unclosed code span. A span closes at a backtick run of the same length as the run that opened it. If the back-off would leave less than half of `digest_max_chars`, the normal cut is kept: a cut span is better than a nearly empty rule.
 
 Only the clause's own line is read, never the lines after it. For a table-row clause (`| P2.3 | should-fix | text |`) the text is the cells after the id, minus a severity cell.
 
@@ -110,7 +112,17 @@ To put the same sections inside an existing file (for example a `CLAUDE.md` that
 <!-- style-digest:end -->
 ```
 
-Compile replaces everything between the markers with a one-line source comment followed by the Violations, Reviewer rules and Labeling sections (no title line, so it nests under your own headings). Text outside the markers is never touched. Each marker must appear exactly once and the begin marker must come first; a missing, duplicated or reversed marker, or a target that does not exist, is an error. Compile validates every target before it writes anything, so one bad target leaves all files, the digest included, as they were.
+Compile replaces everything between the markers with a one-line source comment followed by the Violations, Reviewer rules and Labeling sections (no title line, so it nests under your own headings). Text outside the markers is never touched.
+
+A target can ask for fewer sections. Give it as an object with a `sections` list instead of a bare path:
+
+```json
+{ "inject_targets": ["CLAUDE.md", { "path": "AGENTS.md", "sections": ["violations", "labeling"] }] }
+```
+
+The names are `violations`, `reviewer` and `labeling`. The block always writes them in the digest's order, whatever order the list has. A bare path (or an object without `sections`) gets all three; the digest file itself always holds all three. An empty list, an unknown name, a name twice, any other key in the object, or the same path listed twice is an error.
+
+Each marker must appear exactly once and the begin marker must come first; a missing, duplicated or reversed marker, or a target that does not exist, is an error. Compile validates every target before it writes anything, so one bad target leaves all files, the digest included, as they were.
 
 ## Check mode
 
@@ -124,11 +136,28 @@ run `ratchet compile` to regenerate
 
 Use it in a pre-commit hook or CI to catch a rules edit committed without its regenerated digest. Hand edits inside an injected block, or to the digest, count as stale; edits outside the markers do not.
 
+### `--check --staged`
+
+A plain `--check` compares the working tree, so it passes when you regenerated the digest but forgot to `git add` it. In a pre-commit hook that is the mistake you want caught, so `--check --staged` compares what the next commit will contain: the rules files, the digest and the injected targets are read from the git index (`git show :<path>`), not from disk.
+
+```
+stale: CODING-STYLE.digest.md (digest, the STAGED version is out of date)
+this check reads what is staged, not the working tree: run `ratchet compile` if the working tree is stale too, then `git add CODING-STYLE.digest.md`
+```
+
+The message says *staged* because the working-tree digest may well be fresh: it is the copy in the index that is behind. The `git add` line names every stale file.
+
+- A digest that is not in the index is reported as `(digest, not staged)`. A rules file or inject target that is not in the index is an error that says so (`git add` it): the commit would contain no version of it. Errors about a staged file name it as `staged copy of <file>`. The usual one is ``staged copy of CLAUDE.md has no style-digest markers (the working tree copy does); stage it with `git add CLAUDE.md` ``: you added the markers but have not staged them.
+- An edit that is only in the working tree is not looked at: a file staged in full, or left alone, is judged as the commit will have it.
+- The config (`.ratchet.json`) is always read from the working tree. A rules file outside the repository (a shared `../rules.md`) cannot be staged and is read from disk.
+- Inside a hook, `GIT_INDEX_FILE` is honored, so `git commit <path>` (which builds a temporary index) is checked against that index. In a linked worktree the worktree's own index is used.
+- `--staged` only applies to `--check`; `ratchet init` installs a pre-commit hook that runs it.
+
 `ratchet compile --dry-run` prints a unified diff of what a real run would change and writes nothing. Both modes still run every validation.
 
 ## Size budget
 
-`digest_max_bytes` (default 4096, measured in UTF-8 bytes of the digest file) is a budget, not a hard limit: going over prints a warning on stderr and the digest is still written. With `--strict` the command then exits 1, so CI can enforce it. Text in languages with multi-byte characters costs about three bytes per character; lower `digest_max_chars` or add override comments if the digest runs over.
+`digest_max_bytes` (default 4096, measured in UTF-8 bytes of the digest file) is a budget, not a hard limit: going over prints a warning on stderr that names the digest file, for example `warning: digest CODING-STYLE.digest.md is 5120 bytes, over digest_max_bytes 4096`, and the digest is still written. With `--strict` the command then exits 1, so CI can enforce it. Text in languages with multi-byte characters costs about three bytes per character; lower `digest_max_chars` or add override comments if the digest runs over.
 
 ## Config keys
 
@@ -137,7 +166,7 @@ Use it in a pre-commit hook or CI to catch a rules edit committed without its re
 | `digest` | `CODING-STYLE.digest.md` | digest output path, relative to the repo root |
 | `digest_max_chars` | `90` | cap for one short rule, in characters (positive integer) |
 | `digest_max_bytes` | `4096` | size budget for the digest, in bytes (positive integer) |
-| `inject_targets` | `[]` | files that carry a `style-digest` marker pair to fill |
+| `inject_targets` | `[]` | files that carry a `style-digest` marker pair to fill: a path, or `{"path": ..., "sections": [...]}` to choose sections ([Injection](#injection)) |
 
 `rules_files` and `clause_id_pattern` (see [LEDGER.md](LEDGER.md#config-ratchetjson)) decide which clauses exist.
 

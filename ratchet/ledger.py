@@ -1,7 +1,8 @@
 """The append-only ledger: event validation, file IO, and the fold that turns events into current state.
 
-Three event kinds share one JSON-lines file: `finding` (something was flagged), `outcome` (what became of it) and
-`gate_pass` (an automated gate passed over these files). Current state = fold of the events in file order.
+Four event kinds share one JSON-lines file: `finding` (something was flagged), `outcome` (what became of it),
+`gate_pass` (an automated gate passed over these files) and `review_run` (one review round of a change happened; it
+feeds the round cap and never touches a finding). Current state = fold of the events in file order.
 Validation mirrors schemas/finding.v1.schema.json; tests/test_schema.py keeps the two in step.
 """
 from __future__ import annotations
@@ -20,6 +21,7 @@ Event = dict[str, Any]
 
 SOURCES = ("gate", "l1", "l2")
 REVIEW_SOURCES = ("l1", "l2")
+REVIEW_RUN_SOURCES = ("claude", "file")  # a review run by `claude -p`, or one read with --from-file
 VERDICTS = ("CONFIRMED", "PLAUSIBLE")
 OUTCOMES = ("fixed", "dismissed", "false_positive")
 OUTCOME_BY = ("auto:commit", "auto:gate_pass", "human")
@@ -120,10 +122,24 @@ _GATE_PASS_FIELDS: dict[str, Check] = {
     "sha": _matches(_SHA_RE),
     "files": lambda value: isinstance(value, list) and len(value) >= 1 and all(_nonempty_str(item) for item in value),
 }
+_REVIEW_RUN_FIELDS: dict[str, Check] = {
+    "v": _FINDING_FIELDS["v"],
+    "kind": lambda value: value == "review_run",
+    "repo": _matches(_SLUG_RE),
+    "ts": _matches(_TS_RE),
+    "run": _matches(_TOKEN_RE),
+    "round_key": _nonempty_str,
+    "round": _is_int_at_least(1),
+    "max_rounds": _is_int_at_least(1),
+    "over_cap": lambda value: type(value) is bool,
+    "finding_count": _is_int_at_least(0),
+    "source": _one_of(REVIEW_RUN_SOURCES),
+}
 _FIELDS_BY_KIND: dict[str, tuple[dict[str, Check], frozenset[str]]] = {
     "finding": (_FINDING_FIELDS, _FINDING_OPTIONAL),
     "outcome": (_OUTCOME_FIELDS, frozenset()),
     "gate_pass": (_GATE_PASS_FIELDS, frozenset()),
+    "review_run": (_REVIEW_RUN_FIELDS, frozenset()),
 }
 
 

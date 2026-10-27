@@ -109,6 +109,35 @@ class ShortRuleTest(unittest.TestCase):
     def test_the_cap_applies_after_the_cut(self) -> None:
         self.assertEqual(short_rule(clause("short. " + "x" * 200), 20), "short")
 
+    def test_a_cut_inside_a_code_span_backs_off_to_just_before_the_span(self) -> None:
+        result = short_rule(clause("x" * 50 + " `some_long_identifier_name` tail"), 70)
+        self.assertEqual(result, "x" * 50 + ELLIPSIS)
+
+    def test_the_back_off_drops_the_space_before_the_span(self) -> None:
+        self.assertEqual(short_rule(clause("a" * 20 + "   `" + "b" * 40), 30), "a" * 20 + ELLIPSIS)
+
+    def test_a_back_off_that_keeps_exactly_half_the_cap_is_taken(self) -> None:
+        self.assertEqual(short_rule(clause("a" * 10 + " `very_long_identifier_here`"), 20), "a" * 10 + ELLIPSIS)
+
+    def test_a_back_off_that_would_leave_less_than_half_the_cap_cuts_normally(self) -> None:
+        text = "a" * 9 + " `very_long_identifier_here`"
+        self.assertEqual(short_rule(clause(text), 20), text[:19] + ELLIPSIS)
+
+    def test_only_the_open_span_is_backed_off_and_closed_spans_stay(self) -> None:
+        self.assertEqual(short_rule(clause("Use `a` then `very_long_identifier_name` ok"), 24), "Use `a` then" + ELLIPSIS)
+
+    def test_a_cut_right_after_the_closing_backtick_is_not_a_back_off(self) -> None:
+        self.assertEqual(short_rule(clause("ab `cd` efghijklmnop"), 8), "ab `cd`" + ELLIPSIS)
+
+    def test_spans_close_on_a_run_of_the_same_length(self) -> None:
+        text = "x" * 20 + " ``a`b long code`` tail"
+        self.assertEqual(short_rule(clause(text), 30), "x" * 20 + ELLIPSIS)  # the single backtick inside is text, not a closer
+
+    def test_a_backed_off_rule_never_exceeds_the_cap(self) -> None:
+        for cap in range(20, 60):
+            with self.subTest(cap=cap):
+                self.assertLessEqual(len(short_rule(clause("word " * 8 + "`" + "identifier_" * 6 + "` end"), cap)), cap)
+
     def test_an_override_wins_and_is_used_verbatim(self) -> None:
         override = "Hand-written form. With two sentences and **bold**, longer than the cap"
         self.assertEqual(short_rule(clause("Original wording that would be cut. Extra.", override), 10), override)
@@ -222,6 +251,26 @@ class DigestContentTest(CompileCase):
                        "one finding per defect", "instead of filing duplicates"):
             self.assertIn(phrase.lower(), labeling.lower())
 
+    def test_labeling_makes_the_two_keys_mandatory_for_every_finding_object(self) -> None:
+        self.cli_ok("compile")
+        labeling = self.digest().split("## Labeling\n", 1)[1]
+        self.assertIn("JSON array", labeling)
+        self.assertIn("every finding object MUST carry two keys", labeling)
+        self.assertIn('- `"category"`:', labeling)
+        self.assertIn('- `"severity"`:', labeling)
+        for severity in ("blocker", "should-fix", "nice"):
+            self.assertIn(f"`{severity}`", labeling)
+
+    def test_the_labeling_example_is_a_finding_the_ingest_command_labels_as_the_model_did(self) -> None:
+        self.cli_ok("compile")
+        labeling = self.digest().split("## Labeling\n", 1)[1]
+        (line,) = [line for line in labeling.splitlines() if line.startswith("Example: ")]
+        example = json.loads(line.removeprefix("Example: ").strip("`"))
+        self.assertEqual(set(example), {"file", "line", "summary", "failure_scenario", "category", "severity"})
+        self.cli_ok("ingest-code-review", "--source", "l1", "--run", "R1", stdin=json.dumps([example]))
+        (event,) = self.events()
+        self.assertEqual((event["rule_id"], event["rule_id_source"], event["severity"]), ("P0E.2", "model", "blocker"))
+
     def test_a_clause_tag_overrides_the_family_and_a_tagged_clause_is_a_violation(self) -> None:
         self.write_rules("1. **[P3.1]** Style nit (blocker)\n2. **[R.1]** Guidance\n3. **[R.2]** Tagged guidance (nice)\n")
         self.cli_ok("compile")
@@ -256,6 +305,13 @@ class DigestContentTest(CompileCase):
             "P0E.3 | blocker | `except Exception` is legal only in five cases",
         ])
 
+    def test_a_long_rule_is_not_cut_inside_a_code_span_in_the_digest(self) -> None:
+        self.write_rules("1. **[P0E.5]** Log inside every handler with the call that keeps the trace, which is `logger.exception_with_context`.\n\n"
+                         + SEVERITY_TABLE)
+        self.cli_ok("compile")
+        line, = self.digest_lines("Violations")
+        self.assertEqual(line, "P0E.5 | blocker | Log inside every handler with the call that keeps the trace, which is" + ELLIPSIS)
+
     def test_clause_without_text_is_an_error_that_names_the_clause(self) -> None:
         self.write_rules("1. **[P1.1]**\n\n" + SEVERITY_TABLE)
         code, _, err = self.cli("compile")
@@ -287,7 +343,7 @@ class DigestContentTest(CompileCase):
         out = self.cli_ok("compile")
         size = len((self.repo / DIGEST_NAME).read_bytes())
         self.assertGreater(size, len(self.digest()))  # multi-byte characters
-        self.assertIn(f"digest {size} bytes", out)
+        self.assertIn(f"digest {DIGEST_NAME}: {size} bytes", out)
 
 
 class HeaderTest(CompileCase):
@@ -445,6 +501,105 @@ class InjectTest(CompileCase):
         self.assertIn("inject_targets", err)
 
 
+class InjectSectionsTest(CompileCase):
+    """`inject_targets` entries are a path (every section) or {"path", "sections"}."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.write_target()
+        self.write_target(name="AGENTS.md")
+
+    def configure_targets(self, *targets: object) -> None:
+        self.write_config(rules_files=["rules.md"], inject_targets=list(targets))
+
+    def block(self, name: str) -> str:
+        return (self.repo / name).read_text(encoding="utf-8").split(BEGIN_MARKER + "\n", 1)[1].split(END_MARKER, 1)[0]
+
+    def headings(self, name: str) -> list[str]:
+        return [line for line in self.block(name).splitlines() if line.startswith("## ")]
+
+    def test_an_object_without_sections_gets_all_three_like_a_plain_path(self) -> None:
+        self.configure_targets("CLAUDE.md", {"path": "AGENTS.md"})
+        self.cli_ok("compile")
+        self.assertEqual(self.block("AGENTS.md"), self.block("CLAUDE.md"))
+        self.assertEqual(self.headings("AGENTS.md"), ["## Violations", "## Reviewer rules", "## Labeling"])
+
+    def test_a_target_can_leave_out_the_reviewer_instructions(self) -> None:
+        self.configure_targets("CLAUDE.md", {"path": "AGENTS.md", "sections": ["violations", "reviewer"]})
+        self.cli_ok("compile")
+        self.assertEqual(self.headings("AGENTS.md"), ["## Violations", "## Reviewer rules"])
+        self.assertNotIn("MUST carry two keys", self.block("AGENTS.md"))
+        self.assertEqual(self.headings("CLAUDE.md"), ["## Violations", "## Reviewer rules", "## Labeling"])  # the other target is unaffected
+        self.assertIn("## Labeling", self.digest())  # and so is the digest itself
+
+    def test_one_section_alone_and_the_source_comment_stay(self) -> None:
+        self.configure_targets({"path": "AGENTS.md", "sections": ["violations"]})
+        self.cli_ok("compile")
+        block = self.block("AGENTS.md")
+        self.assertTrue(block.startswith("<!-- generated by ratchet compile from rules.md@"))
+        self.assertEqual(self.headings("AGENTS.md"), ["## Violations"])
+        self.assertIn("P0E.2 | blocker | Catch a specific type", block)
+        self.assertNotIn("R.1 |", block)
+
+    def test_sections_are_written_in_the_fixed_order_whatever_order_they_are_listed_in(self) -> None:
+        self.configure_targets({"path": "AGENTS.md", "sections": ["labeling", "reviewer", "violations"]})
+        self.cli_ok("compile")
+        self.assertEqual(self.headings("AGENTS.md"), ["## Violations", "## Reviewer rules", "## Labeling"])
+
+    def test_a_subset_target_is_fresh_after_compile_and_stale_when_its_sections_change(self) -> None:
+        self.configure_targets({"path": "AGENTS.md", "sections": ["violations"]})
+        self.cli_ok("compile")
+        self.assertEqual(self.cli("compile", "--check")[0], 0)
+        self.configure_targets({"path": "AGENTS.md", "sections": ["violations", "labeling"]})
+        code, _, err = self.cli("compile", "--check")
+        self.assertEqual(code, 1)
+        self.assertIn("stale: AGENTS.md (injected block, out of date)", err)
+
+    def test_bad_sections_are_rejected_before_anything_is_written(self) -> None:
+        bad_entries = {
+            "unknown name": ({"path": "AGENTS.md", "sections": ["violations", "labelling"]}, "unknown section(s) ['labelling']"),
+            "empty list": ({"path": "AGENTS.md", "sections": []}, "non-empty list of section names"),
+            "not a list": ({"path": "AGENTS.md", "sections": "violations"}, "non-empty list of section names"),
+            "not strings": ({"path": "AGENTS.md", "sections": [1]}, "non-empty list of section names"),
+            "twice": ({"path": "AGENTS.md", "sections": ["violations", "violations"]}, "lists a section twice"),
+            "unknown key": ({"path": "AGENTS.md", "section": ["violations"]}, "a path or an object with 'path'"),
+            "no path": ({"sections": ["violations"]}, "'path' must be a non-empty string"),
+            "empty path": ({"path": ""}, "'path' must be a non-empty string"),
+            "a number": (7, "a path or an object with 'path'"),
+        }
+        for label, (entry, message) in bad_entries.items():
+            with self.subTest(label):
+                self.configure_targets(entry)
+                before = self.repo_files()
+                code, _, err = self.cli("compile")
+                self.assertEqual(code, 1)
+                self.assertIn(message, err)
+                self.assertIn("inject_targets[0]", err)
+                self.assertEqual(self.repo_files(), before)
+
+    def test_the_same_file_twice_is_rejected(self) -> None:
+        self.configure_targets("AGENTS.md", {"path": "AGENTS.md", "sections": ["violations"]})
+        code, _, err = self.cli("compile")
+        self.assertEqual(code, 1)
+        self.assertIn("lists ['AGENTS.md'] more than once", err)
+
+
+class BinConfigTest(CompileCase):
+    """`bin` is read by the portable git hooks, but a bad value is refused by every command."""
+
+    def test_a_path_is_accepted(self) -> None:
+        self.write_config(rules_files=["rules.md"], bin="third_party/ratchet/bin/ratchet")
+        self.cli_ok("compile")
+
+    def test_anything_but_a_non_empty_string_is_an_error(self) -> None:
+        for value in ("", 5, ["a"], None):
+            with self.subTest(value=value):
+                self.write_config(rules_files=["rules.md"], bin=value)
+                code, _, err = self.cli("compile")
+                self.assertEqual(code, 1)
+                self.assertIn("config 'bin' must be a non-empty string", err)
+
+
 class DryRunTest(CompileCase):
     def setUp(self) -> None:
         super().setUp()
@@ -568,6 +723,16 @@ class SizeBudgetTest(CompileCase):
         self.assertEqual(code, 0)
         self.assertIn("over digest_max_bytes 100", err)
         self.assertTrue((self.repo / DIGEST_NAME).exists())
+
+    def test_the_warning_and_the_summary_name_the_file_the_size_belongs_to(self) -> None:
+        self.configure(digest_max_bytes=100, digest="docs/style.digest.md", inject_targets=["CLAUDE.md"])
+        (self.repo / "docs").mkdir()
+        self.write_target()
+        code, out, err = self.cli("compile")
+        size = len((self.repo / "docs" / "style.digest.md").read_bytes())  # the injected block is not what the number measures
+        self.assertEqual(code, 0)
+        self.assertIn(f"warning: digest docs/style.digest.md is {size} bytes, over digest_max_bytes 100", err)
+        self.assertIn(f"digest docs/style.digest.md: {size} bytes (limit 100)", out)
 
     def test_over_budget_fails_with_strict_but_still_writes_the_digest(self) -> None:
         code, _, err = self.cli("compile", "--strict")

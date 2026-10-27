@@ -5,3 +5,8 @@ __pycache__/
 .style-findings.jsonl
 .ratchet-label-page.html
 .ratchet-label-batch.json
+.ratchet/
+
+# ratchet:begin
+.ratchet/reviews/
+# ratchet:end

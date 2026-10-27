@@ -1,0 +1,11 @@
+{
+  "name": "review-ratchet",
+  "version": "0.1.0",
+  "description": "Record code-review findings in an append-only ledger, close them from commit trailers, and keep the review rules in a compiled digest that /code-review reads.",
+  "author": {
+    "name": "wangxuzhou666-arch"
+  },
+  "repository": "https://github.com/wangxuzhou666-arch/review-ratchet",
+  "license": "MIT",
+  "keywords": ["code-review", "findings", "ledger", "style-guide", "claude-code", "pre-commit"]
+}

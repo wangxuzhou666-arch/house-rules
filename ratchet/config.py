@@ -17,13 +17,22 @@ DEFAULT_LABEL_PAGE_THRESHOLD = 20
 DEFAULT_DIGEST = "CODING-STYLE.digest.md"
 DEFAULT_DIGEST_MAX_CHARS = 90
 DEFAULT_DIGEST_MAX_BYTES = 4096
+DEFAULT_MAX_REVIEW_ROUNDS = 3
+# The sections of the digest an inject target can ask for, in the order they are written.
+INJECT_SECTIONS = ("violations", "reviewer", "labeling")
 
 SLUG_RE = re.compile(r"^[a-z0-9-]+$")
 _KNOWN_KEYS = frozenset({
     "repo_slug", "ledger", "rules_files", "tool_rule_map", "scenarios", "skips_file",
     "label_page_threshold", "clause_id_pattern", "legacy_unmapped_alias",
-    "digest", "digest_max_chars", "digest_max_bytes", "inject_targets",
+    "digest", "digest_max_chars", "digest_max_bytes", "inject_targets", "bin", "max_review_rounds", "default_branch",
 })
+
+
+@dataclass(frozen=True)
+class InjectTarget:
+    path: Path
+    sections: tuple[str, ...]  # a subset of INJECT_SECTIONS, in that order
 
 
 @dataclass(frozen=True)
@@ -41,7 +50,9 @@ class Config:
     digest_path: Path
     digest_max_chars: int
     digest_max_bytes: int
-    inject_targets: tuple[Path, ...]
+    inject_targets: tuple[InjectTarget, ...]
+    max_review_rounds: int = DEFAULT_MAX_REVIEW_ROUNDS
+    default_branch: str | None = None  # None: origin/HEAD's target, else main, else master
 
 
 def slugify(text: str) -> str:
@@ -58,7 +69,7 @@ def default_slug(root: Path) -> str:
     return slug
 
 
-def _read_config_file(path: Path) -> dict:
+def read_config_file(path: Path) -> dict:
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -96,6 +107,41 @@ def _positive_int(raw: dict, key: str, default: int) -> int:
     return value
 
 
+def _inject_sections(value: object, where: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value or not all(isinstance(item, str) for item in value):
+        raise RatchetError(f"{where}: 'sections' must be a non-empty list of section names, from {list(INJECT_SECTIONS)}")
+    unknown = [item for item in value if item not in INJECT_SECTIONS]
+    if unknown:
+        raise RatchetError(f"{where}: unknown section(s) {unknown}; allowed: {list(INJECT_SECTIONS)}")
+    if len(set(value)) != len(value):
+        raise RatchetError(f"{where}: 'sections' lists a section twice")
+    return tuple(name for name in INJECT_SECTIONS if name in value)
+
+
+def _inject_target(entry: object, index: int, root: Path) -> InjectTarget:
+    where = f"config inject_targets[{index}]"
+    fields = {"path": entry} if isinstance(entry, str) else entry
+    if not isinstance(fields, dict) or set(fields) - {"path", "sections"}:
+        raise RatchetError(f"{where} must be a path or an object with 'path' and optionally 'sections'")
+    path = fields.get("path")
+    if not isinstance(path, str) or not path:
+        raise RatchetError(f"{where}: 'path' must be a non-empty string")
+    sections = _inject_sections(fields["sections"], where) if "sections" in fields else INJECT_SECTIONS
+    return InjectTarget(root / path, sections)
+
+
+def _inject_targets(raw: dict, root: Path) -> tuple[InjectTarget, ...]:
+    entries = raw.get("inject_targets", [])
+    if not isinstance(entries, list):
+        raise RatchetError("config 'inject_targets' must be a list of paths or {\"path\", \"sections\"} objects")
+    targets = [_inject_target(entry, index, root) for index, entry in enumerate(entries)]
+    paths = [target.path for target in targets]
+    repeated = sorted({path.name for path in paths if paths.count(path) > 1})
+    if repeated:
+        raise RatchetError(f"config 'inject_targets' lists {repeated} more than once; each file gets one block")
+    return tuple(targets)
+
+
 def load_config(repo: Path | None, ledger: Path | None, config_file: Path | None, cwd: Path) -> Config:
     """Resolve the repo root (main worktree of --repo, else of cwd) and read its config.
 
@@ -103,9 +149,9 @@ def load_config(repo: Path | None, ledger: Path | None, config_file: Path | None
     """
     root = main_root(repo if repo is not None else cwd)
     if config_file is not None:
-        raw = _read_config_file(config_file)
+        raw = read_config_file(config_file)
     elif (root / CONFIG_NAME).exists():
-        raw = _read_config_file(root / CONFIG_NAME)
+        raw = read_config_file(root / CONFIG_NAME)
     else:
         raw = {}
 
@@ -137,6 +183,14 @@ def load_config(repo: Path | None, ledger: Path | None, config_file: Path | None
     if not isinstance(digest_name, str) or not digest_name:
         raise RatchetError("config 'digest' must be a non-empty string")
 
+    default_branch = raw.get("default_branch")
+    if default_branch is not None and (not isinstance(default_branch, str) or not default_branch):
+        raise RatchetError("config 'default_branch' must be a non-empty string")
+
+    # Only the portable git hooks read `bin` (a shell reads it at commit time); the tool itself just refuses a malformed value.
+    if "bin" in raw and (not isinstance(raw["bin"], str) or not raw["bin"]):
+        raise RatchetError("config 'bin' must be a non-empty string")
+
     return Config(
         root=root,
         repo_slug=slug,
@@ -151,5 +205,7 @@ def load_config(repo: Path | None, ledger: Path | None, config_file: Path | None
         digest_path=root / digest_name,
         digest_max_chars=_positive_int(raw, "digest_max_chars", DEFAULT_DIGEST_MAX_CHARS),
         digest_max_bytes=_positive_int(raw, "digest_max_bytes", DEFAULT_DIGEST_MAX_BYTES),
-        inject_targets=tuple(root / name for name in _string_list(raw, "inject_targets")),
+        inject_targets=_inject_targets(raw, root),
+        max_review_rounds=_positive_int(raw, "max_review_rounds", DEFAULT_MAX_REVIEW_ROUNDS),
+        default_branch=default_branch,
     )

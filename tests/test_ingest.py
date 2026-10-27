@@ -5,7 +5,7 @@ import support  # noqa: F401  (puts the repo root on sys.path)
 from support import RepoCase, review_item
 
 from ratchet.errors import RatchetError
-from ratchet.ingest import extract_review_items
+from ratchet.ingest import escape_stray_quotes, extract_review_items, extract_review_items_lenient
 
 
 class ExtractTest(unittest.TestCase):
@@ -43,6 +43,83 @@ class ExtractTest(unittest.TestCase):
             extract_review_items('["not an object"]')
 
 
+# What a pretty-printed review looks like when the model quotes code with unescaped double quotes in a string value.
+STRAY = ('[\n  {\n    "file": "src/a.py",\n    "line": 3,\n    "summary": "reads cfg["name"] without a check",\n'
+         '    "failure_scenario": "A caller passes {"name": null} and the call raises"\n  }\n]\n')
+
+
+class StrayQuoteTest(RepoCase):
+    def test_quotes_inside_a_string_field_are_escaped_and_counted(self) -> None:
+        fixed, count = escape_stray_quotes(STRAY)
+        self.assertEqual(count, 4)
+        self.assertIn('"summary": "reads cfg[\\"name\\"] without a check",', fixed)
+        self.assertEqual(json.loads(fixed)[0]["summary"], 'reads cfg["name"] without a check')
+
+    def test_the_lenient_reader_returns_the_text_as_the_model_meant_it(self) -> None:
+        items, count = extract_review_items_lenient(f"Notes.\n\n```json\n{STRAY}```\n")
+        self.assertEqual(count, 4)
+        self.assertEqual(items[0]["failure_scenario"], 'A caller passes {"name": null} and the call raises')
+
+    def test_input_that_already_parses_is_never_touched(self) -> None:
+        valid = json.dumps([review_item(summary='reads cfg["name"]')], indent=2)
+        self.assertEqual(extract_review_items_lenient(valid), (extract_review_items(valid), 0))
+
+    def test_valid_lines_with_two_fields_are_not_mistaken_for_one_string(self) -> None:
+        valid = '[\n  {\n    "file": "a.py", "line": 1, "summary": "s", "failure_scenario": "f"\n  }\n]\n'
+        items, count = extract_review_items_lenient(valid)
+        self.assertEqual((count, items[0]["failure_scenario"]), (0, "f"))
+
+    def test_already_escaped_quotes_are_left_alone(self) -> None:
+        line = '    "summary": "has \\"escaped\\" quotes and a stray "one",\n'
+        fixed, count = escape_stray_quotes(line)
+        self.assertEqual((fixed, count), ('    "summary": "has \\"escaped\\" quotes and a stray \\"one",\n', 1))
+
+    def test_a_quote_after_an_escaped_backslash_is_a_stray_quote(self) -> None:
+        fixed, count = escape_stray_quotes('    "summary": "ends with a backslash \\\\"x",\n')
+        self.assertEqual(count, 1)
+        self.assertEqual(json.loads("{" + fixed.rstrip().rstrip(",") + "}")["summary"], 'ends with a backslash \\"x')
+
+    def test_lines_that_are_not_schema_string_fields_are_untouched(self) -> None:
+        text = 'Prose with "quotes" in it.\n    "line": 5,\n    "extra": "a"b",\n'
+        self.assertEqual(escape_stray_quotes(text), (text, 0))
+
+    def test_line_endings_and_trailing_commas_survive(self) -> None:
+        fixed, count = escape_stray_quotes('    "summary": "a"b",\r\n    "severity": "nice"\r\n')
+        self.assertEqual((fixed, count), ('    "summary": "a\\"b",\r\n    "severity": "nice"\r\n', 1))
+
+    def test_a_repair_that_still_does_not_parse_raises_the_original_error(self) -> None:
+        broken = STRAY.rstrip().removesuffix("]")  # a second defect, after the stray quotes: the closing bracket is missing
+        with self.assertRaises(RatchetError) as strict:
+            extract_review_items(broken)
+        with self.assertRaises(RatchetError) as lenient:
+            extract_review_items_lenient(broken)
+        self.assertEqual(str(lenient.exception), str(strict.exception))
+
+    def test_input_with_nothing_to_repair_raises_the_strict_error(self) -> None:
+        with self.assertRaisesRegex(RatchetError, "neither a JSON array"):
+            extract_review_items_lenient("no json here")
+
+    def test_a_field_outside_the_schema_with_a_stray_quote_is_not_repaired(self) -> None:
+        with self.assertRaises(RatchetError):
+            extract_review_items_lenient(STRAY.replace('"line": 3,', '"line": 3,\n    "note": "a"b",'))
+
+    def test_compact_one_line_json_is_not_repaired(self) -> None:
+        with self.assertRaises(RatchetError):
+            extract_review_items_lenient('[{"file": "a.py", "line": 1, "summary": "x["k"]", "failure_scenario": "f"}]')
+
+    def test_the_command_ingests_it_stores_the_text_intact_and_says_so(self) -> None:
+        self.with_sample_rules()
+        out = self.cli_ok("ingest-code-review", "--source", "l1", "--run", "R1", stdin=STRAY)
+        self.assertIn("escaped 4 stray quote(s) in the review's JSON", out)
+        (event,) = self.events()
+        self.assertEqual(event["summary"], 'reads cfg["name"] without a check')
+
+    def test_valid_input_gets_no_repair_note(self) -> None:
+        self.with_sample_rules()
+        out = self.cli_ok("ingest-code-review", "--source", "l1", "--run", "R1", stdin=json.dumps([review_item()]))
+        self.assertNotIn("stray", out)
+
+
 class IngestTest(RepoCase):
     def setUp(self) -> None:
         super().setUp()
@@ -68,8 +145,70 @@ class IngestTest(RepoCase):
         self.assertIn("4 unmapped", out)
 
     def test_rule_id_source_is_model_even_for_unmapped(self) -> None:
-        self.ingest([review_item(category="p0e-1"), review_item(line=2)])
+        self.ingest([review_item(category="p0e-1"), review_item(line=2)])  # the second names no clause anywhere
         self.assertEqual([e["rule_id_source"] for e in self.events()], ["model", "model"])
+
+    def test_a_model_category_is_labeled_model(self) -> None:
+        self.ingest([review_item(category="p0e-6"), review_item(line=2, category="no-such-clause")])
+        self.assertEqual([(e["rule_id"], e["rule_id_source"]) for e in self.events()], [("P0E.6", "model"), ("unmapped", "model")])
+
+    def test_without_a_category_the_clause_cited_in_the_summary_is_attributed(self) -> None:
+        out = self.ingest([review_item(summary="Swallows the error silently (P0E.6, and it hides the cause)")])
+        (event,) = self.events()
+        self.assertEqual((event["rule_id"], event["rule_id_source"], event["rule_code"], event["category"]),
+                         ("P0E.6", "attributed", "P0E.6", "P0E"))
+        self.assertEqual(event["severity"], "blocker")  # the clause's own severity, as for a model-given category
+        self.assertIn("1 labeled from the text", out)
+        self.assertIn("0 unmapped", out)
+
+    def test_the_summary_line_counts_each_kind_of_label_separately(self) -> None:
+        out = self.ingest([review_item(category="p0e-6"), review_item(line=2, summary="Breaks P0E.1"),
+                           review_item(line=3, summary="Breaks P3.1"), review_item(line=4, category="nonsense"),
+                           review_item(line=5, summary="No clause named")])
+        self.assertIn("2 unmapped, 2 labeled from the text", out)
+
+    def test_every_notation_and_case_of_a_clause_id_is_found(self) -> None:
+        summaries = ["see P0E.6", "see p0e-6", "see P0E-6", "see (p0e.6).", "[P0E.6] violated", "violates P0E.6."]
+        self.ingest([review_item(line=number, summary=text) for number, text in enumerate(summaries, start=1)])
+        self.assertEqual({e["rule_id"] for e in self.events()}, {"P0E.6"})
+        self.assertEqual({e["rule_id_source"] for e in self.events()}, {"attributed"})
+
+    def test_the_summary_is_read_before_the_failure_scenario_and_the_first_mention_wins(self) -> None:
+        self.ingest([
+            review_item(line=1, summary="Names P3.1 and P0E.6", failure_scenario="Mentions P1.1 only here"),
+            review_item(line=2, summary="No clause named", failure_scenario="Breaks P1.1 when the list is empty"),
+            review_item(line=3, summary="Names none", failure_scenario="Names none either"),
+        ])
+        self.assertEqual([(e["rule_id"], e["rule_id_source"]) for e in self.events()],
+                         [("P3.1", "attributed"), ("P1.1", "attributed"), ("unmapped", "model")])
+
+    def test_an_empty_blank_or_non_string_category_counts_as_missing(self) -> None:
+        self.ingest([review_item(line=number, category=value, summary="Breaks P0E.1")
+                     for number, value in enumerate(["", "   ", 7, None, ["p0e-6"]], start=1)])
+        self.assertEqual({(e["rule_id"], e["rule_id_source"]) for e in self.events()}, {("P0E.1", "attributed")})
+
+    def test_a_category_the_model_gave_is_never_overridden_by_the_text(self) -> None:
+        self.ingest([review_item(category="p3-1", summary="Really a P0E.6 problem"),
+                     review_item(line=2, category="error-handling", summary="Really a P0E.6 problem")])
+        self.assertEqual([(e["rule_id"], e["rule_id_source"]) for e in self.events()], [("P3.1", "model"), ("unmapped", "model")])
+
+    def test_ids_that_are_not_clauses_or_only_part_of_a_longer_number_are_not_attributed(self) -> None:
+        self.ingest([review_item(summary="Violates P9.9"), review_item(line=2, summary="Violates P1.12"),
+                     review_item(line=3, summary="Version P0E.10 of the helper")])
+        self.assertEqual([e["rule_id"] for e in self.events()], ["unmapped"] * 3)
+
+    def test_an_attributed_finding_takes_part_in_merging_with_its_own_label(self) -> None:
+        self.ingest([review_item(summary="minor P3.1", severity="nice"), review_item(summary="major P0E.6", severity="blocker")])
+        (event,) = self.events()
+        self.assertEqual((event["rule_id"], event["rule_id_source"]), ("P0E.6", "attributed"))
+        self.assertEqual(event["also_matches"][0]["rule_id"], "P3.1")
+
+    def test_a_scenario_default_for_the_attributed_rule_covers_a_missing_failure_scenario(self) -> None:
+        self.with_sample_rules(scenarios={"P0E.6": "Default scenario for P0E.6"})
+        item = review_item(summary="Swallows the error (P0E.6)")
+        del item["failure_scenario"]
+        self.ingest([item])
+        self.assertEqual(self.events()[0]["failure_scenario"], "Default scenario for P0E.6")
 
     def test_missing_severity_comes_from_the_rules_file_else_should_fix(self) -> None:
         out = self.ingest([review_item(category="p0e-6"), review_item(line=2, category="p3-1"),
@@ -110,8 +249,8 @@ class IngestTest(RepoCase):
 
     def test_display_ids_are_run_prefixed_and_stable(self) -> None:
         self.ingest([review_item(file="a.py"), review_item(file="b.py")], run="L1R7")
-        self.assertEqual([e["display_id"] for e in self.events()], ["L1R7-001", "L1R7-002"])
-        self.assertEqual(self.events()[0]["id"], "demo-repo:l1:L1R7:L1R7-001")
+        self.assertEqual([e["display_id"] for e in self.events()], ["L1R7-1", "L1R7-2"])
+        self.assertEqual(self.events()[0]["id"], "demo-repo:l1:L1R7:L1R7-1")
 
     def test_ingesting_the_same_review_twice_is_a_no_op(self) -> None:
         items = [review_item(file="a.py"), review_item(file="b.py", category="p1-1")]

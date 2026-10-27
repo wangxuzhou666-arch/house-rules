@@ -1,19 +1,22 @@
-"""Mutation self-test for the compile feature: does the suite notice when the code is made wrong?
+"""Mutation self-test: does the suite notice when the code is made wrong?
 
 Run `python3 tests/mutation_check.py` (add `--full` to run the whole suite per mutant and list every test that went
-red, which shows whether the test meant to catch a mutant did). Each mutant is one small edit of the package, applied one at a time to a
-throwaway copy of the repo (the real tree is never touched). The suite must be green before the first mutant and after
-the last one, and red for every mutant in between. A mutant the suite lets through means a test is missing or too weak.
+red, which shows whether the test meant to catch a mutant did; `--jobs N` sets how many mutants run at once, default
+the CPU count up to 8). Each mutant is one small edit of a file in the repo, applied one at a time to a throwaway copy
+of the repo (the real tree is never touched). The suite must be green before the first mutant and after the last
+one, and red for every mutant in between. A mutant the suite lets through means a test is missing or too weak.
 Not named test_*.py, so `unittest discover` does not collect it.
 """
 from __future__ import annotations
 
 import os
+import queue
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -63,7 +66,7 @@ MUTANTS = (
     Mutant("cap counts bytes, not characters", "ratchet/digest.py",
            "return text if len(text) <= max_chars else", 'return text if len(text.encode("utf-8")) <= max_chars else'),
     Mutant("cap drops the ellipsis", "ratchet/digest.py",
-           "else text[:max_chars - 1].rstrip() + ELLIPSIS", "else text[:max_chars].rstrip()"),
+           "    return cut.rstrip() + ELLIPSIS\n", "    return cut.rstrip()\n"),
     Mutant("override comment ignored", "ratchet/digest.py",
            "if clause.digest_override is not None:", "if False:"),
     Mutant("bold markers kept", "ratchet/digest.py",
@@ -99,24 +102,646 @@ MUTANTS = (
     Mutant("inject accepts a missing begin marker", "ratchet/digest.py",
            "begin = _marker_index(text, BEGIN_MARKER, name)",
            "begin = text.find(BEGIN_MARKER) if BEGIN_MARKER in text else 0"),
+    Mutant('an inject target gets every section whatever it asks for', 'ratchet/digest.py',
+           'join_sections(sections, target.sections)',
+           'join_sections(sections, INJECT_SECTIONS)'),
+    Mutant('inject sections keep the order the target lists them in', 'ratchet/config.py',
+           'return tuple(name for name in INJECT_SECTIONS if name in value)',
+           'return tuple(value)'),
+    Mutant('an unknown inject section is accepted', 'ratchet/config.py',
+           '    if unknown:\n        raise RatchetError(f"{where}: unknown section(s)',
+           '    if False:\n        raise RatchetError(f"{where}: unknown section(s)'),
+    Mutant('a repeated inject section is accepted', 'ratchet/config.py',
+           '    if len(set(value)) != len(value):',
+           '    if False:'),
+    Mutant('an inject target without sections gets only the first one', 'ratchet/config.py',
+           'if "sections" in fields else INJECT_SECTIONS',
+           'if "sections" in fields else INJECT_SECTIONS[:1]'),
     Mutant("--check writes the stale outputs", "ratchet/cli.py",
-           "        status = _compile_check(stale, len(outputs), config.root)",
-           "        for output in stale:\n            _write_text(output.path, output.new)\n"
-           "        status = _compile_check(stale, len(outputs), config.root)"),
+           "        status = _compile_check(stale, len(outputs), config.root, args.staged)",
+           "        for output in stale:\n            write_text(output.path, output.new)\n"
+           "        status = _compile_check(stale, len(outputs), config.root, args.staged)"),
     Mutant("--check exits 0 when outputs are stale", "ratchet/cli.py",
-           '    print("run `ratchet compile` to regenerate", file=sys.stderr)\n    return 1',
-           '    print("run `ratchet compile` to regenerate", file=sys.stderr)\n    return 0'),
+           '        print("run `ratchet compile` to regenerate", file=sys.stderr)\n    return 1',
+           '        print("run `ratchet compile` to regenerate", file=sys.stderr)\n    return 0'),
     Mutant("--check ignores stale injected blocks", "ratchet/cli.py",
            "stale = [output for output in outputs if output.is_stale]",
            'stale = [output for output in outputs if output.is_stale and output.kind == "digest"]'),
     Mutant("--dry-run writes", "ratchet/cli.py",
            '            print(f"[dry-run] compile: would write {display_path(output.path, config.root)} ({output.kind})")',
            '            print(f"[dry-run] compile: would write {display_path(output.path, config.root)} ({output.kind})")\n'
-           "            _write_text(output.path, output.new)"),
+           "            write_text(output.path, output.new)"),
     Mutant("--strict ignored", "ratchet/cli.py",
            "(args.strict and over_budget)", "(False and over_budget)"),
     Mutant("size budget measured in characters", "ratchet/cli.py",
            'digest_bytes = len(outputs[0].new.encode("utf-8"))', "digest_bytes = len(outputs[0].new)"),
+
+    # ---- cap polish: a cut inside a code span ----
+    Mutant("cap back-off disabled", "ratchet/digest.py",
+           "        if len(backed_off) * 2 >= max_chars:", "        if False:"),
+    Mutant("cap back-off ignores the half-cap floor", "ratchet/digest.py",
+           "        if len(backed_off) * 2 >= max_chars:", "        if True:"),
+    Mutant("cap back-off rejects exactly half the cap", "ratchet/digest.py",
+           "        if len(backed_off) * 2 >= max_chars:", "        if len(backed_off) * 2 > max_chars:"),
+    Mutant("cap back-off keeps the space before the span", "ratchet/digest.py",
+           "        backed_off = cut[:span_start].rstrip()", "        backed_off = cut[:span_start]"),
+    Mutant("code span closes at any backtick run", "ratchet/digest.py",
+           "        elif len(run.group()) == len(opened.group()):", "        else:"),
+    Mutant("code span never closes", "ratchet/digest.py",
+           "        elif len(run.group()) == len(opened.group()):\n            opened = None", "        elif len(run.group()) == len(opened.group()):\n            pass"),
+    Mutant("cap back-off stops after the opening backticks", "ratchet/digest.py",
+           "    return None if opened is None else opened.start()", "    return None if opened is None else opened.end()"),
+    Mutant("cap with ellipsis exceeds the limit", "ratchet/digest.py",
+           "    cut = text[:max_chars - 1]", "    cut = text[:max_chars]"),
+
+    # ---- compile --check --staged ----
+    Mutant("--staged reads the working tree", "ratchet/sources.py",
+           "        return index_blob(self._worktree, rel.as_posix())", "        return self._disk.read(path)"),
+    Mutant("--staged picks the disk reader", "ratchet/cli.py",
+           "    if not args.staged:\n        return DiskReader()", "    if True:\n        return DiskReader()"),
+    Mutant("--staged accepted without --check", "ratchet/cli.py",
+           '    if not args.check:\n        raise RatchetError("--staged only applies to --check")',
+           '    if False:\n        raise RatchetError("--staged only applies to --check")'),
+    Mutant("--staged reads the main worktree's index from a linked worktree", "ratchet/cli.py",
+           "    return IndexReader(worktree_root(Path(args.repo).expanduser().resolve() if args.repo else Path.cwd()), config.root)",
+           "    return IndexReader(config.root, config.root)"),
+    Mutant("a file outside the repo is looked up in the index", "ratchet/sources.py",
+           '        if rel.parts[:1] == ("..",):', "        if False:"),
+    Mutant("the hook's temporary index is dropped from the environment", "ratchet/git.py",
+           '    dropped = tuple(key for key in _HOOK_ENV if not (keep_index_file and key == "GIT_INDEX_FILE"))',
+           "    dropped = _HOOK_ENV"),
+    Mutant("a file missing from the index reads as empty", "ratchet/git.py",
+           "    if not listed.stdout.strip():\n        return None", "    if not listed.stdout.strip():\n        return b\"\""),
+    Mutant("staged paths are glob patterns", "ratchet/git.py",
+           '["--literal-pathspecs", "ls-files", "--stage", "--", rel_path]', '["ls-files", "--stage", "--", rel_path]'),
+    Mutant("staged messages say nothing about the index", "ratchet/cli.py",
+           'state = "not staged" if output.old is None else "the STAGED version is out of date"',
+           'state = "missing" if output.old is None else "out of date"'),
+    Mutant("a missing staged rules file gives no hint", "ratchet/sources.py",
+           '    missing_hint = " (stage it with `git add`)"', '    missing_hint = ""'),
+
+    # ---- infer --quiet ----
+    Mutant("--quiet prints the summary when nothing closed", "ratchet/cli.py",
+           "    if args.quiet and not outcomes:\n        return 0", "    if False:\n        return 0"),
+    Mutant("--quiet keeps the label page nudge", "ratchet/cli.py",
+           "    if open_after > config.label_page_threshold and not args.quiet:", "    if open_after > config.label_page_threshold:"),
+
+    # ---- init: marked blocks ----
+    Mutant("an unchanged block is reported as an update", "ratchet/blocks.py",
+           '    return new_text, "ok" if new_text == text else "update"', '    return new_text, "update"'),
+    Mutant("a second block is appended instead of replacing the first", "ratchet/blocks.py",
+           "    if span is None:\n        head =", "    if True:\n        head ="),
+    Mutant("a begin marker after the end marker is accepted", "ratchet/blocks.py",
+           "    if len(begins) != 1 or len(ends) != 1 or ends[0] < begins[0]:", "    if len(begins) != 1 or len(ends) != 1:"),
+    Mutant("duplicate or lone markers are accepted", "ratchet/blocks.py",
+           "    if len(begins) != 1 or len(ends) != 1 or ends[0] < begins[0]:", "    if False:"),
+    Mutant("no blank line before an appended block", "ratchet/blocks.py",
+           '        separator = "\\n" if head and not head.endswith("\\n\\n") else ""', '        separator = ""'),
+    Mutant("text without a final newline runs into the block", "ratchet/blocks.py",
+           '        head = text if text == "" or text.endswith("\\n") else text + "\\n"', "        head = text"),
+    Mutant("CRLF line endings are normalized", "ratchet/blocks.py",
+           "    lines = text.splitlines(keepends=True)", '    lines = [line.rstrip("\\r\\n") + "\\n" for line in text.splitlines()]'),
+
+    # ---- init: config, rules file, compile ----
+    Mutant("a configured rules_files is rewritten", "ratchet/onboard.py",
+           "    if config.rules_files:\n        names =", "    if False:\n        names ="),
+    Mutant("other config keys are dropped when rules_files is added", "ratchet/onboard.py",
+           '{**raw, "rules_files": choice.rules_files}', '{"rules_files": choice.rules_files}'),
+    Mutant("the template overwrites an existing rules file", "ratchet/onboard.py",
+           "    if target.exists():\n        return Step(\"rules file\"", "    if False:\n        return Step(\"rules file\""),
+    Mutant("a detected rules file is ignored for the default", "ratchet/onboard.py",
+           '    return "template" if detected is None else str(detected)', '    return "template"'),
+    Mutant("a missing --rules-file is accepted", "ratchet/onboard.py",
+           "    if not path.is_file():\n        raise RatchetError(f\"rules file not found", "    if False:\n        raise RatchetError(f\"rules file not found"),
+    Mutant("a rules file inside the repo is stored absolute", "ratchet/onboard.py",
+           "    if path.is_relative_to(root):\n        return RulesChoice([path.relative_to(root)", "    if False:\n        return RulesChoice([path.relative_to(root)"),
+    Mutant("compile step rewrites an up-to-date digest", "ratchet/onboard.py",
+           "    if not stale:\n        return Step(\"compile\", \"ok\"", "    if False:\n        return Step(\"compile\", \"ok\""),
+    Mutant("init --dry-run writes the config", "ratchet/onboard.py",
+           '    if not options.dry_run:\n        write_text(path, new_text)\n    return Step("config", status',
+           '    if True:\n        write_text(path, new_text)\n    return Step("config", status'),
+    Mutant("init --dry-run writes the template", "ratchet/onboard.py",
+           "    if not options.dry_run:\n        write_text(target, _bundled_template())",
+           "    if True:\n        write_text(target, _bundled_template())"),
+    Mutant("init --dry-run writes the digest", "ratchet/onboard.py",
+           "    if not options.dry_run:\n        for output in stale:", "    if True:\n        for output in stale:"),
+    Mutant("init --dry-run writes CLAUDE.md", "ratchet/onboard.py",
+           "    if not options.dry_run:\n        write_text(path, new_text)\n    where =",
+           "    if True:\n        write_text(path, new_text)\n    where ="),
+    Mutant("init --dry-run writes the hooks", "ratchet/onboard.py",
+           "    if changes and not options.dry_run:", "    if changes:"),
+    Mutant("init --dry-run writes .gitignore", "ratchet/onboard.py",
+           'if status != "ok" and not options.dry_run:', 'if status != "ok":'),
+
+    # ---- init: CLAUDE.md ----
+    Mutant("an import line the user wrote is imported again", "ratchet/onboard.py",
+           "    if not has_block and any(line.strip() == import_line for line in outside):", "    if False:"),
+    Mutant("--no-claude-md is ignored", "ratchet/onboard.py",
+           "    if not options.edit_claude_md:", "    if False:"),
+
+    # ---- init: hooks ----
+    Mutant("--no-hooks is ignored", "ratchet/onboard.py",
+           "    directory = hooks_dir(effective.root) if options.install_hooks else None", "    directory = hooks_dir(effective.root)"),
+    Mutant("core.hooksPath is ignored", "ratchet/git.py",
+           '    out = run_git(["rev-parse", "--git-path", "hooks"], top).stdout.strip()\n    return Path(os.path.realpath(top / out))',
+           '    out = run_git(["rev-parse", "--git-path", "hooks"], top).stdout.strip()\n    return top / ".git" / "hooks"'),
+    Mutant("a hook in another language is edited", "ratchet/hooks.py",
+           "    if existing and not _SHELL_SHEBANG_RE.match(existing.splitlines()[0]):", "    if False:"),
+    Mutant("a python hook counts as a shell script", "ratchet/hooks.py",
+           "(?:sh|bash|dash|zsh|ksh)", "(?:sh|bash|dash|zsh|ksh|python3?)"),
+    Mutant("hooks are written without the execute bit", "ratchet/onboard.py",
+           "write_text(path, plan.text, make_executable=True)", "write_text(path, plan.text, make_executable=False)"),
+    Mutant("make_executable does nothing", "ratchet/fsutil.py",
+           "            path.chmod(mode | ((mode & 0o444) >> 2))", "            path.chmod(mode)"),
+    Mutant("a hook that lost its execute bit is left alone", "ratchet/hooks.py",
+           '    if status == "ok" and not is_executable(path):', "    if False:"),
+    Mutant("the pre-commit hook lets a failing check through", "ratchet/hooks.py",
+           'HOOK_ON_FAILURE = {"pre-commit": "exit 1", "post-commit": "true"}', 'HOOK_ON_FAILURE = {"pre-commit": "true", "post-commit": "true"}'),
+    Mutant("the post-commit hook can fail the commit", "ratchet/hooks.py",
+           'HOOK_ON_FAILURE = {"pre-commit": "exit 1", "post-commit": "true"}', 'HOOK_ON_FAILURE = {"pre-commit": "exit 1", "post-commit": "exit 1"}'),
+    Mutant("a missing executable fails the hook", "ratchet/hooks.py",
+           r'''{advice}\" >&2"''', r'''{advice}\" >&2; exit 1"'''),
+    Mutant("hooks run in repos that have no config", "ratchet/hooks.py",
+           '_CONFIG_GUARD = "if [ -f .ratchet.json ]; then"', '_CONFIG_GUARD = "if true; then"'),
+    Mutant("a shared hooksPath is not called out", "ratchet/onboard.py",
+           'if origin is not None and not origin.is_relative_to(config.root / ".git"):', "if False:"),
+    Mutant("the recorded executable path is not shell-quoted", "ratchet/hooks.py",
+           '        f"RATCHET_BIN={shlex.quote(str(executable))}",', '        f"RATCHET_BIN={executable}",'),
+    Mutant("the pre-commit hook checks the working tree", "ratchet/hooks.py",
+           'HOOK_ARGS = {"pre-commit": "compile --check --staged", "post-commit": "infer --quiet"}',
+           'HOOK_ARGS = {"pre-commit": "compile --check", "post-commit": "infer --quiet"}'),
+    Mutant("the post-commit hook is not quiet", "ratchet/hooks.py",
+           'HOOK_ARGS = {"pre-commit": "compile --check --staged", "post-commit": "infer --quiet"}',
+           'HOOK_ARGS = {"pre-commit": "compile --check --staged", "post-commit": "infer"}'),
+    Mutant("the pre-commit hook prints on success", "ratchet/hooks.py",
+           'HOOK_STDOUT = {"pre-commit": " >/dev/null", "post-commit": ""}', 'HOOK_STDOUT = {"pre-commit": "", "post-commit": ""}'),
+
+    # ---- init: .gitignore ----
+    Mutant("entries already ignored are repeated", "ratchet/onboard.py",
+           'wanted = [entry for entry in ignore_entries(config) if entry not in present and f"/{entry}" not in present]',
+           "wanted = ignore_entries(config)"),
+    Mutant("a root-anchored entry is not recognized", "ratchet/onboard.py",
+           ' if entry not in present and f"/{entry}" not in present]', " if entry not in present]"),
+    Mutant("a ledger outside the repo is listed", "ratchet/onboard.py",
+           "for path in runtime if path.is_relative_to(config.root)]", "for path in runtime]"),
+    Mutant("saved reviews are not ignored", "ratchet/onboard.py",
+           '    return [*dict.fromkeys(entries), f"{REVIEWS_SUBDIR.as_posix()}/"]', "    return [*dict.fromkeys(entries)]"),
+
+    # ---- init: driver ----
+    Mutant("init accepts a missing terminal", "ratchet/cli.py",
+           "    if ask_for_answers and not sys.stdin.isatty():", "    if False:"),
+    Mutant("init --dry-run asks questions", "ratchet/cli.py",
+           "    ask_for_answers = not (args.yes or args.dry_run)", "    ask_for_answers = not args.yes"),
+    Mutant("declining a question is ignored", "ratchet/onboard.py",
+           '.strip().lower() in ("", "y", "yes")', '.strip().lower() in ("", "y", "yes", "n", "no")'),
+    Mutant("a next step is missing", "ratchet/onboard.py",
+           '        f"next 2: {command} count --by-rule        (see what is open, by clause)",\n', ""),
+
+    # ---- review ----
+    Mutant("review ignores the level", "ratchet/review.py",
+           '    prompt = f"/code-review {level}" +', '    prompt = "/code-review high" +'),
+    Mutant("review drops the target", "ratchet/review.py",
+           '(f" {target.strip()}" if target else "")', '""'),
+    Mutant("review leaves stdin open", "ratchet/review.py",
+           "stdin=subprocess.DEVNULL, timeout=TIMEOUT_SECONDS)", "stdin=None, timeout=TIMEOUT_SECONDS)"),
+    Mutant("review has no timeout", "ratchet/review.py",
+           "stdin=subprocess.DEVNULL, timeout=TIMEOUT_SECONDS)", "stdin=subprocess.DEVNULL, timeout=None)"),
+    Mutant("review runs claude outside the repo root", "ratchet/review.py",
+           "proc = subprocess.run(argv, cwd=cwd,", "proc = subprocess.run(argv, cwd=None,"),
+    Mutant("a failing claude is treated as success", "ratchet/review.py",
+           "    if proc.returncode != 0:\n        tail =", "    if False:\n        tail ="),
+    Mutant("a missing claude is not detected", "ratchet/review.py",
+           "    if shutil.which(argv[0]) is None:", "    if False:"),
+    Mutant("the claude command is not split into words", "ratchet/review.py",
+           '[*shlex.split(os.environ.get(CLAUDE_CMD_ENV) or "claude"), "-p", prompt]', '[os.environ.get(CLAUDE_CMD_ENV) or "claude", "-p", prompt]'),
+    Mutant("any run id is accepted", "ratchet/review.py",
+           "    if not _RUN_ID_RE.match(run_id):", "    if False:"),
+    Mutant("a different review under a used run id overwrites silently", "ratchet/review.py",
+           "    elif existing != text:", "    elif False:"),
+    Mutant("the raw review is not saved", "ratchet/review.py",
+           "    if existing is None:\n        write_text(path, text)", "    if False:\n        write_text(path, text)"),
+    Mutant("summaries are not truncated in the table", "ratchet/review.py",
+           "SUMMARY_WIDTH = 60", "SUMMARY_WIDTH = 600"),
+    Mutant("table columns are not padded", "ratchet/review.py",
+           "cell.ljust(width)", "cell.ljust(0)"),
+    Mutant("--level with --from-file is accepted", "ratchet/cli.py",
+           "    if args.from_file and (args.level or args.target):", "    if False:"),
+    Mutant("review --dry-run runs claude", "ratchet/cli.py",
+           "        if args.dry_run:\n            print(f\"[dry-run] review:", "        if False:\n            print(f\"[dry-run] review:"),
+    Mutant("review --dry-run saves the raw output", "ratchet/cli.py",
+           "    if not args.dry_run:\n        saved = save_review(", "    if True:\n        saved = save_review("),
+    Mutant("review records source l2", "ratchet/cli.py",
+           'text, source="l1", run_id=run_id, verdict="PLAUSIBLE"', 'text, source="l2", run_id=run_id, verdict="PLAUSIBLE"'),
+    Mutant("the open count ignores earlier findings", "ratchet/cli.py",
+           "open_after = len(open_findings(events + fresh))", "open_after = len(open_findings(fresh))"),
+    Mutant("review never suggests the label page", "ratchet/cli.py",
+           "    if open_after > config.label_page_threshold:\n", "    if False:\n"),
+
+    # ---- review: the round cap ----
+    Mutant('the first review round is numbered 0', 'ratchet/cli.py',
+           'round_number = used + 1',
+           'round_number = used'),
+    Mutant('the round cap is hit one round early', 'ratchet/cli.py',
+           'over_cap = round_number > config.max_review_rounds',
+           'over_cap = round_number >= config.max_review_rounds'),
+    Mutant('a dry run past the cap is refused', 'ratchet/cli.py',
+           'if refused and not args.dry_run:',
+           'if refused:'),
+    Mutant('the round-cap refusal has the generic exit code', 'ratchet/cli.py',
+           'raise RoundCapReached(',
+           'raise RatchetError('),
+    Mutant('a --from-file round is recorded as a claude run', 'ratchet/cli.py',
+           'from_file=bool(args.from_file))',
+           'from_file=False)'),
+    Mutant('a review round is not recorded', 'ratchet/cli.py',
+           '[*fresh, run_event]',
+           'fresh'),
+    Mutant('a round is recorded as over the cap whenever --over-cap is passed', 'ratchet/cli.py',
+           'over_cap=over_cap, finding_count',
+           'over_cap=bool(args.over_cap), finding_count'),
+    Mutant('--over-cap does not lift the refusal', 'ratchet/cli.py',
+           'refused = over_cap and not args.over_cap',
+           'refused = over_cap'),
+    Mutant('count fails on a detached HEAD', 'ratchet/cli.py',
+           'except RoundKeyUnavailable:\n        return 0',
+           'except RoundKeyUnavailable:\n        raise'),
+    Mutant('rounds are counted across all changes', 'ratchet/review.py',
+           ' and event["round_key"] == key)',
+           ')'),
+    Mutant('the fork point is cut to 8 characters', 'ratchet/review.py',
+           'FORK_POINT_LENGTH = 12',
+           'FORK_POINT_LENGTH = 8'),
+    Mutant('origin/HEAD is not consulted for the default branch', 'ratchet/review.py',
+           '(origin_head_branch(root), "main", "master")',
+           '(None, "main", "master")'),
+    Mutant('a local-only default branch is not recognized', 'ratchet/review.py',
+           ' or commit_sha(root, f"refs/remotes/origin/{name}")',
+           ''),
+    Mutant('the target is not stripped in the round key', 'ratchet/review.py',
+           'return f"target:{target.strip()}"',
+           'return f"target:{target}"'),
+    Mutant('the unborn-branch round key changes', 'ratchet/review.py',
+           'f"{branch}@unborn"',
+           'f"{branch}@none"'),
+    Mutant('over_cap accepts a number', 'ratchet/ledger.py',
+           '"over_cap": lambda value: type(value) is bool',
+           '"over_cap": lambda value: isinstance(value, (bool, int))'),
+    Mutant('finding_count of 0 is rejected', 'ratchet/ledger.py',
+           '"finding_count": _is_int_at_least(0)',
+           '"finding_count": _is_int_at_least(1)'),
+    Mutant('the default round cap is 2', 'ratchet/config.py',
+           'DEFAULT_MAX_REVIEW_ROUNDS = 3',
+           'DEFAULT_MAX_REVIEW_ROUNDS = 2'),
+    Mutant('re-ingesting a recorded run counts as another round', 'ratchet/cli.py',
+           'fresh if replayed else [*fresh, run_event]',
+           '[*fresh, run_event]'),
+
+    # ---- stray quotes in a review's JSON ----
+    Mutant("stray-quote repair disabled", "ratchet/ingest.py",
+           "        if fixed == 0:\n            raise", "        if True:\n            raise"),
+    Mutant("repair escapes quotes that are already escaped", "ratchet/ingest.py",
+           '        escaped = char == "\\\\" and not escaped', "        escaped = False"),
+    Mutant("repair touches fields outside the schema", "ratchet/ingest.py",
+           "(?:file|summary|failure_scenario|category|severity)", "(?:[a-z_]+)"),
+    Mutant("repair counts a stray quote twice", "ratchet/ingest.py",
+           "            fixed += 1\n", "            fixed += 2\n"),
+    Mutant("a failed repair raises its own error", "ratchet/ingest.py",
+           "            raise strict_error from None", "            raise"),
+    Mutant("repair runs before the strict reading", "ratchet/ingest.py",
+           "        return extract_review_items(text), 0\n    except", "        return extract_review_items(escape_stray_quotes(text)[0]), 0\n    except"),
+    Mutant("repair rewrites line endings", "ratchet/ingest.py",
+           'line[len(line.rstrip("\\r\\n")):]', '"\\n"'),
+    Mutant("the repair note is dropped from the summary", "ratchet/cli.py",
+           "    repaired = f\"; escaped {repaired_quotes} stray quote(s) in the review's JSON\" if repaired_quotes else \"\"", '    repaired = ""'),
+
+    # ---- template ----
+    Mutant("template: severity table header misspelled", "templates/CODING-STYLE.template.md",
+           "   | family | severity |", "   | family | severities |"),
+    Mutant("template: a clause without text", "templates/CODING-STYLE.template.md",
+           "**[P0E.2]** Catch a specific exception type, with its own action. One response for every type is suppressing, not handling.",
+           "**[P0E.2]**"),
+    Mutant("template: a digest override blows the size budget", "templates/CODING-STYLE.template.md",
+           "<!-- digest: Catch-all only for: side channel", "<!-- digest: Catch-all only for: " + "z" * 2000 + " side channel"),
+    Mutant("template: the depth threshold loses its ADJUST marker", "templates/CODING-STYLE.template.md",
+           "<!-- ADJUST: the depth threshold.", "<!-- NOTE: the depth threshold."),
+    Mutant("template: the tool code loses its ADJUST marker", "templates/CODING-STYLE.template.md",
+           "<!-- ADJUST: language tool code, e.g. ruff TRY300 flags a return inside try. -->", ""),
+    Mutant("template: a date leaks in", "templates/CODING-STYLE.template.md",
+           "**Why**: the wider the", "**Why** (2026-09-15): the wider the"),
+    Mutant("template: no longer labelled a draft", "templates/CODING-STYLE.template.md",
+           "# Coding Style (DRAFT template)", "# Coding Style"),
+    Mutant("template: the advisory complexity clause becomes a should-fix", "templates/CODING-STYLE.template.md",
+           "Data-heavy functions are exempt. (nice) <!--", "Data-heavy functions are exempt. <!--"),
+
+    # ---- plugin ----
+    Mutant("plugin: version changes", ".claude-plugin/plugin.json", '"version": "0.1.0"', '"version": "0.2.0"'),
+    Mutant("plugin: author email added", ".claude-plugin/plugin.json",
+           '"name": "wangxuzhou666-arch"', '"name": "wangxuzhou666-arch",\n    "email": "someone@example.invalid"'),
+    Mutant("plugin: setup skill drops --yes", "skills/setup/SKILL.md",
+           "run `ratchet init --yes <flags>`", "run `ratchet init <flags>`"),
+    Mutant("plugin: setup skill may not run the tool", "skills/setup/SKILL.md",
+           "allowed-tools: Bash(ratchet *) Bash(git rev-parse *)", "allowed-tools: Bash(git rev-parse *)"),
+    Mutant("plugin: review skill loses its trigger phrase", "skills/review/SKILL.md",
+           "Use when the user asks to review changes", "Triggered if the user asks to review changes"),
+    Mutant("plugin: review skill stops offering the label page", "skills/review/SKILL.md",
+           "offer `ratchet label-page`", "offer a label page"),
+
+    # ---- labeling: the digest section that makes the model emit category and severity ----
+    Mutant("labeling: the keys are optional", "ratchet/digest.py",
+           "every finding object MUST carry two keys", "a finding object may carry two keys"),
+    Mutant("labeling: the severity key is dropped", "ratchet/digest.py",
+           '- `"severity"`: `blocker`, `should-fix` or `nice`, the one listed for that clause under Violations.\n', ""),
+    Mutant("labeling: the example names the key wrongly", "ratchet/digest.py",
+           '"category": "p0e-2", "severity": "blocker"}`', '"cat": "p0e-2", "severity": "blocker"}`'),
+    Mutant("labeling: the unmapped escape hatch is dropped", "ratchet/digest.py",
+           ', or `"unmapped"` if no clause truly matches', ""),
+    Mutant("labeling: one finding per defect is dropped", "ratchet/digest.py",
+           "File one finding per defect. ", ""),
+
+    # ---- attribution: a clause id cited in prose, when the model gave no category ----
+    Mutant("attribution: a clause id inside a longer number is found", "ratchet/rules.py",
+           '(?![A-Za-z0-9])", re.IGNORECASE)', '", re.IGNORECASE)'),
+    Mutant("attribution: matching is case-sensitive", "ratchet/rules.py",
+           '(?![A-Za-z0-9])", re.IGNORECASE)', '(?![A-Za-z0-9])")'),
+    Mutant("attribution: a clause id glued to a preceding letter is found", "ratchet/rules.py",
+           '(?<![A-Za-z0-9])(?:', '(?:'),
+    Mutant("attribution: only the hyphen notation is found", "ratchet/rules.py",
+           r'"[.\\-_]".join(', r'"[\\-]".join('),
+    Mutant("attribution: the failure scenario is read before the summary", "ratchet/ingest.py",
+           'mention = rules.first_clause_mention(summary) or rules.first_clause_mention(scenario if isinstance(scenario, str) else "")',
+           'mention = rules.first_clause_mention(scenario if isinstance(scenario, str) else "") or rules.first_clause_mention(summary)'),
+    Mutant("attribution: the failure scenario is not read", "ratchet/ingest.py",
+           'mention = rules.first_clause_mention(summary) or rules.first_clause_mention(scenario if isinstance(scenario, str) else "")',
+           "mention = rules.first_clause_mention(summary)"),
+    Mutant("attribution: the prose overrides a category the model gave", "ratchet/ingest.py",
+           "    if category_text:\n        return rules.from_kebab", "    if False:\n        return rules.from_kebab"),
+    Mutant("attribution: an attributed finding is labeled model", "ratchet/ingest.py",
+           'return mention[0], mention[1], "attributed"', 'return mention[0], mention[1], "model"'),
+    Mutant("attribution: a model category is labeled attributed", "ratchet/ingest.py",
+           'return rules.from_kebab(category_text) or UNMAPPED, category_text, "model"',
+           'return rules.from_kebab(category_text) or UNMAPPED, category_text, "attributed"'),
+    Mutant("attribution: a blank category counts as given", "ratchet/ingest.py",
+           'category_text = category.strip() if isinstance(category, str) else ""',
+           'category_text = category if isinstance(category, str) else ""'),
+    Mutant("attribution: a non-string category counts as given", "ratchet/ingest.py",
+           'category_text = category.strip() if isinstance(category, str) else ""',
+           'category_text = str(category or "").strip()'),
+    Mutant("attribution: every mapped finding counts as attributed", "ratchet/ingest.py",
+           'attributed_count=sum(1 for c in candidates if c.rule_id_source == "attributed")',
+           "attributed_count=sum(1 for c in candidates if c.rule_id != UNMAPPED)"),
+    Mutant("attribution: the summary line does not report it", "ratchet/cli.py",
+           '            f"{result.attributed_count} labeled from the text, "\n', ""),
+
+    # ---- count --by-rule --label-source ----
+    Mutant("count: --label-source does nothing", "ratchet/cli.py",
+           '(_label_sources(rule_id, open_list, config) if args.label_source else "")', '""'),
+    Mutant("count: --label-source works without --by-rule", "ratchet/cli.py",
+           "    if args.label_source and not args.by_rule:", "    if False:"),
+    Mutant("count: events without the field are called model", "ratchet/cli.py",
+           'finding.get("rule_id_source", "none")', 'finding.get("rule_id_source", "model")'),
+
+    # ---- short run ids and display ids ----
+    Mutant("display ids are zero padded", "ratchet/ingest.py",
+           'display_id = f"{run_id}-{position}"', 'display_id = f"{run_id}-{position:03d}"'),
+    Mutant("the default run id counts from zero", "ratchet/review.py",
+           'return f"r{len(known_runs) + 1}"', 'return f"r{len(known_runs)}"'),
+    Mutant("the default run id ignores saved raw outputs", "ratchet/review.py",
+           'saved = {path.stem for path in (root / REVIEWS_SUBDIR).glob("*.txt")}', "saved: set[str] = set()"),
+    Mutant("the default run id ignores the ledger", "ratchet/review.py",
+           'in_ledger = {event["run_id"] for event in events if event["kind"] == "finding" and event["source"] in REVIEW_SOURCES}',
+           "in_ledger: set[str] = set()"),
+    Mutant("gate findings count as review runs", "ratchet/review.py",
+           'if event["kind"] == "finding" and event["source"] in REVIEW_SOURCES}', 'if event["kind"] == "finding"}'),
+    Mutant("a taken default run id is skipped instead of refused", "ratchet/review.py",
+           'return f"r{len(known_runs) + 1}"',
+           'return next(f"r{k}" for k in range(len(known_runs) + 1, 10**6) if f"r{k}" not in known_runs)'),
+
+    # ---- hooks pin the interpreter ----
+    Mutant("the hook ignores the pinned interpreter", "ratchet/hooks.py",
+           """    return f'"$RATCHET_PY" "$RATCHET_BIN" {HOOK_ARGS[hook]}""", """    return f'"$RATCHET_BIN" {HOOK_ARGS[hook]}"""),
+    Mutant("the hook does not check that the interpreter exists", "ratchet/hooks.py",
+           """'  if [ -x "$RATCHET_PY" ] && [ -f "$RATCHET_BIN" ]; then',""", """'  if [ -f "$RATCHET_BIN" ]; then',"""),
+    Mutant("the hook does not check that the script exists", "ratchet/hooks.py",
+           """'  if [ -x "$RATCHET_PY" ] && [ -f "$RATCHET_BIN" ]; then',""", """'  if [ -x "$RATCHET_PY" ]; then',"""),
+    Mutant("the interpreter path is not shell-quoted", "ratchet/hooks.py",
+           '        f"RATCHET_PY={shlex.quote(str(interpreter))}",', '        f"RATCHET_PY={interpreter}",'),
+    Mutant("init pins a bare python3 instead of the interpreter it runs under", "ratchet/onboard.py",
+           "else (Path(sys.executable), EXECUTABLE_PATH)", 'else (Path("python3"), EXECUTABLE_PATH)'),
+    Mutant("the manual hook line omits the interpreter", "ratchet/hooks.py",
+           'else f"{pinned[0]} {pinned[1]} {HOOK_ARGS[hook]}"', 'else f"{pinned[1]} {HOOK_ARGS[hook]}"'),
+    Mutant("the report does not say which python the hooks use", "ratchet/onboard.py",
+           '    return detail + f" (runs with {pinned[0]})"', "    return detail"),
+
+    # ---- hooks: placement, live check, portable block; init reporting ----
+    Mutant('the scan never finds a top-level exit', 'ratchet/hooks.py',
+           'if _ENDS_SCRIPT_RE.match(line) and (depth == 0 or doubt is not None):',
+           'if False:'),
+    Mutant('an indented exit counts as the top-level one', 'ratchet/hooks.py',
+           'if _ENDS_SCRIPT_RE.match(line) and (depth == 0',
+           'if _ENDS_SCRIPT_RE.match(line.lstrip()) and (depth == 0'),
+    Mutant('exec cmd is not treated like exit', 'ratchet/hooks.py',
+           '|exec[ \\t]+(?![0-9]*[<>])\\S',
+           ''),
+    Mutant('exec with only a redirect is treated like exit', 'ratchet/hooks.py',
+           '(?![0-9]*[<>])',
+           ''),
+    Mutant('a word that starts with exit is treated like exit', 'ratchet/hooks.py',
+           'exit(?=[ \\t;|&]|$)',
+           'exit'),
+    Mutant('a block found after the exit stays there', 'ratchet/hooks.py',
+           'block_is_before_exit = scan.index is None or (span is not None and span[0] <= scan.index)',
+           'block_is_before_exit = scan.index is None or span is not None'),
+    Mutant('the probe does not look for the token', 'ratchet/hooks.py',
+           ' and f"{PROBE_TOKEN} {hook}" in proc.stdout.splitlines():',
+           ':'),
+    Mutant('the probe does not look at the exit status', 'ratchet/hooks.py',
+           'if proc.returncode == 0 and f"{PROBE_TOKEN}',
+           'if f"{PROBE_TOKEN}'),
+    Mutant('the probe runs against the real index', 'ratchet/git.py',
+           '    return {**_git_env(keep_index_file=False), "GIT_INDEX_FILE": str(index)}',
+           '    return _git_env(keep_index_file=False)'),
+    Mutant("every hook is pinned to this machine's paths", 'ratchet/onboard.py',
+           '    pinned = None if _is_portable(directory, config.root) else (Path(sys.executable), EXECUTABLE_PATH)',
+           '    pinned = (Path(sys.executable), EXECUTABLE_PATH)'),
+    Mutant('.git/hooks counts as a portable hooks directory', 'ratchet/onboard.py',
+           '    return directory.is_relative_to(root) and not directory.is_relative_to(root / ".git")',
+           '    return directory.is_relative_to(root)'),
+    Mutant('a hooks directory outside the work tree counts as portable', 'ratchet/onboard.py',
+           '    return directory.is_relative_to(root) and not directory.is_relative_to(root / ".git")',
+           '    return not directory.is_relative_to(root / ".git")'),
+    Mutant('a failed command -v ends a set -e hook', 'ratchet/hooks.py',
+           'command -v ratchet || true',
+           'command -v ratchet'),
+    Mutant('a failed read of bin from the config ends a set -e hook', 'ratchet/hooks.py',
+           "-c '{_READ_BIN_FROM_CONFIG}' 2>/dev/null || true)",
+           "-c '{_READ_BIN_FROM_CONFIG}' 2>/dev/null)"),
+    Mutant('the portable hook ignores bin in .ratchet.json', 'ratchet/hooks.py',
+           '.get("bin", "")',
+           '.get("binary", "")'),
+    Mutant('an exported RATCHET_BIN is ignored', 'ratchet/hooks.py',
+           '\'    if [ -z "${RATCHET_BIN:-}" ]; then\',',
+           "'    if true; then',"),
+    Mutant('a malformed bin in .ratchet.json is accepted', 'ratchet/config.py',
+           'if "bin" in raw and (not isinstance(raw["bin"], str) or not raw["bin"]):',
+           'if False:'),
+    Mutant('the commit hint lists files git has nothing to commit', 'ratchet/onboard.py',
+           '    return uncommitted_paths(config.root, [path.relative_to(config.root).as_posix() for path in inside])',
+           '    return [path.relative_to(config.root).as_posix() for path in inside]'),
+    Mutant('the commit hint lists a shared file that has no ratchet block', 'ratchet/onboard.py',
+           '[path for path, marker in shared if marker in (read_text(path) or "")]',
+           '[path for path, marker in shared if path.is_file()]'),
+    Mutant('the commit hint lists files outside the work tree', 'ratchet/onboard.py',
+           'if path.is_relative_to(config.root) and not path.is_relative_to(config.root / ".git")]',
+           'if not path.is_relative_to(config.root / ".git")]'),
+    Mutant('an all-ok init prints the next steps instead of the set-up line', 'ratchet/onboard.py',
+           'if all(step.status in ("ok", "skip") for step in result.steps):',
+           'if False:'),
+    Mutant('a skipped step stops init from saying it is set up', 'ratchet/onboard.py',
+           'if all(step.status in ("ok", "skip") for step in result.steps):',
+           'if all(step.status == "ok" for step in result.steps):'),
+    Mutant('hooks that core.hooksPath shadows are not warned about', 'ratchet/onboard.py',
+           '    shadowed = _shadowed_notes(config.root, directory)',
+           '    shadowed: tuple[str, ...] = ()'),
+    Mutant('a sample hook counts as a shadowed one', 'ratchet/onboard.py',
+           'entry.is_file() and not entry.name.endswith(".sample")',
+           'entry.is_file()'),
+    Mutant('a non-executable hook counts as a shadowed one', 'ratchet/onboard.py',
+           '".sample") and is_executable(entry))',
+           '".sample"))'),
+    Mutant('the default hooks directory is warned about as shadowed', 'ratchet/onboard.py',
+           '    if directory == default or not default.is_dir():',
+           '    if not default.is_dir():'),
+    Mutant('a missing bundled template is a traceback', 'ratchet/onboard.py',
+           '    except FileNotFoundError as exc:\n        raise RatchetError(f"the bundled rules template',
+           '    except KeyError as exc:\n        raise RatchetError(f"the bundled rules template'),
+    Mutant('a missing template is noticed only after the config is written', 'ratchet/onboard.py',
+           '        if not (root / TEMPLATE_TARGET).exists():\n            _bundled_template()',
+           '        if False:\n            _bundled_template()'),
+    Mutant('an existing template copy still needs the bundled template', 'ratchet/onboard.py',
+           '        if not (root / TEMPLATE_TARGET).exists():\n            _bundled_template()',
+           '        if True:\n            _bundled_template()'),
+
+    # ---- gate: the finding id must stay the one an existing gate writes ----
+    Mutant("gate id: the tool prefix is hashed", "ratchet/gate.py",
+           '    return code.split(":", 1)[1] if TOOL_ID_RE.match(code) else code', "    return code"),
+    Mutant("gate id: whitespace in the line is hashed", "ratchet/gate.py",
+           "''.join(line_text.split())", "line_text"),
+    Mutant("gate id: sha256 instead of sha1", "ratchet/gate.py", "hashlib.sha1(", "hashlib.sha256("),
+    Mutant("gate id: eleven hex digits", "ratchet/gate.py", "HASH_LENGTH = 12", "HASH_LENGTH = 11"),
+    Mutant("gate id: another separator", "ratchet/gate.py",
+           'f"{file}|{rule_code}|{', 'f"{file}:{rule_code}|{'),
+    Mutant("gate id: the file is not hashed", "ratchet/gate.py",
+           'f"{file}|{rule_code}|{', 'f"{rule_code}|{'),
+    Mutant("gate id: the configured slug is ignored", "ratchet/gate.py",
+           '"id": f"{config.repo_slug}:gate:{digest}"', '"id": f"gate:gate:{digest}"'),
+    Mutant("gate id: the line is off by one", "ratchet/gate.py",
+           'lines[line - 1] if 0 < line <= len(lines) else ""', 'lines[line] if 0 < line < len(lines) else ""'),
+    Mutant("gate id: a line past the end of the file crashes", "ratchet/gate.py",
+           'lines[line - 1] if 0 < line <= len(lines) else ""', 'lines[line - 1] if 0 < line else ""'),
+    Mutant("gate: line 0 is stored as 0", "ratchet/gate.py", '"line": max(line, 1)', '"line": line'),
+    Mutant("gate: line 0 is refused", "ratchet/gate.py", "or value < 0:", "or value < 1:"),
+    Mutant("gate: the snippet reaches one line too far", "ratchet/gate.py",
+           "SNIPPET_BEFORE, SNIPPET_AFTER = 2, 2", "SNIPPET_BEFORE, SNIPPET_AFTER = 2, 3"),
+    Mutant("gate: an open finding is written again", "ratchet/gate.py",
+           "GatePlan(built, select_new_events(existing, built))", "GatePlan(built, built)"),
+    Mutant("gate: tool_rule_map and clause checks are skipped", "ratchet/gate.py",
+           "rule_id, rule_id_source = rules.resolve_reported(raw_code)", 'rule_id, rule_id_source = raw_code, "tool"'),
+    Mutant("gate: the report's severity is ignored", "ratchet/gate.py",
+           'item.get("severity", rules.severity_of(rule_id) or "should-fix")', 'rules.severity_of(rule_id) or "should-fix"'),
+    Mutant("gate: the configured scenario is ignored", "ratchet/gate.py",
+           'rules.scenarios.get(rule_id) or f"The gate flagged', 'f"The gate flagged'),
+    Mutant("gate: a path outside the repo is accepted", "ratchet/gate.py",
+           "        if not path.is_relative_to(root):", "        if False:"),
+    Mutant("gate: a path that climbs out of the repo is accepted", "ratchet/gate.py",
+           '    if path.parts[:1] == ("..",):', "    if False:"),
+    Mutant("gate pass: files keep the order they were given", "ratchet/gate.py",
+           "paths = sorted({repo_relative(config.root, file) for file in files})",
+           "paths = list(dict.fromkeys(repo_relative(config.root, file) for file in files))"),
+    Mutant("gate pass: paths are not normalized", "ratchet/gate.py",
+           "paths = sorted({repo_relative(config.root, file) for file in files})", "paths = sorted(set(files))"),
+    Mutant("gate record: an already open finding is reported as new", "ratchet/cli.py",
+           """f"{'new' if event['id'] in new_ids else 'already open'}")""", """f"{'new'}")"""),
+    Mutant("gate record: inline JSON is not recognized", "ratchet/cli.py",
+           '    if value.lstrip().startswith(("[", "{")):', "    if False:"),
+    Mutant("gate record: - is read as a file name", "ratchet/cli.py",
+           '    if value is None or value == "-":', "    if value is None:"),
+    Mutant("--dry-run writes to the ledger", "ratchet/cli.py",
+           '    if args.dry_run:\n        print(f"[dry-run] {summary}; nothing written to {config.ledger_path}")',
+           '    if args.dry_run:\n        append_events(config.ledger_path, events)\n        print(f"[dry-run] {summary}; nothing written to {config.ledger_path}")'),
+    Mutant("api: the repo argument is ignored", "ratchet/api.py",
+           "Path(repo).expanduser().resolve() if repo is not None else None, None, None, Path.cwd()", "None, None, None, Path.cwd()"),
+    Mutant("api: the ids of already open findings are left out", "ratchet/api.py",
+           'GateRecording([event["id"] for event in plan.built], plan.fresh)', 'GateRecording([event["id"] for event in plan.fresh], plan.fresh)'),
+    Mutant("api: an extra name becomes public", "ratchet/api.py",
+           '"record_gate_findings", "record_gate_pass"]', '"record_gate_findings", "record_gate_pass", "plan_gate_findings"]'),
+
+    # ---- vendor ----
+    Mutant("vendor hash: file names are not hashed", "ratchet/vendor.py",
+           'digest.update(f"{rel}\\0{hashlib.sha256', 'digest.update(f"{hashlib.sha256'),
+    Mutant("vendor hash: file contents are not hashed", "ratchet/vendor.py",
+           "{hashlib.sha256((base / rel).read_bytes()).hexdigest()}", "{rel}"),
+    Mutant("vendor: bytecode is copied and hashed", "ratchet/vendor.py",
+           "name not in _IGNORED_NAMES and not name.endswith(_BYTECODE_SUFFIX)", "name not in _IGNORED_NAMES"),
+    Mutant("vendor: .DS_Store is copied and hashed", "ratchet/vendor.py",
+           '_IGNORED_NAMES = frozenset({".DS_Store"})', "_IGNORED_NAMES = frozenset()"),
+    Mutant("vendor: tests are vendored too", "ratchet/vendor.py",
+           'VENDORED_ENTRIES = ("ratchet", "bin/ratchet", "schemas", "templates", "LICENSE")',
+           'VENDORED_ENTRIES = ("ratchet", "bin/ratchet", "schemas", "templates", "LICENSE", "tests")'),
+    Mutant('vendor: the rules template is left out', 'ratchet/vendor.py',
+           'VENDORED_ENTRIES = ("ratchet", "bin/ratchet", "schemas", "templates", "LICENSE")',
+           'VENDORED_ENTRIES = ("ratchet", "bin/ratchet", "schemas", "LICENSE")'),
+    Mutant("vendor: a dirty tree still names HEAD", "ratchet/vendor.py",
+           "    return UNCOMMITTED if changed else head.stdout.strip()", "    return head.stdout.strip()"),
+    Mutant("vendor: untracked files do not make it dirty", "ratchet/vendor.py", '"--untracked-files=all"', '"--untracked-files=no"'),
+    Mutant("vendor: any change in the repo makes it dirty", "ratchet/vendor.py",
+           '"--untracked-files=all", "--", *VENDORED_ENTRIES]', '"--untracked-files=all"]'),
+    Mutant("vendor: a source nested in another repo names that repo's HEAD", "ratchet/vendor.py",
+           "    if top.returncode != 0 or Path(os.path.realpath(top.stdout.strip())) != Path(os.path.realpath(source)):",
+           "    if top.returncode != 0:"),
+    Mutant("vendor: an unborn branch names a commit", "ratchet/vendor.py",
+           "    if head.returncode != 0:\n        return UNCOMMITTED", "    if False:\n        return UNCOMMITTED"),
+    Mutant("vendor: a source missing a vendored path is accepted", "ratchet/vendor.py", "    if missing:\n", "    if False:\n"),
+    Mutant("vendor: files the source dropped stay in the copy", "ratchet/vendor.py",
+           "    for entry in in_the_way:\n        path = target / entry", "    for entry in []:\n        path = target / entry"),
+    Mutant("vendor: a foreign ratchet folder is overwritten", "ratchet/vendor.py",
+           "    if in_the_way and not has_marker:", "    if False:"),
+    Mutant("vendor: into the source itself is allowed", "ratchet/vendor.py",
+           "    if target.is_relative_to(source):", "    if False:"),
+    Mutant("vendor: the execute bit is lost", "ratchet/vendor.py", "shutil.copy2(source / rel", "shutil.copyfile(source / rel"),
+    Mutant("vendor: the marker gains a key", "ratchet/vendor.py",
+           'marker = {"source_commit": plan.marker.source_commit, "content_sha256": plan.marker.content_sha256}',
+           'marker = {"source_commit": plan.marker.source_commit, "content_sha256": plan.marker.content_sha256, "copied": len(plan.files)}'),
+    Mutant("vendor: a missing marker is not noticed", "ratchet/vendor.py",
+           '    if text is None:\n        raise RatchetError(f"{target / MARKER_NAME} not found',
+           '    if False:\n        raise RatchetError(f"{target / MARKER_NAME} not found'),
+    Mutant("vendor: any JSON passes as a marker", "ratchet/vendor.py",
+           "    if not isinstance(raw, dict) or not all(", "    if False and not all("),
+    Mutant("vendor --check ignores edits", "ratchet/vendor.py", "    if actual != marker.content_sha256:", "    if False:"),
+    Mutant("vendor --check --against-source ignores a stale copy", "ratchet/vendor.py",
+           "        if current != marker.content_sha256:", "        if False:"),
+    Mutant("vendor --check exits 0 with problems", "ratchet/cli.py", "        return 1 if problems else 0", "        return 0"),
+    Mutant("vendor --against-source works without --check", "ratchet/cli.py",
+           "    if args.against_source and not args.check:", "    if False:"),
+    Mutant("vendor --dry-run copies", "ratchet/cli.py",
+           "    if not args.dry_run:\n        vendor_into(", "    if True:\n        vendor_into("),
+    Mutant("vendor needs a git repo to run in", "ratchet/cli.py", "        if args.standalone:", "        if False:"),
+
+    # ---- distribution metadata ----
+    Mutant("plugin: the license changes", ".claude-plugin/plugin.json", '"license": "MIT"', '"license": "Apache-2.0"'),
+    Mutant("plugin: the repository points elsewhere", ".claude-plugin/plugin.json",
+           "github.com/wangxuzhou666-arch/review-ratchet", "github.com/someone-else/review-ratchet"),
+    Mutant("plugin: the author changes", ".claude-plugin/plugin.json", '"name": "wangxuzhou666-arch"', '"name": "somebody"'),
+    Mutant("marketplace: the plugin source is not the root", ".claude-plugin/marketplace.json",
+           '"source": "./"', '"source": "./plugins/review-ratchet"'),
+    Mutant("marketplace: the entry name differs from the plugin's", ".claude-plugin/marketplace.json",
+           '"name": "review-ratchet",\n      "source"', '"name": "review-ratchet-plugin",\n      "source"'),
+    Mutant("marketplace: the marketplace is named differently", ".claude-plugin/marketplace.json",
+           '{\n  "name": "review-ratchet",\n  "description"', '{\n  "name": "ratchet-market",\n  "description"'),
+    Mutant("marketplace: the owner gets an email", ".claude-plugin/marketplace.json",
+           '"name": "wangxuzhou666-arch"\n  }', '"name": "wangxuzhou666-arch",\n    "email": "someone@example.invalid"\n  }'),
+    Mutant("license: another copyright holder", "LICENSE", "Copyright (c) 2026 wangxuzhou666-arch", "Copyright (c) 2026 someone"),
+    Mutant("readme: the plugin install command is wrong", "README.md",
+           "claude plugin install review-ratchet@review-ratchet", "claude plugin install review-ratchet"),
 )
 
 
@@ -124,40 +749,60 @@ def run_suite(cwd: Path, full: bool) -> tuple[bool, str]:
     """(passed, failing tests). Without `full`, -f stops at the first failure, which keeps a caught mutant cheap."""
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}  # a same-size, same-second edit must not hit a stale .pyc
     command = [sys.executable, "-m", "unittest", "discover", "-s", "tests", *([] if full else ["-f"])]
-    proc = subprocess.run(command, cwd=cwd, capture_output=True, text=True, env=env)
+    proc = subprocess.run(command, cwd=cwd, capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)  # a mutant must not hang on an open stdin
     if proc.returncode == 0:
         return True, ""
     failures = [dotted for _, dotted in FAILURE_RE.findall(proc.stderr)]
     return False, ", ".join(failures) if failures else proc.stderr.strip().splitlines()[-1]
 
 
-def main(full: bool) -> int:
+def check_mutant(copy: Path, mutant: Mutant, full: bool) -> tuple[bool, str]:
+    """Apply one mutant to `copy`, run the suite, restore. (suite passed, failing tests)."""
+    target = copy / mutant.path
+    original = target.read_text(encoding="utf-8")
+    target.write_text(original.replace(mutant.old, mutant.new), encoding="utf-8")
+    try:
+        return run_suite(copy, full)
+    finally:
+        target.write_text(original, encoding="utf-8")
+
+
+def main(full: bool, jobs: int) -> int:
     with tempfile.TemporaryDirectory() as tmp:
-        copy = Path(tmp) / "repo"
-        shutil.copytree(ROOT, copy, ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"))
-        broken = [m.name for m in MUTANTS if (copy / m.path).read_text(encoding="utf-8").count(m.old) != 1]
+        copies = []
+        for number in range(jobs):  # one tree per worker: a mutant is a write to the tree its suite runs in
+            copy = Path(tmp) / f"repo{number}"
+            shutil.copytree(ROOT, copy, ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"))
+            copies.append(copy)
+        broken = [m.name for m in MUTANTS if (copies[0] / m.path).read_text(encoding="utf-8").count(m.old) != 1]
         if broken:
             print(f"these mutants no longer match exactly one place in their file; update them: {broken}")
             return 2
-        green, detail = run_suite(copy, full)
+        green, detail = run_suite(copies[0], full)
         if not green:
             print(f"the unmutated suite is red ({detail}); fix that first")
             return 2
 
-        survivors: list[str] = []
-        for number, mutant in enumerate(MUTANTS, start=1):
-            target = copy / mutant.path
-            original = target.read_text(encoding="utf-8")
-            target.write_text(original.replace(mutant.old, mutant.new), encoding="utf-8")
+        free: queue.Queue[Path] = queue.Queue()
+        for copy in copies:
+            free.put(copy)
+
+        def work(mutant: Mutant) -> tuple[bool, str]:
+            copy = free.get()
             try:
-                passed, detail = run_suite(copy, full)
+                return check_mutant(copy, mutant, full)
             finally:
-                target.write_text(original, encoding="utf-8")
-            print(f"{'SURVIVED' if passed else 'killed  '}  {number:2d}. {mutant.name}" + ("" if passed else f"  <- {detail}"))
+                free.put(copy)
+
+        survivors: list[str] = []
+        with ThreadPoolExecutor(max_workers=jobs) as pool:
+            results = list(pool.map(work, MUTANTS))
+        for number, (mutant, (passed, detail)) in enumerate(zip(MUTANTS, results), start=1):
+            print(f"{'SURVIVED' if passed else 'killed  '}  {number:3d}. {mutant.name}" + ("" if passed else f"  <- {detail}"))
             if passed:
                 survivors.append(mutant.name)
 
-        green_again, detail = run_suite(copy, full)
+        green_again, detail = run_suite(copies[0], full)
         if not green_again:
             print(f"the suite is red after restoring every mutant ({detail})")
             return 2
@@ -165,5 +810,11 @@ def main(full: bool) -> int:
         return 1 if survivors else 0
 
 
+def parse_jobs(argv: list[str]) -> int:
+    if "--jobs" in argv:
+        return max(1, int(argv[argv.index("--jobs") + 1]))
+    return max(1, min(8, os.cpu_count() or 1))
+
+
 if __name__ == "__main__":
-    sys.exit(main(full="--full" in sys.argv[1:]))
+    sys.exit(main(full="--full" in sys.argv[1:], jobs=parse_jobs(sys.argv[1:])))

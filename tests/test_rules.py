@@ -76,6 +76,46 @@ class LoadRulesTest(unittest.TestCase):
         self.assertIsNone(rules.from_kebab("exception-handling"))
         self.assertIsNone(rules.from_kebab(""))
 
+    def test_a_clause_id_is_found_in_free_text_in_every_notation(self) -> None:
+        rules = self.rules()
+        for text in ("violates P0E.6", "(p0e-6, see also)", "P0E-6.", "the p0e_6 rule", "[P0E.6]", "x:P0E.6,y", "ends with P0E.6"):
+            with self.subTest(text=text):
+                found = rules.first_clause_mention(text)
+                self.assertIsNotNone(found)
+                self.assertEqual(found[0], "P0E.6")
+        self.assertEqual(rules.first_clause_mention("violates (p0e-6)"), ("P0E.6", "p0e-6"))  # the token as written comes back
+
+    def test_the_first_mention_in_the_text_wins_not_the_first_clause_in_the_rules(self) -> None:
+        rules = self.rules()
+        self.assertEqual(rules.first_clause_mention("R.7 first, then P0E.1")[0], "R.7")
+        self.assertEqual(rules.first_clause_mention("P3.1 then P0E.1 then P0E.1")[0], "P3.1")
+
+    def test_a_clause_id_inside_a_longer_token_or_number_is_not_a_mention(self) -> None:
+        rules = self.rules()
+        for text in ("XP1.1", "P1.1x", "P1.12", "version 3.P1", "P0E.60", "P0E.6a", "no ids here", ""):
+            with self.subTest(text=text):
+                self.assertIsNone(rules.first_clause_mention(text))
+        self.assertEqual(rules.first_clause_mention("P1.10 is not P1.1")[0], "P1.1")  # skips the longer number, finds the standalone id
+
+    def test_longer_and_shorter_ids_that_share_a_prefix_are_told_apart(self) -> None:
+        path = self.dir / "more.md"
+        path.write_text("1. **[P1.1]** one\n2. **[P1.10]** ten\n", encoding="utf-8")
+        rules = load_rules(make_config((path,)))
+        self.assertEqual(rules.first_clause_mention("see P1.10 here")[0], "P1.10")
+        self.assertEqual(rules.first_clause_mention("see P1.1 here")[0], "P1.1")
+
+    def test_an_id_the_rules_do_not_define_is_not_a_mention(self) -> None:
+        self.assertIsNone(self.rules().first_clause_mention("violates P9.9 and X1.2"))
+
+    def test_without_any_clause_nothing_is_ever_a_mention(self) -> None:
+        self.assertIsNone(load_rules(make_config(())).first_clause_mention("P0E.6 R.7"))
+
+    def test_a_custom_id_pattern_is_found_in_text_too(self) -> None:
+        path = self.dir / "custom.md"
+        path.write_text("- [RULE-12] custom (nice)\n", encoding="utf-8")
+        rules = load_rules(make_config((path,), clause_id_pattern=r"RULE-\d+"))
+        self.assertEqual(rules.first_clause_mention("breaks rule-12 again"), ("RULE-12", "rule-12"))
+
     def test_resolve_reported_accepts_the_three_forms(self) -> None:
         rules = self.rules(tool_rule_map={"ruff:F811": "P2.3"})
         self.assertEqual(rules.resolve_reported("P0E.1"), ("P0E.1", None))

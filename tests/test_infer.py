@@ -118,6 +118,45 @@ class TrailerTest(RepoCase):
         self.assertEqual([(c.subject, c.tokens) for c in commits], [("first", ("A",)), ("second", ("B", "C"))])
 
 
+class QuietTest(RepoCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.with_sample_rules()
+        self.add_findings([report_item(id="R1-001")])
+
+    def test_quiet_prints_nothing_when_nothing_was_closed(self) -> None:
+        self.commit("chore: nothing to see")
+        code, out, err = self.cli("infer", "--quiet")
+        self.assertEqual((code, out, err), (0, "", ""))
+
+    def test_quiet_still_reports_what_it_closed(self) -> None:
+        self.commit("fix: x", "Fixes-Finding: R1-001")
+        code, out, _ = self.cli("infer", "--quiet")
+        self.assertEqual(code, 0)
+        self.assertIn("infer: +1 fixed (auto:commit)", out)
+
+    def test_quiet_keeps_warnings_about_a_trailer_that_matches_nothing(self) -> None:
+        self.commit("fix: x", "Fixes-Finding: R9-009")
+        code, out, err = self.cli("infer", "--quiet")
+        self.assertEqual((code, out), (0, ""))
+        self.assertIn("matches no finding", err)
+
+    def test_quiet_skips_the_label_page_nudge_even_when_it_closed_something(self) -> None:
+        self.add_findings([report_item(id="R1-002", line=2)])  # a second finding that stays open
+        self.write_config(rules_files=["rules.md"], label_page_threshold=0)
+        self.commit("fix: x", "Fixes-Finding: R1-001")
+        out = self.cli("infer", "--quiet")[1]
+        self.assertIn("infer: +1 fixed (auto:commit)", out)
+        self.assertNotIn("label-page", out)
+        self.commit("fix: y", "Fixes-Finding: R9-009")
+        self.assertIn("run `ratchet label-page`", self.cli_ok("infer"))  # without --quiet the nudge is there
+
+    def test_a_second_quiet_run_after_closing_is_silent(self) -> None:
+        self.commit("fix: x", "Fixes-Finding: R1-001")
+        self.cli_ok("infer", "--quiet")
+        self.assertEqual(self.cli("infer", "--quiet")[1:], ("", ""))
+
+
 class GatePassTest(RepoCase):
     def infer_out(self, *extra: str) -> str:
         return self.cli_ok("infer", *extra)

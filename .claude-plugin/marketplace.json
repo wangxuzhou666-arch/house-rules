@@ -1,0 +1,14 @@
+{
+  "name": "review-ratchet",
+  "description": "review-ratchet: a ledger of code-review findings that only ratchets forward.",
+  "owner": {
+    "name": "wangxuzhou666-arch"
+  },
+  "plugins": [
+    {
+      "name": "review-ratchet",
+      "source": "./",
+      "description": "Record code-review findings in an append-only ledger, close them from commit trailers, and keep the review rules in a compiled digest that /code-review reads."
+    }
+  ]
+}
