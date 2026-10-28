@@ -46,6 +46,20 @@ class FoldTest(unittest.TestCase):
         with self.assertRaisesRegex(RatchetError, "different file/line/summary"):
             ledger.select_new_events(existing, [review_finding("R1-001", summary="something else")])
 
+    def test_legacy_padded_review_replay_keeps_original_id_and_outcome(self):
+        old = review_finding("R1-001")
+        replay = review_finding("R1-1")
+        existing = [old, self.outcome(old["id"])]
+        self.assertEqual(ledger.select_new_events(existing, [replay, self.outcome(replay["id"])]), [])
+        self.assertEqual(ledger.open_findings(existing), [])
+
+    def test_legacy_alias_still_rejects_changed_content_and_does_not_merge_other_runs(self):
+        old = review_finding("R1-001")
+        with self.assertRaisesRegex(RatchetError, "different file/line/summary"):
+            ledger.select_new_events([old], [review_finding("R1-1", summary="different")])
+        other = review_finding("R2-1", run="R2")
+        self.assertEqual(ledger.select_new_events([old], [other]), [other])
+
 
 class ValidateTest(unittest.TestCase):
     def test_invalid_event_is_rejected_with_every_problem(self) -> None:

@@ -12,3 +12,7 @@ class RoundCapReached(RatchetError):
 
 class RoundKeyUnavailable(RatchetError):
     """No name for the change under review: detached HEAD, no default branch to measure from, or no shared history with it."""
+
+    def __init__(self, message: str, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason  # a few words naming the cause, for the one line `count` prints

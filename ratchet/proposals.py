@@ -172,8 +172,9 @@ def _outputs(config: Config, baseline: dict, proposals: list[dict]) -> dict[str,
     return {name: text for name, text in changed.items() if baseline[name] != text}
 
 
-def create_batch(config: Config, events: list[dict], drafts: list, *, dry_run: bool = False) -> dict:
-    if not config.rules_files or not isinstance(drafts, list) or not drafts:
+def create_batch(config: Config, events: list[dict], drafts: list, *, dry_run: bool = False,
+                 native: dict | None = None) -> dict:
+    if not config.rules_files or not isinstance(drafts, list) or (not drafts and native is None):
         raise RatchetError("distill --drafts requires a nonempty draft list and configured rules_files")
     ensure_idle(config.root)
     baseline, state = _snapshot(config), fold(events)
@@ -181,18 +182,22 @@ def create_batch(config: Config, events: list[dict], drafts: list, *, dry_run: b
     proposals = [_draft(config, d, i, baseline, state, used) for i, d in enumerate(drafts, 1)]
     if len({p["rule_id"] for p in proposals}) != len(proposals):
         raise RatchetError("one proposal per clause per batch")
-    _outputs(config, baseline, proposals)
+    if proposals:
+        _outputs(config, baseline, proposals)
     evidence_ids = {e for p in proposals for e in p["evidence_ids"]}
     evidence = {key: {"finding": state[key].finding, "outcome": state[key].outcome} for key in sorted(evidence_ids)}
     batch = {"v": 1, "repo": str(config.root), "config": _configuration(config), "baseline": baseline,
              "proposals": proposals, "evidence": evidence, "statistics": statistics(config, events), "used_ids": sorted(used)}
+    if native is not None:
+        batch["native"] = native
     batch["id"] = fingerprint(batch)
     if not dry_run:
         from .proposal_page import build_page
         with mutation_lock(config.root):
             ensure_idle(config.root)
             replace_local(config.root, f"{STATE}/{batch['id']}/batch.json", encoded(batch))
-            replace_local(config.root, f"{STATE}/{batch['id']}/review.html", build_page(batch))
+            if native is None:
+                replace_local(config.root, f"{STATE}/{batch['id']}/review.html", build_page(batch))
     return batch
 
 
@@ -207,11 +212,16 @@ def _load_batch(config: Config, batch_id: str) -> dict:
 
 
 def _decisions(batch: dict, payload: dict) -> tuple[list[dict], list[dict]]:
-    if not isinstance(payload, dict) or set(payload) != {"v", "batch_id", "confirmed_by", "decisions"}:
+    fields = {"v", "batch_id", "confirmed_by", "decisions"} | ({"answers"} if "native" in batch else set())
+    if not isinstance(payload, dict) or set(payload) != fields:
         raise RatchetError("decisions require v, batch_id, confirmed_by and decisions")
     if type(payload["v"]) is not int or payload["v"] != 1 or payload["batch_id"] != batch["id"]:
         raise RatchetError("decisions are for another proposal batch")
     _text(payload["confirmed_by"], "confirmed_by")
+    if "native" in batch:
+        from .native_decisions import validate_answers
+        if payload["decisions"] != validate_answers(batch, payload):
+            raise RatchetError("proposal decisions must match the human's whole-group answers")
     entries = payload["decisions"]
     if not isinstance(entries, list) or len(entries) != len(batch["proposals"]):
         raise RatchetError("every proposal needs an explicit decision")
@@ -258,6 +268,9 @@ def apply_batch(config: Config, events: list[dict], payload: dict, *, dry_run: b
                    for key in batch["evidence"] if key in state}
         if current != batch["evidence"]:
             raise RatchetError("proposal evidence changed; distill again")
+        if "native" in batch:
+            from .native_decisions import verify_context
+            verify_context(config, events, batch)
         after = _outputs(config, batch["baseline"], accepted) if accepted else {}
         if accepted:
             prior = read_json(config.root, VERSION) if batch["baseline"][VERSION] else {"revision": 0}
@@ -271,6 +284,9 @@ def apply_batch(config: Config, events: list[dict], payload: dict, *, dry_run: b
         receipt = {"v": 1, "status": "applied", "batch_id": batch_id, "ts": now_iso(),
                    "confirmed_by": payload["confirmed_by"], "decision_hash": fingerprint(payload),
                    "decisions": decisions, "changes": changes}
+        if "native" in batch:
+            receipt["answers"] = payload["answers"]
+            receipt["context_id"] = batch["native"]["context"]["context_id"]
         if not dry_run:
             transact(config.root, {**changes, receipt_name: (None, encoded(receipt))})
         return {"status": "preview" if dry_run else "applied", "batch_id": batch_id,

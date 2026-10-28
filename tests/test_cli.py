@@ -98,10 +98,12 @@ class CountByRuleTest(RepoCase):
         self.append_raw(review_finding("R1-001", rule_id="P1.1"), review_finding("R1-002", rule_id="P1.1", line=11, rule_id_source="human"))
         self.assertIn("  P1.1: 2 (human 1, none 1)\n", self.cli_ok("count", "--by-rule", "--label-source"))
 
-    def test_label_source_without_by_rule_is_refused(self) -> None:
-        code, _, err = self.cli("count", "--label-source")
+    def test_label_source_without_by_rule_is_refused_before_anything_is_printed(self) -> None:
+        self.ingest(review_item(category="p0e-1"))
+        code, out, err = self.cli("count", "--label-source")
         self.assertEqual(code, 1)
         self.assertIn("add --by-rule", err)
+        self.assertEqual(out, "")
 
     def test_only_open_findings_are_counted(self) -> None:
         self.ingest(review_item(category="p0e-1"))

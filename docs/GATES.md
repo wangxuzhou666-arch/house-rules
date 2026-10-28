@@ -18,7 +18,7 @@ some-linter --format=json | convert-to-reports | ratchet gate record
 
 | key | meaning |
 |---|---|
-| `file` | path of the flagged file. Relative to the repo root, or absolute inside it; stored relative with `/` |
+| `file` | path of the flagged file. Relative to the repo root (not the caller's cwd), or absolute inside it; absolute symlink aliases are resolved before the boundary check; stored relative with `/` |
 | `line` | integer >= 0. `0` means "no position" (a syntax error that has none) and is stored as line 1 |
 | `code` | `<tool>:<code>` (`ruff:F811`, `gate:DEPTH`) or a clause id (`P1.1`) |
 | `message` | what the gate said, non-empty; becomes the finding's `summary` |

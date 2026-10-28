@@ -40,6 +40,8 @@ def repo_relative(root: Path, file: str) -> str:
     """The path as the ledger spells it: relative to the repo root, `/`-separated, no `./` or `..` steps."""
     path = Path(os.path.normpath(file))
     if path.is_absolute():
+        path = path.resolve()
+        root = root.resolve()
         if not path.is_relative_to(root):
             raise RatchetError(f"gate file {file!r} is outside the repo {root}")
         path = path.relative_to(root)
@@ -83,13 +85,16 @@ def gate_events(items: list[dict[str, Any]], *, config: Config, rules: Rules, sh
     syntax error without one) and is recorded as line 1.
     """
     events: list[Event] = []
+    line_cache: dict[str, list[str]] = {}
     for number, item in enumerate(items, start=1):
         raw_code = _item_text(item, "code", number)
         rule_id, rule_id_source = rules.resolve_reported(raw_code)
         rule_code = rule_code_of(raw_code)
         rel = repo_relative(config.root, _item_text(item, "file", number))
         line = _item_line(item, number)
-        lines = _file_lines(config.root, rel, number)
+        if rel not in line_cache:
+            line_cache[rel] = _file_lines(config.root, rel, number)
+        lines = line_cache[rel]
         digest = finding_hash(rel, rule_code, lines[line - 1] if 0 < line <= len(lines) else "")
         summary = _item_text(item, "message", number)
         severity = item.get("severity", rules.severity_of(rule_id) or "should-fix")

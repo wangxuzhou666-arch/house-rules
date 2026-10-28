@@ -290,6 +290,14 @@ def select_new_events(existing: list[Event], events: list[Event]) -> list[Event]
         validate(event)
         if event["kind"] == "finding":
             prior = state.get(event["id"])
+            if prior is None and event["source"] in REVIEW_SOURCES:
+                # The first importer used three-digit ordinals. Retain those IDs and
+                # their outcomes when today's importer replays the same review.
+                prefix = f"{event['run_id']}-"
+                ordinal = event["display_id"].removeprefix(prefix)
+                if event["display_id"].startswith(prefix) and re.fullmatch(r"[1-9][0-9]*", ordinal):
+                    legacy_id = f"{event['repo']}:{event['source']}:{event['run_id']}:{prefix}{ordinal.zfill(3)}"
+                    prior = state.get(legacy_id)
             if prior is not None and _is_duplicate(prior, event):
                 _reject_conflicting_replay(prior.finding, event)
                 dropped_ids.add(event["id"])

@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -109,20 +110,43 @@ def vendor_into(source: Path, target: Path, plan: VendorPlan) -> None:
     if in_the_way and not has_marker:
         raise RatchetError(f"{target} already has {in_the_way} but no {MARKER_NAME}; refusing to overwrite files "
                            "that `ratchet vendor` did not create")
-    for entry in in_the_way:
-        path = target / entry
-        if path.is_dir() and not path.is_symlink():
-            shutil.rmtree(path)
-        else:
-            path.unlink()
+    workspace = None
+    keep_backup = False
+    installed, backed_up = [], []
     try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        workspace = Path(tempfile.mkdtemp(prefix=".ratchet-vendor-", dir=target.parent))
+        staged, backup = workspace / "new", workspace / "old"
         for rel in plan.files:
-            (target / rel).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source / rel, target / rel)  # copy2 keeps the execute bit of bin/ratchet
-    except OSError as exc:
-        raise RatchetError(f"cannot copy into {target}: {exc}") from exc
-    marker = {"source_commit": plan.marker.source_commit, "content_sha256": plan.marker.content_sha256}
-    write_text(target / MARKER_NAME, json.dumps(marker, indent=2) + "\n")
+            (staged / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source / rel, staged / rel)  # Keep the launcher's executable mode.
+        if content_sha256(staged, tree_files(staged)) != plan.marker.content_sha256:
+            raise RatchetError("prepared vendor copy does not match the plan; source or copied content changed")
+        marker = {"source_commit": plan.marker.source_commit, "content_sha256": plan.marker.content_sha256}
+        write_text(staged / MARKER_NAME, json.dumps(marker, indent=2) + "\n")
+        # Only owned entries move; unrelated host files, including other bin tools, stay in place.
+        for entry in (*VENDORED_ENTRIES, MARKER_NAME):
+            (target / entry).parent.mkdir(parents=True, exist_ok=True)
+            if os.path.lexists(target / entry):
+                (backup / entry).parent.mkdir(parents=True, exist_ok=True)
+                os.replace(target / entry, backup / entry)
+                backed_up.append(entry)
+            os.replace(staged / entry, target / entry)
+            installed.append(entry)
+    except (OSError, RatchetError) as exc:
+        try:
+            for entry in reversed(installed):
+                os.replace(target / entry, staged / entry)
+            for entry in reversed(backed_up):
+                os.replace(backup / entry, target / entry)
+        except OSError as restore_error:
+            keep_backup = True
+            raise RatchetError(f"vendor replacement failed ({exc}); restoration failed ({restore_error}); "
+                               f"preserved recovery files at {workspace}; do not retry before restoring them") from restore_error
+        raise RatchetError(f"cannot replace vendor copy at {target}: {exc}; previous files retained or restored") from exc
+    finally:
+        if workspace is not None and not keep_backup:
+            shutil.rmtree(workspace)
 
 
 def check_vendored(target: Path, source: Path | None) -> list[str]:

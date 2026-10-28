@@ -9,6 +9,9 @@ from collections import Counter
 from pathlib import Path
 
 from .config import Config, load_config
+from .decision_context import add_parser as add_decision_parser
+from .native_decisions import add_parsers as add_native_parsers
+from .review_evidence import capture as capture_review_evidence, save as save_review_evidence
 from .digest import Output, display_path, plan_outputs
 from .errors import RatchetError, RoundCapReached, RoundKeyUnavailable
 from .fsutil import diff_lines, write_text
@@ -82,19 +85,19 @@ def _ingest_review_text(config: Config, rules: Rules, text: str, *, source: str,
                         discovered_at: str | None, label: str) -> tuple[list[Event], str, int]:
     """(new events, summary line, number of findings the review has) for the findings in a code review's output."""
     items, repaired_quotes = extract_review_items_lenient(text)
-    result = code_review_events(items, config=config, rules=rules, source=source, run_id=run_id, verdict=verdict,
-                                sha=head_sha(config.root), ts=now_iso(), discovered_at=discovered_at)
-    fresh = select_new_events(read_events(config.ledger_path), result.events)
-    return fresh, _ingest_summary(label, fresh, len(items), result, repaired_quotes), len(result.events)
+    ingest_result = code_review_events(items, config=config, rules=rules, source=source, run_id=run_id, verdict=verdict,
+                                       sha=head_sha(config.root), ts=now_iso(), discovered_at=discovered_at)
+    fresh = select_new_events(read_events(config.ledger_path), ingest_result.events)
+    return fresh, _ingest_summary(label, fresh, len(items), ingest_result, repaired_quotes), len(ingest_result.events)
 
 
-def _ingest_summary(label: str, fresh: list[Event], item_count: int, result: IngestResult, repaired_quotes: int) -> str:
+def _ingest_summary(label: str, fresh: list[Event], item_count: int, ingest_result: IngestResult, repaired_quotes: int) -> str:
     repaired = f"; escaped {repaired_quotes} stray quote(s) in the review's JSON" if repaired_quotes else ""
     return (f"{label}: +{len(fresh)} finding(s) from {item_count} item(s) "
-            f"({result.merged_count} merged by file+line, {result.unmapped_count} unmapped, "
-            f"{result.attributed_count} labeled from the text, "
-            f"{result.severity_filled_count} without a usable severity), "
-            f"{len(result.events) - len(fresh)} already recorded{repaired}")
+            f"({ingest_result.merged_count} merged by file+line, {ingest_result.unmapped_count} unmapped, "
+            f"{ingest_result.attributed_count} labeled from the text, "
+            f"{ingest_result.severity_filled_count} without a usable severity), "
+            f"{len(ingest_result.events) - len(fresh)} already recorded{repaired}")
 
 
 def cmd_ingest_code_review(args: argparse.Namespace, config: Config) -> int:
@@ -112,20 +115,28 @@ def cmd_review(args: argparse.Namespace, config: Config) -> int:
         raise RatchetError("--level and --target choose what to review; they do nothing with --from-file")
     events = read_events(config.ledger_path)
     run_id = check_run_id(args.run or default_run_id(review_run_ids(events, config.root)))
+    replayed = any(event["kind"] == "review_run" and event["run"] == run_id for event in events)  # re-ingesting a recorded run is not a round
+    if replayed and not args.from_file:  # only a re-ingest is free; a fresh `claude` run under a recorded id is billed and then fails in save_review
+        raise RatchetError(f"run {run_id} is already recorded; omit --run for a new round, "
+                           "or pass --from-file to re-ingest a saved review under that run id")
     rules = load_rules(config)
     check_target(args.target)
     key = round_key(config.root, args.target, config.default_branch)
     used = review_rounds_used(events, key)
     round_number = used + 1
     over_cap = round_number > config.max_review_rounds
-    refused = over_cap and not args.over_cap
+    refused = over_cap and not args.over_cap and not replayed
     if refused and not args.dry_run:  # before claude runs: a refused round costs nothing
         raise RoundCapReached(
             f"round cap reached for {key}: {used}/{config.max_review_rounds} rounds used; {len(open_findings(events))} findings "
             "still open (ratchet count). Fix blockers, let the rest go to distill, or rerun with --over-cap (recorded).")
-    print(f"review round {round_number}/{config.max_review_rounds} for {key}" + (" (over the cap)" if over_cap else ""))
+    if replayed:
+        print(f"review: replay of run {run_id} (already recorded; not another round)")
+    else:
+        print(f"review round {round_number}/{config.max_review_rounds} for {key}" + (" (over the cap)" if over_cap else ""))
     if refused:
         print("[dry-run] a real run would be refused: the round cap is reached; --over-cap runs it anyway, recorded")
+    evidence_snapshot = None
     if args.from_file:
         text = _read_input(args.from_file)
     else:
@@ -133,18 +144,20 @@ def cmd_review(args: argparse.Namespace, config: Config) -> int:
         if args.dry_run:
             print(f"[dry-run] review: would run `{shlex.join(argv)}` in {config.root} (run {run_id}); nothing run or written")
             return 0
+        evidence_snapshot = capture_review_evidence(config, args.target)
         text = run_claude(argv, config.root)
     if not args.dry_run:
         saved = save_review(config.root, run_id, text)
         print(f"saved raw review output to {display_path(saved, config.root)}")
+        if evidence_snapshot is not None:
+            save_review_evidence(config, run_id, evidence_snapshot, text)
     fresh, summary, finding_count = _ingest_review_text(config, rules, text, source="l1", run_id=run_id, verdict="PLAUSIBLE",
                                                         discovered_at=None, label="review")
     print("\n".join(findings_table(fresh)) if fresh else "no new findings")
     run_event = review_run_event(config.repo_slug, now_iso(), run_id=run_id, key=key, round_number=round_number,
                                  max_rounds=config.max_review_rounds, over_cap=over_cap, finding_count=finding_count,
                                  from_file=bool(args.from_file))
-    replayed = any(event["kind"] == "review_run" and event["run"] == run_id for event in events)
-    _append_or_preview(args, config, fresh if replayed else [*fresh, run_event], summary)  # re-ingesting a recorded run is not another round
+    _append_or_preview(args, config, fresh if replayed else [*fresh, run_event], summary)
     open_after = len(open_findings(events + fresh))
     print(f"open: {open_after}. A commit with a `Fixes-Finding: <id>` trailer closes a finding.")
     if open_after > config.label_page_threshold:
@@ -152,24 +165,31 @@ def cmd_review(args: argparse.Namespace, config: Config) -> int:
     return 0
 
 
+def _review_rounds_line(events: list[Event], config: Config) -> str:
+    """The last line of `count`. Counting only reads, so a rounds problem is said here and never fails the command."""
+    try:
+        key = round_key(config.root, None, config.default_branch)
+    except RoundKeyUnavailable as exc:
+        return f"review rounds: n/a ({exc.reason})"  # a detached HEAD, say, has no change to count rounds on
+    except RatchetError as exc:  # a default_branch in the config that is not a branch, a failing git call
+        return f"review rounds: unavailable ({exc})"
+    return f"review rounds on {key}: {review_rounds_used(events, key)}/{config.max_review_rounds}"
+
+
 def cmd_count(args: argparse.Namespace, config: Config) -> int:
+    if args.label_source and not args.by_rule:
+        raise RatchetError("--label-source splits the --by-rule counts; add --by-rule")
     events = _load_events(args, config)
     state = fold(events)
     open_list = [item.finding for item in state.values() if item.outcome is None]
     by_source = " / ".join(f"{source} {sum(1 for f in open_list if f['source'] == source)}" for source in SOURCES)
     note = "" if config.ledger_path.exists() else f" (no ledger file at {config.ledger_path})"
     print(f"findings: {len(state)} total, {len(open_list)} open ({by_source}); events: {len(events)}{note}")
-    if args.label_source and not args.by_rule:
-        raise RatchetError("--label-source splits the --by-rule counts; add --by-rule")
     if args.by_rule:
         counts = Counter(effective_rule_id(finding, config.legacy_unmapped_alias) for finding in open_list)
         for rule_id, count in sorted(counts.items(), key=lambda pair: (-pair[1], pair[0])):
             print(f"  {rule_id}: {count}" + (_label_sources(rule_id, open_list, config) if args.label_source else ""))
-    try:
-        key = round_key(config.root, None, config.default_branch)
-    except RoundKeyUnavailable:
-        return 0  # a detached HEAD (or no known default branch) has no change to count rounds on
-    print(f"review rounds on {key}: {review_rounds_used(events, key)}/{config.max_review_rounds}")
+    print(_review_rounds_line(events, config))
     return 0
 
 
@@ -390,11 +410,11 @@ def cmd_init(args: argparse.Namespace, config: Config) -> int:
                           install_hooks=not args.no_hooks, edit_claude_md=not args.no_claude_md)
 
     print(f"{'[dry-run] ' if args.dry_run else ''}ratchet init: {config.root}")
-    result = run_init(config, options, _prompt if ask_for_answers else None, lambda step: _print_step(step, args.dry_run, config.root))
-    failed = [step.name for step in result.steps if step.status == "failed"]
+    init_result = run_init(config, options, _prompt if ask_for_answers else None, lambda step: _print_step(step, args.dry_run, config.root))
+    failed = [step.name for step in init_result.steps if step.status == "failed"]
     if failed:
         raise RatchetError(f"init finished with FAILED step(s): {', '.join(failed)}; the reason is printed above. Fix it and rerun")
-    print("[dry-run] nothing written" if args.dry_run else "\n".join(closing_lines(result, options, command_name())))
+    print("[dry-run] nothing written" if args.dry_run else "\n".join(closing_lines(init_result, options, command_name())))
     return 0
 
 
@@ -423,6 +443,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     add_proposal_parsers(sub, common, writes)
+    add_decision_parser(sub, common)
+    add_native_parsers(sub, common, writes)
 
     add = sub.add_parser("add", parents=[common, writes], help="record findings from a JSON report")
     add.add_argument("--source", choices=REVIEW_SOURCES, required=True)

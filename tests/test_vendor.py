@@ -335,6 +335,95 @@ class CheckTest(VendorCase):
 
 
 class RefreshTest(VendorCase):
+    def snapshot(self):
+        return {p.relative_to(self.target).as_posix(): (p.read_bytes(), p.stat().st_mode)
+                for p in self.target.rglob("*") if p.is_file()}
+
+    def test_failed_copy_keeps_the_old_tool_marker_and_host_files(self):
+        self.vendor()
+        (self.target / "bin/host-tool").write_text("host data\n")
+        before = self.snapshot()
+        with mock.patch("ratchet.vendor.shutil.copy2", side_effect=OSError("disk full")):
+            code, _, err = self.run_cli("vendor", "--into", str(self.target))
+        self.assertEqual(code, 1, err)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.check()[0], 0)
+
+    def test_failed_marker_preparation_keeps_the_old_tool(self):
+        self.vendor()
+        before = self.snapshot()
+        with mock.patch("ratchet.vendor.write_text", side_effect=OSError("marker write failed")):
+            code, _, err = self.run_cli("vendor", "--into", str(self.target))
+        self.assertEqual(code, 1, err)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_copy_that_no_longer_matches_the_plan_is_refused_before_replacement(self):
+        self.vendor()
+        before = self.snapshot()
+        copy_file = shutil.copy2
+
+        def corrupt_copy(source, destination):
+            copied = copy_file(source, destination)
+            if Path(source).name == "LICENSE":
+                Path(destination).write_text("incomplete copy\n")
+            return copied
+
+        with mock.patch("ratchet.vendor.shutil.copy2", side_effect=corrupt_copy):
+            code, _, err = self.run_cli("vendor", "--into", str(self.target))
+        self.assertEqual(code, 1, err)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_failed_activation_restores_every_old_entry_and_marker(self):
+        self.vendor()
+        before = self.snapshot()
+        (self.source / "ratchet/cli.py").write_text("print('new version')\n")
+        replace = os.replace
+
+        def fail_activation(source, destination):
+            if Path(destination) == self.target / "schemas" and "new" in Path(source).parts:
+                raise OSError("activation failed")
+            return replace(source, destination)
+
+        with mock.patch("ratchet.vendor.os.replace", side_effect=fail_activation):
+            code, _, err = self.run_cli("vendor", "--into", str(self.target))
+        self.assertEqual(code, 1, err)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.check()[0], 0)
+
+    def test_failed_restoration_keeps_backup_and_names_recovery_location(self):
+        self.vendor()
+        old_package = (self.target / "ratchet/cli.py").read_bytes()
+        replace = os.replace
+
+        def fail_activation_and_restore(source, destination):
+            source, destination = Path(source), Path(destination)
+            if destination == self.target / "schemas" and "new" in source.parts:
+                raise OSError("activation failed")
+            if destination == self.target / "ratchet" and "old" in source.parts:
+                raise OSError("restore failed")
+            return replace(source, destination)
+
+        with mock.patch("ratchet.vendor.os.replace", side_effect=fail_activation_and_restore):
+            code, _, err = self.run_cli("vendor", "--into", str(self.target))
+        self.assertEqual(code, 1, err)
+        recovery, = self.target.parent.glob(".ratchet-vendor-*")
+        self.assertIn(str(recovery), err)
+        self.assertEqual((recovery / "old/ratchet/cli.py").read_bytes(), old_package)
+
+    def test_first_install_failure_does_not_leave_a_partial_tool(self):
+        replace = os.replace
+
+        def fail_activation(source, destination):
+            if Path(destination) == self.target / "schemas":
+                raise OSError("activation failed")
+            return replace(source, destination)
+
+        with mock.patch("ratchet.vendor.os.replace", side_effect=fail_activation):
+            code, _, err = self.run_cli("vendor", "--into", str(self.target))
+        self.assertEqual(code, 1, err)
+        self.assertEqual(self.snapshot(), {})
+        self.assertEqual(list(self.target.parent.glob(".ratchet-vendor-*")), [])
+
     def test_vendoring_again_replaces_the_copy_and_drops_files_the_source_no_longer_has(self) -> None:
         self.vendor()
         (self.target / "ratchet/leftover.py").write_text("old\n", encoding="utf-8")

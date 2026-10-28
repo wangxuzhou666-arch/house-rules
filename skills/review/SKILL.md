@@ -16,3 +16,4 @@ allowed-tools: Bash(ratchet *)
    If `review` is refused (`round cap reached ...`, exit code 3), stop. Do not pass `--over-cap` on your own: tell the user the cap is reached, how many findings are open, and ask whether they want one more round (an `--over-cap` run is recorded in the ledger).
 5. If `review` said `open > N` or more than 20 findings are open, offer `ratchet label-page`: it writes a local HTML page; the user marks each finding fixed, dismissed or false positive, copies the JSON, and you pass it to `ratchet apply-labels`.
 6. Remind the user that a commit whose message ends with `Fixes-Finding: <id>` closes that finding.
+7. When the user requested the review-to-rules loop, continue with [maintain](../maintain/SKILL.md) using these findings. It prepares evidence and asks for decisions through the host's native question tool. A plain review ends here without changing rules.

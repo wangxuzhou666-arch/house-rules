@@ -5,6 +5,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import support  # noqa: F401  (puts the repo root on sys.path)
 from support import FIXTURES, REPO_ROOT, SEVERITY_TABLE, RepoCase
@@ -75,6 +76,22 @@ class HashTest(unittest.TestCase):
 
 
 class IdCompatibilityTest(GateCase):
+    def test_absolute_repo_alias_matches_canonical_path_without_changing_relative_semantics(self):
+        alias = self.tmp / "repo-alias"
+        alias.symlink_to(self.repo, target_is_directory=True)
+        self.assertEqual(repo_relative(self.repo, str(alias / "src/a.py")), "src/a.py")
+        self.assertEqual(repo_relative(self.repo, "src/a.py"), "src/a.py")
+        with self.assertRaises(RatchetError):
+            repo_relative(self.repo, "../a.py")
+
+    def test_multiple_findings_read_each_file_once_per_gate_call(self):
+        from ratchet.fsutil import read_text
+        with mock.patch("ratchet.gate.read_text", wraps=read_text) as reader:
+            self.record(REPORTS)
+        reads = [call.args[0] for call in reader.call_args_list]
+        self.assertEqual(reads.count(self.repo / "src/a.py"), 1)
+        self.assertEqual(reads.count(self.repo / "src/b.py"), 1)
+
     def test_reports_for_findings_an_existing_gate_already_holds_open_add_nothing(self) -> None:
         self.ledger.write_bytes((FIXTURES / "downstream_gate_ledger.jsonl").read_bytes())
         before = self.ledger_bytes()

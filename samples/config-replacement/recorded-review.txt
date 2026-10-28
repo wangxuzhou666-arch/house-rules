@@ -1,0 +1,26 @@
+```json
+[
+  {
+    "file": "heldout_unsafe.py",
+    "line": 7,
+    "summary": "path.open(\"w\") truncates the existing settings file before json.dump has serialized anything, so a serialization failure leaves a destroyed or partial config. This breaks REL.1: the usable configuration is not preserved until the replacement is prepared and validated, and it is not restored on failure.",
+    "failure_scenario": "The file holds valid settings. store_settings(path, {\"k\": object()}) or a dict with a non-string key opens the file in \"w\" mode, which truncates it to 0 bytes. json.dump then raises TypeError, possibly after writing a partial prefix. The old config is gone and the file is empty or truncated JSON. The next read fails to parse, and there is no rollback. Disk-full errors mid-write have the same effect. The fix is to run json.dumps first and write to a temp file, then os.replace, as heldout_safe.py does.",
+    "category": "rel-1",
+    "severity": "should-fix"
+  },
+  {
+    "file": "config_store.py",
+    "line": 18,
+    "summary": "The replacement is written to a fresh temp file and os.replace swaps it over the target, so the original file's permission bits are not carried over. The new file gets the default-umask mode (typically 0644).",
+    "failure_scenario": "The existing config is mode 0600 because it holds credentials. After replace_config it becomes world-readable under the default umask, and any group or ownership setup is lost. This is a correctness regression from the old .pending-based flow, which had the same weakness, but no stated style rule covers it. The fix is to copy the original's mode with shutil.copymode or os.chmod before os.replace when the target exists.",
+    "category": "unmapped",
+    "severity": "nice"
+  }
+]
+```
+
+`config_store.py` and `heldout_safe.py` otherwise comply with REL.1 and ERR.1:
+- Both finish validating or serializing before touching the target.
+- Both write to a temp path in the same directory and then call `os.replace`.
+- Any failure leaves the original file untouched.
+- `read_config` lets parse errors propagate.

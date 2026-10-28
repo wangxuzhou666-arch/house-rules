@@ -68,7 +68,8 @@ def default_branch(root: Path, configured: str | None) -> tuple[str, str]:
         if commit is not None:
             return name, commit
     raise RoundKeyUnavailable("cannot tell which branch this one forked from (no origin/HEAD, main or master): "
-                              "set default_branch in .ratchet.json, or pass --target")
+                              "set default_branch in .ratchet.json, or pass --target",
+                              "no default branch found (no origin/HEAD, main or master)")
 
 
 def round_key(root: Path, target: str | None, configured_default: str | None) -> str:
@@ -83,14 +84,15 @@ def round_key(root: Path, target: str | None, configured_default: str | None) ->
     branch = current_branch(root)
     if branch is None:
         raise RoundKeyUnavailable("HEAD is detached, so there is no branch to count review rounds on: check out a branch, "
-                                  "or pass --target <T> (not allowed with --from-file)")
+                                  "or pass --target <T> (not allowed with --from-file)", "detached HEAD")
     head = commit_sha(root, "HEAD")
     if head is None:
         return f"{branch}@unborn"
     default_name, default_commit = default_branch(root, configured_default)
     fork_point = merge_base_with_head(root, default_commit)  # on the default branch itself that is HEAD
     if fork_point is None:
-        raise RoundKeyUnavailable(f"{branch} shares no history with {default_name}, so its fork point is unknown: pass --target")
+        raise RoundKeyUnavailable(f"{branch} shares no history with {default_name}, so its fork point is unknown: pass --target",
+                                  f"{branch} shares no history with {default_name}")
     return f"{branch}@{fork_point[:FORK_POINT_LENGTH]}"
 
 

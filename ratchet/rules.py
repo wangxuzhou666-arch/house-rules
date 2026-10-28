@@ -220,12 +220,27 @@ class Rules:
         return self.id_by_kebab.get(_kebab_key(text))
 
     @cached_property
-    def _mention_re(self) -> re.Pattern[str]:
-        return _mention_pattern(list(self.id_by_kebab))
+    def _has_severity_data(self) -> bool:
+        return any(self.severity_of(clause_id) is not None for clause_id in self.clauses)
+
+    def is_reviewer_rule(self, rule_id: str) -> bool:
+        """A known clause that `compile` lists under Reviewer rules: guidance for the reviewer, no finding violates it.
+
+        That is a clause without a severity. The exception is rules with no severity anywhere (no tag, no family table):
+        `compile` then lists every clause there and warns, so the file draws no line between violations and guidance,
+        and each clause stays something a finding can violate (its severity defaults to should-fix).
+        """
+        return rule_id in self.clauses and self.severity_of(rule_id) is None and self._has_severity_data
+
+    @cached_property
+    def _mention_re(self) -> re.Pattern[str] | None:
+        """Over the clauses a finding can violate, not the Reviewer rules."""
+        keys = [key for key, clause_id in self.id_by_kebab.items() if not self.is_reviewer_rule(clause_id)]
+        return _mention_pattern(keys) if keys else None
 
     def first_clause_mention(self, text: str) -> tuple[str, str] | None:
-        """(clause id, the token as written) for the first known clause id found in free text, else None."""
-        if not self.id_by_kebab:
+        """(clause id, the token as written) for the first clause id found in free text that is not a Reviewer rule, else None."""
+        if self._mention_re is None:
             return None
         match = self._mention_re.search(text)
         if match is None:

@@ -19,7 +19,7 @@ from support import _GIT_ENV, STYLE_RULES, RepoCase, git, review_item
 from ratchet.blocks import HASH_BEGIN, HASH_END, HTML_BEGIN, HTML_END, upsert_block
 from ratchet.cli import main
 from ratchet.errors import RatchetError
-from ratchet.hooks import ExitScan, Placement, UnclearExit, hook_body, place_block, scan_for_top_level_exit
+from ratchet.hooks import Pinned, Placement, hook_body, place_block, probe_hook
 from ratchet.onboard import CLAUDE_MD_HEADING, EXECUTABLE_PATH, TEMPLATE_PATH
 
 DIGEST = "CODING-STYLE.digest.md"
@@ -85,9 +85,9 @@ class FreshRepoTest(InitCase):
             text = path.read_text(encoding="utf-8")
             self.assertTrue(text.startswith("#!/bin/sh\n"), name)
             self.assertTrue(os.access(path, os.X_OK), name)
-            self.assertIn(f"RATCHET_BIN={QUOTED_EXECUTABLE}\n", text)
-            self.assertIn(f"RATCHET_PY={QUOTED_INTERPRETER}\n", text)
-            self.assertIn(f'"$RATCHET_PY" "$RATCHET_BIN" {command}', text)
+            self.assertIn(f"_ratchet_bin={QUOTED_EXECUTABLE}\n", text)
+            self.assertIn(f"_ratchet_py={QUOTED_INTERPRETER}\n", text)
+            self.assertIn(f'"$_ratchet_py" "$_ratchet_bin" {command}', text)
             self.assertEqual(text.count(HASH_BEGIN), 1)
             self.assertEqual(text.count(HASH_END), 1)
 
@@ -307,12 +307,12 @@ class ClaudeMdTest(InitCase):
 
 class HooksTest(InitCase):
     def test_an_existing_hook_keeps_its_content_and_gains_one_block(self) -> None:
-        original = "#!/bin/sh\necho 'my own check'\n"
         self.hook("pre-commit").parent.mkdir(parents=True, exist_ok=True)
-        self.hook("pre-commit").write_text(original, encoding="utf-8")
+        self.hook("pre-commit").write_text("#!/bin/sh\necho 'my own check'\n", encoding="utf-8")
         self.init("--yes")
         text = self.text(".git/hooks/pre-commit")
-        self.assertTrue(text.startswith(original + "\n" + HASH_BEGIN + "\n"))
+        self.assertTrue(text.startswith("#!/bin/sh\n\n" + HASH_BEGIN + "\n"))
+        self.assertTrue(text.endswith(HASH_END + "\n\necho 'my own check'\n"))
         self.init("--yes")
         self.assertEqual(self.text(".git/hooks/pre-commit"), text)
         self.assertEqual(text.count(HASH_BEGIN), 1)
@@ -347,10 +347,20 @@ class HooksTest(InitCase):
     def test_a_hook_without_a_shebang_is_not_touched(self) -> None:
         path = self.hook("post-commit")
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("echo no shebang\n", encoding="utf-8")
+        for original in ("echo no shebang\n", "# my hook\necho a\n"):  # a comment on the first line is no shebang
+            with self.subTest(original=original):
+                path.write_text(original, encoding="utf-8")
+                out = self.init("--yes")
+                self.assertEqual(path.read_text(encoding="utf-8"), original)
+                self.assertEqual(self.statuses(out)["hook post-commit"], "MANUAL")
+
+    def test_an_empty_hook_file_is_made_a_shell_script_with_the_block(self) -> None:
+        path = self.hook("post-commit")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", encoding="utf-8")
         out = self.init("--yes")
-        self.assertEqual(path.read_text(encoding="utf-8"), "echo no shebang\n")
-        self.assertEqual(self.statuses(out)["hook post-commit"], "MANUAL")
+        self.assertEqual(self.statuses(out)["hook post-commit"], "added")
+        self.assertTrue(path.read_text(encoding="utf-8").startswith(f"#!/bin/sh\n\n{HASH_BEGIN}\n"))
 
     def test_a_relative_core_hooks_path_is_respected(self) -> None:
         git(self.repo, "config", "core.hooksPath", ".githooks")
@@ -677,90 +687,9 @@ class EndToEndTest(InitCase):
         self.assertEqual(self.git_commit("-m", "docs: touch the rules").returncode, 0)
 
 
-class HookScanTest(unittest.TestCase):
-    """Which line of a shell script ends it at top level. Only a column-0 `exit` / `exec cmd` outside every group counts."""
-
-    def scan(self, text: str) -> ExitScan:
-        return scan_for_top_level_exit(text.splitlines())
-
-    def test_the_forms_of_a_final_exit(self) -> None:
-        for last in ("exit", "exit 0", "exit 1", "exit $rc", 'exit "$status"', "exit $?", "exit 0  # done", "exit;", "exit 0 || true",
-                     "exec ./real-hook", 'exec /usr/bin/env sh "$@"', "exec -a name cmd"):
-            with self.subTest(last=last):
-                self.assertEqual(self.scan(f"#!/bin/sh\necho a\n{last}\n"), ExitScan(2, None))
-
-    def test_lines_that_only_look_like_an_exit(self) -> None:
-        for line in ("  exit 0", "\texit 0", "echo exit", "# exit 0", "exitcode=1", "exit_now() { :; }", "exec >/dev/null 2>&1", "exec 3<input",
-                     "exec 3>&1", "exec", "trap cleanup EXIT", '[ -z "$x" ] && exit 0', "true || exit 1", "echo a; exit 1"):
-            with self.subTest(line=line):
-                self.assertEqual(self.scan(f"#!/bin/sh\n{line}\n"), ExitScan(None, None))
-
-    def test_an_exit_inside_a_group_is_not_top_level_even_at_column_0(self) -> None:
-        groups = {
-            "function": "f() {\nexit 1\n}",
-            "function keyword": "function f {\nexit 1\n}",
-            "brace group": "{\nexit 1\n}",
-            "if": "if true; then\nexit 1\nfi",
-            "if else": "if true; then\n:\nelif false; then\n:\nelse\nexit 1\nfi",
-            "for": "for f in a b; do\nexit 1\ndone",
-            "while": "while true; do\nexit 1\ndone",
-            "until": "until false; do\nexit 1\ndone",
-            "case": 'case "$x" in\n  a) echo a ;;\n  *)\nexit 1\n  ;;\nesac',
-            "nested": "f() {\nif true; then\nfor i in 1; do\nexit 1\ndone\nfi\n}",
-        }
-        for label, text in groups.items():
-            with self.subTest(label):
-                self.assertEqual(self.scan(f"#!/bin/sh\n{text}\n"), ExitScan(None, None))
-
-    def test_an_exit_after_a_closed_group_is_top_level(self) -> None:
-        closed = {
-            "function": "f() {\n  exit 1\n}",
-            "if": "if true; then\n  echo a\nfi",
-            "for": "for f in a b; do\n  echo $f\ndone",
-            "case": 'case "$x" in\n  a) echo a ;;\nesac',
-            "one-line if": "if true; then exit 1; fi",
-            "one-line loop": "for f in a b; do echo $f; done",
-            "one-line brace group": "[ -f x ] && { echo a; }",
-            "one-line function": "f() { exit 1; }",
-            "loop with a redirect": "while read -r line; do\n  echo $line\ndone < /dev/null",
-        }
-        for label, text in closed.items():
-            with self.subTest(label):
-                lines = text.count("\n") + 1
-                self.assertEqual(self.scan(f"{text}\nexit 0\n"), ExitScan(lines, None))
-
-    def test_keywords_in_strings_comments_and_arguments_are_not_groups(self) -> None:
-        for line in ('echo "if"', "echo 'case'", "echo if", "echo fi", "echo done", 'echo "fi"', "# if", "echo a # fi", "x=${#y}", "n=$((1+2))",
-                     "echo $(echo fi)", "echo `echo if`", "echo it\\'s", "# don't"):
-            with self.subTest(line=line):
-                self.assertEqual(self.scan(f"{line}\nexit 0\n"), ExitScan(1, None))
-
-    def test_a_here_document_makes_a_later_exit_a_guess(self) -> None:
-        scan = self.scan("cat <<EOF >/dev/null\nnote\nEOF\nexit 0\n")
-        self.assertEqual(scan, ExitScan(3, "a here-document follows"))
-
-    def test_other_text_the_scan_cannot_follow_makes_a_later_exit_a_guess(self) -> None:
-        unreadable = {
-            "a string over several lines": ('echo "a\nb"\nexit 0\n', "a quoted string continues on the next line"),
-            "a substitution over several lines": ("x=$(\n  date\n)\nexit 0\n", "a command substitution continues on the next line"),
-            "a line continuation": ("echo a \\\n  b\nexit 0\n", "a line continuation follows"),
-            "a subshell over several lines": ("(\n  cd x\n)\nexit 0\n", "a subshell spans lines"),
-            "a closing keyword with no opener": ("fi\nexit 0\n", "a closing keyword has no opener"),
-        }
-        for label, (text, reason) in unreadable.items():
-            with self.subTest(label):
-                scan = self.scan(text)
-                self.assertEqual(scan.doubt, reason)
-                self.assertIsNotNone(scan.index)
-
-    def test_an_exit_before_the_unreadable_part_is_certain(self) -> None:
-        self.assertEqual(self.scan("echo a\nexit 0\ncat <<EOF\nx\nEOF\n"), ExitScan(1, None))
-
-    def test_unreadable_text_with_no_exit_after_it_is_nothing(self) -> None:
-        self.assertEqual(self.scan("cat <<EOF >/dev/null\nx\nEOF\necho done\n"), ExitScan(None, None))
-
-
 class PlaceBlockTest(unittest.TestCase):
+    """Where the block goes in a script: always at the top, under the shebang."""
+
     BODY = ["echo block"]
 
     def place(self, base: str) -> Placement:
@@ -769,59 +698,80 @@ class PlaceBlockTest(unittest.TestCase):
     def block(self) -> str:
         return f"{HASH_BEGIN}\necho block\n{HASH_END}\n"
 
-    def test_no_exit_appends_after_a_blank_line(self) -> None:
-        self.assertEqual(self.place("#!/bin/sh\necho a\n"), Placement(f"#!/bin/sh\necho a\n\n{self.block()}", "add"))
+    def test_a_new_hook_gets_the_block_under_the_shebang(self) -> None:
+        self.assertEqual(self.place("#!/bin/sh\n"), Placement(f"#!/bin/sh\n\n{self.block()}", "add"))
 
-    def test_a_final_exit_gets_the_block_before_it(self) -> None:
-        self.assertEqual(self.place("#!/bin/sh\necho a\nexit 0\n"), Placement(f"#!/bin/sh\necho a\n\n{self.block()}\nexit 0\n", "add"))
+    def test_the_block_goes_above_the_users_code_whatever_that_code_is(self) -> None:
+        scripts = {
+            "plain": "echo a\n",
+            "final exit": "echo a\nexit 0\n",
+            "exec": "echo a\nexec ./real-hook\n",
+            "set -e": "set -e\necho a\n",
+            "a function that exits": "die() {\nexit 1\n}\ndie\n",
+            "a here-document": "cat <<EOF >/dev/null\nx\nEOF\nexit 0\n",
+            "a string over several lines": 'echo "first\nsecond"\nexit 0\n',
+        }
+        for label, user in scripts.items():
+            with self.subTest(label):
+                self.assertEqual(self.place(f"#!/bin/sh\n{user}"), Placement(f"#!/bin/sh\n\n{self.block()}\n{user}", "add"))
 
-    def test_a_blank_line_above_the_exit_is_reused(self) -> None:
-        self.assertEqual(self.place("#!/bin/sh\necho a\n\nexit 0\n"), Placement(f"#!/bin/sh\necho a\n\n{self.block()}\nexit 0\n", "add"))
+    def test_a_blank_line_under_the_shebang_is_reused(self) -> None:
+        self.assertEqual(self.place("#!/bin/sh\n\necho a\n"), Placement(f"#!/bin/sh\n\n{self.block()}\necho a\n", "add"))
 
-    def test_the_block_alone_before_the_exit_is_ok_and_stays(self) -> None:
-        text = f"#!/bin/sh\necho a\n\n{self.block()}\nexit 0\n"
-        self.assertEqual(self.place(text), Placement(text, "ok"))
+    def test_a_script_without_a_shebang_is_a_programmer_error_because_plan_hook_never_passes_one(self) -> None:
+        for base in ("echo a\n", "", "# my hook\necho a\n"):
+            with self.subTest(base=base), self.assertRaises(AssertionError):
+                self.place(base)
 
-    def test_a_block_before_the_exit_is_refreshed_in_place(self) -> None:
+    def test_a_shebang_without_a_final_newline(self) -> None:
+        self.assertEqual(self.place("#!/bin/sh"), Placement(f"#!/bin/sh\n\n{self.block()}", "add"))
+
+    def test_a_block_at_the_top_is_ok_and_stays(self) -> None:
+        for label, text in {"blank line under the shebang": f"#!/bin/sh\n\n{self.block()}\necho a\n",
+                            "no blank line": f"#!/bin/sh\n{self.block()}echo a\n"}.items():
+            with self.subTest(label):
+                self.assertEqual(self.place(text), Placement(text, "ok"))
+
+    def test_a_block_at_the_top_is_refreshed_in_place(self) -> None:
         text = f"#!/bin/sh\n{HASH_BEGIN}\nold\n{HASH_END}\nexit 0\n"
         self.assertEqual(self.place(text), Placement(f"#!/bin/sh\n{self.block()}exit 0\n", "update"))
 
-    def test_a_block_after_the_exit_moves_before_it_and_leaves_no_stray_blank_line(self) -> None:
+    def test_a_block_an_earlier_version_appended_after_the_exit_moves_to_the_top_and_leaves_no_stray_blank_line(self) -> None:
         text = f"#!/bin/sh\necho a\nexit 0\n\n{HASH_BEGIN}\nold\n{HASH_END}\n"
-        self.assertEqual(self.place(text), Placement(f"#!/bin/sh\necho a\n\n{self.block()}\nexit 0\n", "update"))
+        self.assertEqual(self.place(text), Placement(f"#!/bin/sh\n\n{self.block()}\necho a\nexit 0\n", "update"))
 
-    def test_a_block_after_the_exit_with_text_after_it_keeps_that_text(self) -> None:
+    def test_a_block_further_down_is_moved_even_when_its_lines_are_current(self) -> None:
+        self.assertEqual(self.place(f"#!/bin/sh\necho a\n\n{self.block()}"), Placement(f"#!/bin/sh\n\n{self.block()}\necho a\n", "update"))
+
+    def test_a_block_in_the_middle_moves_up_and_the_text_around_it_keeps_one_blank_line(self) -> None:
+        text = f"#!/bin/sh\necho a\n\n{HASH_BEGIN}\nold\n{HASH_END}\n\necho b\n"
+        self.assertEqual(self.place(text), Placement(f"#!/bin/sh\n\n{self.block()}\necho a\n\necho b\n", "update"))
+
+    def test_a_moved_block_with_text_after_it_keeps_that_text(self) -> None:
         text = f"#!/bin/sh\nexit 0\n\n{HASH_BEGIN}\nold\n{HASH_END}\n\n# tail\n"
         self.assertEqual(self.place(text).text, f"#!/bin/sh\n\n{self.block()}\nexit 0\n\n# tail\n")
 
-    def test_an_exit_inside_a_function_is_ignored(self) -> None:
-        text = "#!/bin/sh\ndie() {\nexit 1\n}\necho a\n"
-        self.assertEqual(self.place(text), Placement(f"{text}\n{self.block()}", "add"))
+    def test_a_comment_between_the_shebang_and_the_block_does_not_count_as_the_top(self) -> None:
+        self.assertEqual(self.place(f"#!/bin/sh\n# mine\n{self.block()}"), Placement(f"#!/bin/sh\n\n{self.block()}\n# mine\n", "update"))
 
-    def test_an_exit_that_cannot_be_placed_safely_raises_with_the_line(self) -> None:
-        with self.assertRaises(UnclearExit) as caught:
-            self.place("#!/bin/sh\ncat <<EOF >/dev/null\nx\nEOF\nexit 0\n")
-        self.assertEqual((caught.exception.index, caught.exception.line, caught.exception.doubt), (4, "exit 0", "a here-document follows"))
-
-    def test_a_block_that_precedes_an_unclear_exit_is_left_alone(self) -> None:
-        text = f"#!/bin/sh\n{self.block()}cat <<EOF >/dev/null\nx\nEOF\nexit 0\n"
-        self.assertEqual(self.place(text), Placement(text, "ok"))
-
-    def test_a_block_after_an_unclear_exit_raises(self) -> None:
-        with self.assertRaises(UnclearExit):
-            self.place(f"#!/bin/sh\ncat <<EOF >/dev/null\nx\nEOF\nexit 0\n{self.block()}")
+    def test_placing_twice_changes_nothing(self) -> None:
+        for base in ("#!/bin/sh\n", "#!/bin/sh\necho a\nexit 0\n", f"#!/bin/sh\necho a\nexit 0\n\n{HASH_BEGIN}\nold\n{HASH_END}\n",
+                     "#!/bin/sh", "#!/bin/sh\r\necho a\r\n"):
+            with self.subTest(base=base):
+                once = self.place(base)
+                self.assertEqual(self.place(once.text), Placement(once.text, "ok"))
 
     def test_crlf_lines_outside_the_block_survive(self) -> None:
         placed = self.place("#!/bin/sh\r\necho a\r\nexit 0\r\n")
-        self.assertTrue(placed.text.startswith("#!/bin/sh\r\necho a\r\n"))
-        self.assertTrue(placed.text.endswith("exit 0\r\n"))
+        self.assertTrue(placed.text.startswith("#!/bin/sh\r\n"))
+        self.assertTrue(placed.text.endswith("echo a\r\nexit 0\r\n"))
 
     def test_a_file_without_a_final_newline_after_the_exit(self) -> None:
         self.assertEqual(self.place("#!/bin/sh\nexit 0").text, f"#!/bin/sh\n\n{self.block()}\nexit 0")
 
 
 class HookPlacementTest(InitCase):
-    """init on a hook script that already ends with an exit: the block must be somewhere the hook reaches."""
+    """init on a hook script that has code of its own: the block goes above all of it, so nothing of that code can skip it."""
 
     def install(self, text: str, hook: str = "pre-commit") -> Path:
         path = self.hook(hook)
@@ -834,13 +784,13 @@ class HookPlacementTest(InitCase):
         proc = subprocess.run([str(path)], cwd=self.repo, capture_output=True, text=True, env={**os.environ, "RATCHET_HOOK_PROBE": "1"})
         return proc.stdout.splitlines()
 
-    def test_a_final_exit_0_gets_the_block_before_it_and_the_guard_runs(self) -> None:
+    def test_a_final_exit_0_does_not_matter_because_the_block_is_under_the_shebang(self) -> None:
         path = self.install("#!/bin/sh\necho mine\nexit 0\n")
         out = self.init("--yes")
         text = path.read_text(encoding="utf-8")
         self.assertEqual(self.statuses(out)["hook pre-commit"], "added")
-        self.assertTrue(text.startswith(f"#!/bin/sh\necho mine\n\n{HASH_BEGIN}\n"))
-        self.assertTrue(text.endswith(f"{HASH_END}\n\nexit 0\n"))
+        self.assertTrue(text.startswith(f"#!/bin/sh\n\n{HASH_BEGIN}\n"))
+        self.assertTrue(text.endswith(f"{HASH_END}\n\necho mine\nexit 0\n"))
         self.assertIn("ratchet-hook-probe pre-commit", self.probe(path))
 
     def test_it_is_idempotent_and_a_rerun_says_already_ok(self) -> None:
@@ -851,96 +801,63 @@ class HookPlacementTest(InitCase):
         self.assertEqual(self.statuses(out)["hook pre-commit"], "already ok")
         self.assertEqual(path.read_text(encoding="utf-8"), before)
 
-    def test_a_final_exit_with_a_variable(self) -> None:
-        path = self.install("#!/bin/sh\nrc=0\necho mine\nexit $rc\n")
-        self.init("--yes")
-        text = path.read_text(encoding="utf-8")
-        self.assertLess(text.index(HASH_BEGIN), text.index("exit $rc"))
-        self.assertIn("ratchet-hook-probe pre-commit", self.probe(path))
-
-    def test_a_top_level_exec_ends_the_script_too(self) -> None:
-        path = self.install("#!/bin/sh\necho mine\nexec ./real-hook\n")
-        self.init("--yes")
-        text = path.read_text(encoding="utf-8")
-        self.assertLess(text.index(HASH_BEGIN), text.index("exec ./real-hook"))
-
-    def test_an_exec_that_only_redirects_does_not(self) -> None:
-        original = "#!/bin/sh\nexec 3>&1\necho mine\n"
-        path = self.install(original)
-        self.init("--yes")
-        self.assertTrue(path.read_text(encoding="utf-8").startswith(original + "\n" + HASH_BEGIN))
-
-    def test_an_exit_inside_a_function_does_not_count(self) -> None:
-        for label, original in (("indented", '#!/bin/sh\ndie() {\n  echo "$1" >&2\n  exit 1\n}\necho mine\n'),
-                                ("column 0", '#!/bin/sh\ndie() {\necho "$1" >&2\nexit 1\n}\necho mine\n')):
+    def test_whatever_the_script_does_later_init_succeeds_and_the_block_answers_the_probe(self) -> None:
+        scripts = {
+            "an exit with a variable": "rc=0\necho mine\nexit $rc\n",
+            "a top-level exec": "echo mine\nexec ./real-hook\n",
+            "an exec that only redirects": "exec 3>&1\necho mine\n",
+            "set -e": "set -e\necho mine\nexit 0\n",
+            "a function that exits": 'main() {\n  echo mine\n  exit 0\n}\nmain "$@"\n',
+            "an exit inside an if": 'if [ -n "$SKIP" ]; then\nexit 0\nfi\necho mine\n',
+            "a here-document": "cat <<EOF >/dev/null\nnote\nEOF\nexit 0\n",
+            "a string over several lines": 'echo "first\nsecond"\nexit 0\n',
+            "an early exit when nothing is staged": '[ -z "$(git diff --cached --name-only)" ] && exit 0\necho work\n',
+        }
+        for label, user in scripts.items():
             with self.subTest(label):
-                path = self.install(original)
-                self.init("--yes")
-                self.assertTrue(path.read_text(encoding="utf-8").startswith(original + "\n" + HASH_BEGIN))
+                path = self.install(f"#!/bin/sh\n{user}")
+                out = self.init("--yes")
+                text = path.read_text(encoding="utf-8")
+                self.assertEqual(self.statuses(out)["hook pre-commit"], "added")
+                self.assertTrue(text.startswith(f"#!/bin/sh\n\n{HASH_BEGIN}\n"))
+                self.assertTrue(text.endswith(f"{HASH_END}\n\n{user}"))
+                self.assertIn("ratchet-hook-probe pre-commit", self.probe(path))
                 path.unlink()
 
-    def test_an_exit_inside_an_if_and_a_guard_do_not_count(self) -> None:
-        original = '#!/bin/sh\nif [ -n "$SKIP" ]; then\nexit 0\nfi\n[ -n "$X" ] && exit 0\necho mine\n'
-        path = self.install(original)
-        self.init("--yes")
-        self.assertTrue(path.read_text(encoding="utf-8").startswith(original + "\n" + HASH_BEGIN))
-
-    def test_a_block_an_earlier_version_appended_after_the_exit_is_moved_before_it(self) -> None:
+    def test_a_block_an_earlier_version_appended_after_the_exit_is_moved_to_the_top(self) -> None:
         old_block = "\n".join([HASH_BEGIN, *hook_body("pre-commit", (Path("/old/python3"), Path("/old/ratchet"))), HASH_END])
         path = self.install(f"#!/bin/sh\necho mine\nexit 0\n\n{old_block}\n")
         out = self.init("--yes")
         text = path.read_text(encoding="utf-8")
         self.assertEqual(self.statuses(out)["hook pre-commit"], "updated")
-        self.assertLess(text.index(HASH_BEGIN), text.index("\nexit 0"))
         self.assertEqual(text.count(HASH_BEGIN), 1)
         self.assertNotIn("/old/python3", text)
-        self.assertTrue(text.startswith("#!/bin/sh\necho mine\n\n" + HASH_BEGIN))
-        self.assertTrue(text.endswith(f"{HASH_END}\n\nexit 0\n"))  # no blank line left where the old block was
+        self.assertTrue(text.startswith(f"#!/bin/sh\n\n{HASH_BEGIN}\n"))
+        self.assertTrue(text.endswith(f"{HASH_END}\n\necho mine\nexit 0\n"))  # no blank line left where the old block was
         self.assertEqual(self.statuses(self.init("--yes"))["hook pre-commit"], "already ok")
 
-    def test_a_set_e_script_with_a_final_exit(self) -> None:
-        path = self.install("#!/bin/sh\nset -e\necho mine\nexit 0\n")
+    def test_a_current_block_that_sits_lower_in_the_script_is_moved_up_and_reported_as_a_change(self) -> None:
+        path = self.install("#!/bin/sh\necho mine\n")
         self.init("--yes")
         text = path.read_text(encoding="utf-8")
-        self.assertLess(text.index(HASH_BEGIN), text.index("exit 0"))
-        self.assertIn("ratchet-hook-probe pre-commit", self.probe(path))
-
-    def test_a_script_the_scan_cannot_read_is_left_alone_and_the_output_says_what_to_paste_where(self) -> None:
-        original = "#!/bin/sh\ncat <<EOF >/dev/null\nnote\nEOF\nexit 0\n"
-        path = self.install(original)
+        block = text[text.index(HASH_BEGIN):text.index(HASH_END) + len(HASH_END) + 1]
+        path.write_text(f"#!/bin/sh\necho mine\n\n{block}", encoding="utf-8")  # the user moved it below their own code
         out = self.init("--yes")
-        self.assertEqual(path.read_text(encoding="utf-8"), original)
-        self.assertEqual(self.statuses(out)["hook pre-commit"], "MANUAL")
-        self.assertEqual(self.statuses(out)["hook post-commit"], "added")
-        self.assertIn("line 5 (`exit 0`)", out)
-        self.assertIn("a here-document follows", out)
-        self.assertIn("Paste this block above that line", out)
-        lines = out.splitlines()
-        pasted = [line[10:] for line in lines[lines.index(f"{' ' * 10}{HASH_BEGIN}"):lines.index(f"{' ' * 10}{HASH_END}") + 1]]
-        self.assertEqual(pasted[0], HASH_BEGIN)
-        self.assertIn("if [ -f .ratchet.json ]; then", pasted)
-        # Doing what it says makes the next run pass: the pasted block sits before the exit and answers the probe.
-        path.write_text(original.replace("exit 0\n", "\n".join(pasted) + "\nexit 0\n"), encoding="utf-8")
-        rerun = self.init("--yes")
-        self.assertEqual(self.statuses(rerun)["hook pre-commit"], "already ok")
+        self.assertEqual(self.statuses(out)["hook pre-commit"], "updated")
+        self.assertEqual(path.read_text(encoding="utf-8"), text)
+        self.assertEqual(self.statuses(self.init("--yes"))["hook pre-commit"], "already ok")
 
-    def test_a_multi_line_string_is_unreadable_too(self) -> None:
-        original = '#!/bin/sh\necho "first\nsecond"\nexit 0\n'
+    def test_the_dry_run_plans_the_move_without_making_it(self) -> None:
+        old_block = "\n".join([HASH_BEGIN, *hook_body("pre-commit", (Path("/old/python3"), Path("/old/ratchet"))), HASH_END])
+        original = f"#!/bin/sh\necho mine\nexit 0\n\n{old_block}\n"
         path = self.install(original)
-        out = self.init("--yes")
+        out = self.init("--dry-run")
+        self.assertEqual(self.statuses(out)["hook pre-commit"], "would update")
         self.assertEqual(path.read_text(encoding="utf-8"), original)
-        self.assertEqual(self.statuses(out)["hook pre-commit"], "MANUAL")
-        self.assertIn("a quoted string continues on the next line", out)
-
-    def test_unreadable_text_with_no_exit_after_it_still_appends(self) -> None:
-        original = "#!/bin/sh\ncat <<EOF >/dev/null\nnote\nEOF\n"
-        path = self.install(original)
-        self.init("--yes")
-        self.assertTrue(path.read_text(encoding="utf-8").startswith(original + "\n" + HASH_BEGIN))
 
 
 class HookProbeTest(InitCase):
-    """The live check: every installed block is run once, and a hook that never reaches it fails init."""
+    """The live check: every installed block is run once. The block is the first thing in the hook, so only the block runs."""
 
     def install(self, text: str, hook: str = "pre-commit") -> Path:
         path = self.hook(hook)
@@ -954,90 +871,39 @@ class HookProbeTest(InitCase):
         self.assertEqual(code, 1, out)
         return out, err
 
-    def test_a_block_the_hook_never_reaches_fails_init_loudly(self) -> None:
-        # No top-level exit for the scan to find: the exit is inside a function that the script calls.
-        path = self.install('#!/bin/sh\nmain() {\n  echo mine\n  exit 0\n}\nmain "$@"\n')
-        out, err = self.fails()
-        self.assertEqual(self.statuses(out)["hook pre-commit"], "FAILED")
-        self.assertIn("never reached", out)
-        self.assertIn(f"Move the `{HASH_BEGIN}` ... `{HASH_END}` block above that point", out)
-        self.assertIn("mine", out)  # the hook's own output is quoted back
-        self.assertIn("FAILED step(s): hook pre-commit", err)
-        self.assertEqual(self.statuses(out)["hook post-commit"], "added")  # the other hook is still installed
-        self.assertEqual(self.statuses(out)[".gitignore"], "added")  # and so are the steps after it
-        self.assertEqual(path.read_text(encoding="utf-8").count(HASH_BEGIN), 1)
-
-    def test_a_rerun_does_not_turn_the_failure_into_already_ok(self) -> None:
-        self.install("#!/bin/sh\nmain() {\n  exit 0\n}\nmain\n")
-        self.fails()
-        out, _ = self.fails()
-        self.assertEqual(self.statuses(out)["hook pre-commit"], "FAILED")
-
-    def test_a_failed_run_prints_no_next_steps(self) -> None:
-        self.install("#!/bin/sh\nmain() {\n  exit 0\n}\nmain\n")
-        out, _ = self.fails()
-        self.assertNotIn("next 1:", out)
-        self.assertNotIn("review-ratchet is set up", out)
-        self.assertNotIn("commit the files", out)
-
-    def test_a_block_placed_after_an_exit_by_hand_is_caught(self) -> None:
-        # The scan only trusts column 0, so a user who indents an exit above the block defeats it; the live check does not care.
-        path = self.install("#!/bin/sh\necho mine\n")
-        self.init("--yes")
-        path.write_text(path.read_text(encoding="utf-8").replace("echo mine\n", "echo mine\n  exit 0\n", 1), encoding="utf-8")
-        out, _ = self.fails()
-        self.assertEqual(self.statuses(out)["hook pre-commit"], "FAILED")
-        self.assertIn("status 0", out)
-
-    def test_a_hook_that_exits_early_when_nothing_is_staged_fails_and_moving_the_block_up_fixes_it(self) -> None:
-        # The check runs with nothing staged, so this script leaves before the block: the message says where the block belongs.
-        user_part = '[ -z "$(git diff --cached --name-only)" ] && exit 0\necho work\n'
-        path = self.install("#!/bin/sh\n" + user_part)
-        out, _ = self.fails()
-        self.assertEqual(self.statuses(out)["hook pre-commit"], "FAILED")
-        text = path.read_text(encoding="utf-8")
-        block = text[text.index(HASH_BEGIN):text.index(HASH_END) + len(HASH_END)]
-        path.write_text(f"#!/bin/sh\n{block}\n{user_part}", encoding="utf-8")
-        self.assertEqual(self.statuses(self.init("--yes"))["hook pre-commit"], "already ok")
-
-    def test_the_user_part_of_the_hook_runs_with_nothing_staged_and_cannot_change_the_real_index(self) -> None:
+    def test_the_users_part_of_the_hook_never_runs_during_init_and_cannot_touch_the_real_index(self) -> None:
         (self.repo / "x.txt").write_text("x", encoding="utf-8")
         git(self.repo, "add", "x.txt")
-        self.install('#!/bin/sh\ngit diff --cached --name-only > "$PWD/seen-by-hook.txt"\ngit add -A\n')
+        self.install('#!/bin/sh\necho ran >> "$PWD/ran.txt"\ngit add -A\n')
         self.init("--yes")
-        self.assertEqual((self.repo / "seen-by-hook.txt").read_text(encoding="utf-8"), "")
+        self.assertFalse((self.repo / "ran.txt").exists())
         self.assertEqual(git(self.repo, "diff", "--cached", "--name-only"), "x.txt")
 
-    def test_with_a_commit_the_probe_index_matches_head(self) -> None:
-        (self.repo / "tracked.txt").write_text("a", encoding="utf-8")
-        git(self.repo, "add", "tracked.txt")
-        self.commit("base")
-        (self.repo / "tracked.txt").write_text("b", encoding="utf-8")
-        git(self.repo, "add", "tracked.txt")
-        self.install('#!/bin/sh\ngit diff --cached --name-only > "$PWD/seen-by-hook.txt"\n')
-        self.init("--yes")
-        self.assertEqual((self.repo / "seen-by-hook.txt").read_text(encoding="utf-8"), "")  # not "tracked.txt", and not every file deleted
-        self.assertEqual(git(self.repo, "diff", "--cached", "--name-only"), "tracked.txt")
-
-    def test_a_dry_run_never_runs_the_hook_and_a_real_run_runs_it_once(self) -> None:
+    def test_neither_a_dry_run_nor_a_real_run_runs_the_users_part(self) -> None:
         self.install('#!/bin/sh\necho x >> "$PWD/ran.txt"\n')
         self.init("--dry-run")
         self.assertFalse((self.repo / "ran.txt").exists())
         self.init("--yes")
-        self.assertEqual((self.repo / "ran.txt").read_text(encoding="utf-8"), "x\n")
+        self.assertFalse((self.repo / "ran.txt").exists())
 
-    def test_a_hook_that_answers_with_a_failing_status_is_not_a_pass(self) -> None:
-        self.install("#!/bin/sh\necho ratchet-hook-probe pre-commit\n  exit 3\n")  # indented, so not top-level: the block lands after it; the token alone is not enough
+    def test_a_hook_whose_interpreter_cannot_run_fails_init_loudly(self) -> None:
+        path = self.install("#!/nonexistent/bin/bash\necho mine\n")
+        out, err = self.fails()
+        self.assertEqual(self.statuses(out)["hook pre-commit"], "FAILED")
+        self.assertIn("cannot run", out)
+        self.assertIn("FAILED step(s): hook pre-commit", err)
+        self.assertEqual(self.statuses(out)["hook post-commit"], "added")  # the other hook is still installed
+        self.assertEqual(self.statuses(out)[".gitignore"], "added")  # and so are the steps after it
+        self.assertEqual(path.read_text(encoding="utf-8").count(HASH_BEGIN), 1)
+        self.assertNotIn("next 1:", out)
+        self.assertNotIn("review-ratchet is set up", out)
+        self.assertNotIn("commit the files", out)
+
+    def test_a_rerun_does_not_turn_the_failure_into_already_ok(self) -> None:
+        self.install("#!/nonexistent/bin/bash\necho mine\n")
+        self.fails()
         out, _ = self.fails()
         self.assertEqual(self.statuses(out)["hook pre-commit"], "FAILED")
-        self.assertIn("status 3", out)
-
-    def test_a_hook_that_takes_too_long_before_the_block_fails_with_the_time_limit(self) -> None:
-        self.install("#!/bin/sh\n  exec sleep 30\n")
-        with mock.patch("ratchet.hooks.PROBE_TIMEOUT_SECONDS", 1):
-            out, _ = self.fails()
-        self.assertEqual(self.statuses(out)["hook pre-commit"], "FAILED")
-        self.assertIn("did not finish within 1s", out)
 
     def test_a_script_in_another_language_is_never_run(self) -> None:
         self.install("#!/usr/bin/env python3\nopen('ran.txt', 'w').write('x')\n")
@@ -1050,6 +916,59 @@ class HookProbeTest(InitCase):
         text = self.text(".git/hooks/pre-commit")
         self.assertIn('if [ -n "${RATCHET_HOOK_PROBE:-}" ]; then', text)
         self.assertIn('echo "ratchet-hook-probe pre-commit"', text)
+
+
+class ProbeHookTest(InitCase):
+    """`probe_hook` on scripts written by hand, so each way a probe can fail is reached without going through init."""
+
+    def probe(self, script: str, hook: str = "pre-commit") -> str | None:
+        path = self.repo / "hook-under-test"
+        path.write_text(script, encoding="utf-8")
+        path.chmod(0o755)
+        return probe_hook(path, hook, self.repo)
+
+    def test_a_hook_that_prints_its_token_and_exits_0_passes(self) -> None:
+        self.assertIsNone(self.probe("#!/bin/sh\necho ratchet-hook-probe pre-commit\nexit 0\n"))
+
+    def test_a_hook_that_exits_0_without_the_token_fails(self) -> None:
+        problem = self.probe("#!/bin/sh\nexit 0\n")
+        self.assertIn("never reached", problem)
+        self.assertIn("status 0", problem)
+
+    def test_the_token_of_another_hook_is_not_the_answer(self) -> None:
+        self.assertIn("never reached", self.probe("#!/bin/sh\necho ratchet-hook-probe post-commit\n"))
+
+    def test_a_hook_that_answers_with_a_failing_status_is_not_a_pass(self) -> None:
+        problem = self.probe("#!/bin/sh\necho ratchet-hook-probe pre-commit\nexit 3\n")  # the token alone is not enough
+        self.assertIn("status 3", problem)
+
+    def test_the_hook_output_is_quoted_back(self) -> None:
+        self.assertIn("mine", self.probe("#!/bin/sh\necho mine\nexit 1\n"))
+
+    def test_a_hook_that_takes_too_long_fails_with_the_time_limit(self) -> None:
+        with mock.patch("ratchet.hooks.PROBE_TIMEOUT_SECONDS", 1):
+            problem = self.probe("#!/bin/sh\nexec sleep 30\n")
+        self.assertIn("did not finish within 1s", problem)
+
+    def test_a_hook_that_cannot_be_started_says_so(self) -> None:
+        self.assertIn("cannot run", self.probe("#!/nonexistent/bin/sh\n"))
+
+    def test_the_probe_runs_with_nothing_staged_and_cannot_change_the_real_index(self) -> None:
+        (self.repo / "x.txt").write_text("x", encoding="utf-8")
+        git(self.repo, "add", "x.txt")
+        self.probe('#!/bin/sh\ngit diff --cached --name-only > "$PWD/seen-by-hook.txt"\ngit add -A\n')
+        self.assertEqual((self.repo / "seen-by-hook.txt").read_text(encoding="utf-8"), "")
+        self.assertEqual(git(self.repo, "diff", "--cached", "--name-only"), "x.txt")
+
+    def test_with_a_commit_the_probe_index_matches_head(self) -> None:
+        (self.repo / "tracked.txt").write_text("a", encoding="utf-8")
+        git(self.repo, "add", "tracked.txt")
+        self.commit("base")
+        (self.repo / "tracked.txt").write_text("b", encoding="utf-8")
+        git(self.repo, "add", "tracked.txt")
+        self.probe('#!/bin/sh\ngit diff --cached --name-only > "$PWD/seen-by-hook.txt"\n')
+        self.assertEqual((self.repo / "seen-by-hook.txt").read_text(encoding="utf-8"), "")  # not "tracked.txt", and not every file deleted
+        self.assertEqual(git(self.repo, "diff", "--cached", "--name-only"), "tracked.txt")
 
 
 class PortableHookTest(InitCase):
@@ -1074,8 +993,8 @@ class PortableHookTest(InitCase):
             with self.subTest(name):
                 for machine_specific in (sys.executable, str(EXECUTABLE_PATH), str(EXECUTABLE_PATH.parent), str(self.repo), str(self.tmp)):
                     self.assertNotIn(machine_specific, text)
-                self.assertNotIn("RATCHET_PY=/", text)
-                self.assertNotIn("RATCHET_BIN=/", text)
+                self.assertNotIn("_ratchet_py=/", text)
+                self.assertNotIn("_ratchet_bin=/", text)
 
     def test_the_report_calls_it_portable_and_does_not_say_to_keep_it_out_of_git(self) -> None:
         out = self.init("--yes")
@@ -1109,13 +1028,13 @@ class PortableHookTest(InitCase):
         git(self.repo, "config", "core.hooksPath", str(shared))
         self.init("--yes")
         text = (shared / "pre-commit").read_text(encoding="utf-8")
-        self.assertIn(f"RATCHET_BIN={QUOTED_EXECUTABLE}\n", text)
-        self.assertIn(f"RATCHET_PY={QUOTED_INTERPRETER}\n", text)
+        self.assertIn(f"_ratchet_bin={QUOTED_EXECUTABLE}\n", text)
+        self.assertIn(f"_ratchet_py={QUOTED_INTERPRETER}\n", text)
 
     def test_dot_git_hooks_keeps_the_absolute_paths(self) -> None:
         git(self.repo, "config", "--unset", "core.hooksPath")
         self.init("--yes")
-        self.assertIn(f"RATCHET_BIN={QUOTED_EXECUTABLE}\n", self.text(".git/hooks/pre-commit"))
+        self.assertIn(f"_ratchet_bin={QUOTED_EXECUTABLE}\n", self.text(".git/hooks/pre-commit"))
 
     def test_a_copy_of_the_tool_inside_the_repo_is_pointed_at_through_bin(self) -> None:
         inside = self.repo / "third_party" / "ratchet" / "bin" / "ratchet"
@@ -1126,7 +1045,7 @@ class PortableHookTest(InitCase):
     def test_the_real_tool_outside_the_repo_gets_no_such_hint(self) -> None:
         self.assertNotIn('set "bin"', self.init("--yes"))
 
-    def test_an_existing_script_with_a_final_exit_gets_a_portable_block_before_it(self) -> None:
+    def test_an_existing_script_with_a_final_exit_gets_a_portable_block_under_the_shebang(self) -> None:
         (self.repo / ".githooks").mkdir()
         path = self.repo / ".githooks" / "pre-commit"
         path.write_text("#!/bin/sh\nset -e\necho my-check\nexit 0\n", encoding="utf-8")
@@ -1134,12 +1053,14 @@ class PortableHookTest(InitCase):
         out = self.init("--yes")
         text = path.read_text(encoding="utf-8")
         self.assertEqual(self.statuses(out)["hook pre-commit"], "added")
-        self.assertLess(text.index(HASH_BEGIN), text.index("exit 0"))
+        self.assertTrue(text.startswith(f"#!/bin/sh\n\n{HASH_BEGIN}\n"))
+        self.assertTrue(text.endswith("\n\nset -e\necho my-check\nexit 0\n"))
         self.assertNotIn(sys.executable, text)
 
 
 class PortableBlockRuntimeTest(unittest.TestCase):
-    """Run the portable block with sh and see how it finds the tool and the Python."""
+    """Run the hook blocks with sh: how the portable one finds the tool and the Python, and that neither leaves a variable in the
+    hook's own code."""
 
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -1161,8 +1082,9 @@ class PortableBlockRuntimeTest(unittest.TestCase):
         path.write_text(f'import sys\nprint("{label}:", *sys.argv[1:])\nsys.exit({exit_code})\n', encoding="utf-8")
         return path
 
-    def run_block(self, hook: str, prologue: str = "", **env: str) -> subprocess.CompletedProcess:
-        script = f"#!/bin/sh\n{prologue}" + "\n".join(hook_body(hook, None)) + "\necho reached-the-end\n"
+    def run_block(self, hook: str, prologue: str = "", pinned: Pinned | None = None, after: str = "echo reached-the-end",
+                  **env: str) -> subprocess.CompletedProcess:
+        script = f"#!/bin/sh\n{prologue}" + "\n".join(hook_body(hook, pinned)) + f"\n{after}\n"
         full_env = {"PATH": f"{self.path_dir}:/usr/bin:/bin", "HOME": str(self.tmp), **env}
         return subprocess.run(["sh", "-c", script], capture_output=True, text=True, cwd=self.repo, env=full_env)
 
@@ -1282,6 +1204,71 @@ class PortableBlockRuntimeTest(unittest.TestCase):
         proc = self.run_block("pre-commit", RATCHET_HOOK_PROBE="")
         self.assertIn("reached-the-end", proc.stdout)
         self.assertNotIn("ratchet-hook-probe", proc.stdout)
+
+    # The block sits above the user's code in the same shell, so what it assigns is what that code would read.
+    SHOW_VARIABLES = ('echo "RATCHET_PY=${RATCHET_PY-unset} RATCHET_BIN=${RATCHET_BIN-unset} '
+                      '_ratchet_py=${_ratchet_py-unset} _ratchet_bin=${_ratchet_bin-unset}"')
+
+    def variables_after(self, hook: str, **kwargs: object) -> dict[str, str]:
+        proc = self.run_block(hook, after=self.SHOW_VARIABLES, **kwargs)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return dict(pair.split("=", 1) for pair in proc.stdout.splitlines()[-1].split())
+
+    def test_a_portable_block_leaves_no_variable_behind_whichever_way_it_ends(self) -> None:
+        unset = {"RATCHET_PY": "unset", "RATCHET_BIN": "unset", "_ratchet_py": "unset", "_ratchet_bin": "unset"}
+        self.fake_tool(self.repo / "tools" / "ratchet.py", "from-config")
+        config = self.repo / ".ratchet.json"
+        for hook in ("pre-commit", "post-commit"):
+            with self.subTest("the tool runs", hook=hook):
+                config.write_text(json.dumps({"bin": "tools/ratchet.py"}), encoding="utf-8")
+                self.assertEqual(self.variables_after(hook), unset)
+            with self.subTest("the tool is missing", hook=hook):
+                config.write_text(json.dumps({"bin": "tools/gone.py"}), encoding="utf-8")
+                self.assertEqual(self.variables_after(hook), unset)
+            with self.subTest("no config", hook=hook):
+                config.unlink()
+                self.assertEqual(self.variables_after(hook), unset)
+                config.write_text("{}", encoding="utf-8")
+        (self.path_dir / "python3").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")  # too old: the check fails
+        with self.subTest("python too old"):
+            self.assertEqual(self.variables_after("post-commit"), unset)
+
+    def test_a_portable_block_keeps_the_users_own_values(self) -> None:
+        tool = self.fake_tool(self.tmp / "tool.py", "ran")
+        with self.subTest("exported"):
+            shown = self.variables_after("post-commit", RATCHET_BIN=str(tool), RATCHET_PY=sys.executable)
+            self.assertEqual((shown["RATCHET_BIN"], shown["RATCHET_PY"]), (str(tool), sys.executable))
+            self.assertEqual((shown["_ratchet_bin"], shown["_ratchet_py"]), ("unset", "unset"))
+        with self.subTest("set earlier in the hook"):
+            shown = self.variables_after("post-commit", prologue="RATCHET_PY=mine-py\nRATCHET_BIN=mine-bin\n")
+            self.assertEqual((shown["RATCHET_BIN"], shown["RATCHET_PY"]), ("mine-bin", "mine-py"))
+
+    def test_a_pinned_block_runs_and_leaves_the_users_variables_alone(self) -> None:
+        tool = self.fake_tool(self.tmp / "tool.py", "ran")
+        user = "RATCHET_PY=mine-py\nRATCHET_BIN=mine-bin\n"
+        for label, pinned, ran in (("the tool runs", (Path(sys.executable), tool), True),
+                                   ("the interpreter is missing", (Path("/nonexistent/python3"), tool), False),
+                                   ("the tool is missing", (Path(sys.executable), self.tmp / "gone.py"), False)):
+            with self.subTest(label):
+                proc = self.run_block("post-commit", prologue=user, pinned=pinned, after=self.SHOW_VARIABLES)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual("ran: infer --quiet" in proc.stdout, ran)
+                self.assertEqual(proc.stdout.splitlines()[-1],
+                                 "RATCHET_PY=mine-py RATCHET_BIN=mine-bin _ratchet_py=unset _ratchet_bin=unset")
+        with self.subTest("no config"):
+            (self.repo / ".ratchet.json").unlink()
+            proc = self.run_block("post-commit", prologue=user, pinned=(Path(sys.executable), tool), after=self.SHOW_VARIABLES)
+            self.assertEqual(proc.stdout.splitlines()[-1],
+                             "RATCHET_PY=mine-py RATCHET_BIN=mine-bin _ratchet_py=unset _ratchet_bin=unset")
+
+    def test_a_pinned_block_still_ends_the_whole_hook_when_the_check_fails(self) -> None:
+        failing = self.fake_tool(self.tmp / "tool.py", "ran", exit_code=1)
+        blocked = self.run_block("pre-commit", pinned=(Path(sys.executable), failing))
+        self.assertEqual(blocked.returncode, 1)
+        self.assertNotIn("reached-the-end", blocked.stdout)
+        survived = self.run_block("post-commit", pinned=(Path(sys.executable), failing))
+        self.assertEqual(survived.returncode, 0)
+        self.assertIn("reached-the-end", survived.stdout)
 
 
 class CommitHintTest(InitCase):

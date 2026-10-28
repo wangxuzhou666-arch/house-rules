@@ -175,12 +175,24 @@ class IngestTest(RepoCase):
 
     def test_the_summary_is_read_before_the_failure_scenario_and_the_first_mention_wins(self) -> None:
         self.ingest([
-            review_item(line=1, summary="Names P3.1 and P0E.6", failure_scenario="Mentions P1.1 only here"),
-            review_item(line=2, summary="No clause named", failure_scenario="Breaks P1.1 when the list is empty"),
+            review_item(line=1, summary="Names P3.1 and P0E.6", failure_scenario="Mentions P2.3 only here"),
+            review_item(line=2, summary="No clause named", failure_scenario="Breaks P2.3 when the list is empty"),
             review_item(line=3, summary="Names none", failure_scenario="Names none either"),
         ])
         self.assertEqual([(e["rule_id"], e["rule_id_source"]) for e in self.events()],
-                         [("P3.1", "attributed"), ("P1.1", "attributed"), ("unmapped", "model")])
+                         [("P3.1", "attributed"), ("P2.3", "attributed"), ("unmapped", "model")])
+
+    def test_a_reviewer_rule_cited_in_the_text_is_skipped_for_the_violation_cited_after_it(self) -> None:
+        self.ingest([review_item(summary="Per R.7 the surrounding code must be read first; also violates P0E.6")])
+        (event,) = self.events()
+        self.assertEqual((event["rule_id"], event["rule_id_source"], event["rule_code"], event["severity"]),
+                         ("P0E.6", "attributed", "P0E.6", "blocker"))
+
+    def test_a_reviewer_rule_is_never_what_the_text_is_attributed_to(self) -> None:
+        out = self.ingest([review_item(summary="Breaks R.7"), review_item(line=2, summary="Fine", failure_scenario="R.1 says so")])
+        self.assertEqual([(e["rule_id"], e["rule_id_source"], e["rule_code"]) for e in self.events()],
+                         [("unmapped", "model", "unmapped")] * 2)
+        self.assertIn("2 unmapped, 0 labeled from the text", out)
 
     def test_an_empty_blank_or_non_string_category_counts_as_missing(self) -> None:
         self.ingest([review_item(line=number, category=value, summary="Breaks P0E.1")
@@ -191,6 +203,19 @@ class IngestTest(RepoCase):
         self.ingest([review_item(category="p3-1", summary="Really a P0E.6 problem"),
                      review_item(line=2, category="error-handling", summary="Really a P0E.6 problem")])
         self.assertEqual([(e["rule_id"], e["rule_id_source"]) for e in self.events()], [("P3.1", "model"), ("unmapped", "model")])
+
+    def test_a_category_naming_a_reviewer_rule_is_no_answer_so_the_text_is_read(self) -> None:
+        out = self.ingest([review_item(category="r-7", summary="Per R.7 read first; also violates P0E.1"),
+                           review_item(line=2, category="R.1", summary="Nothing else named", failure_scenario="Breaks P3.1 here"),
+                           review_item(line=3, category="r-7", summary="Nothing else named")])
+        self.assertEqual([(e["rule_id"], e["rule_id_source"], e["rule_code"]) for e in self.events()],
+                         [("P0E.1", "attributed", "P0E.1"), ("P3.1", "attributed", "P3.1"), ("unmapped", "model", "r-7")])
+        self.assertIn("1 unmapped, 2 labeled from the text", out)
+
+    def test_a_category_naming_a_clause_without_a_severity_is_no_answer_either(self) -> None:
+        self.ingest([review_item(category="p1-1", severity="nice")])  # P1.1 is defined but has no severity in these rules
+        (event,) = self.events()
+        self.assertEqual((event["rule_id"], event["rule_id_source"], event["rule_code"]), ("unmapped", "model", "p1-1"))
 
     def test_ids_that_are_not_clauses_or_only_part_of_a_longer_number_are_not_attributed(self) -> None:
         self.ingest([review_item(summary="Violates P9.9"), review_item(line=2, summary="Violates P1.12"),
@@ -212,7 +237,7 @@ class IngestTest(RepoCase):
 
     def test_missing_severity_comes_from_the_rules_file_else_should_fix(self) -> None:
         out = self.ingest([review_item(category="p0e-6"), review_item(line=2, category="p3-1"),
-                           review_item(line=3, category="p1-1"), review_item(line=4)])
+                           review_item(line=3, category="p2-3"), review_item(line=4)])
         self.assertEqual([e["severity"] for e in self.events()], ["blocker", "nice", "should-fix", "should-fix"])
         self.assertIn("4 without a usable severity", out)
 
@@ -228,7 +253,7 @@ class IngestTest(RepoCase):
         out = self.ingest([
             review_item(summary="minor", category="p3-1", severity="nice"),
             review_item(summary="major", category="p0e-6", severity="blocker", failure_scenario="major scenario"),
-            review_item(summary="middle", category="p1-1", severity="should-fix"),
+            review_item(summary="middle", category="p2-3", severity="should-fix"),
             review_item(file="src/b.py", summary="elsewhere"),
         ])
         primary, other = self.events()
@@ -323,8 +348,37 @@ class IngestTest(RepoCase):
 
     def test_without_rules_files_everything_is_unmapped(self) -> None:
         self.write_config()
-        self.ingest([review_item(category="p0e-6")])
-        self.assertEqual(self.events()[0]["rule_id"], "unmapped")
+        self.ingest([review_item(category="p0e-6"),
+                     review_item(line=2, summary="Invalid input (P0E.1).")])
+        self.assertEqual([event["rule_id"] for event in self.events()], ["unmapped", "unmapped"])
+        self.assertEqual(self.events()[1]["summary"], "Invalid input (P0E.1).")
+
+
+class IngestWithoutSeveritiesTest(RepoCase):
+    """A rules file of the user's own with no severity tag and no family table: compile lists every clause under Reviewer rules,
+    but none of them is a Reviewer rule for ingest, so categories and prose still label findings."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.write_rules("1. **[A.1]** First rule.\n2. **[A.2]** Second rule.\n")
+        self.write_config(rules_files=["rules.md"])
+
+    def ingest(self, items: list[dict]) -> str:
+        return self.cli_ok("ingest-code-review", "--source", "l1", "--run", "R1", stdin=json.dumps(items))
+
+    def test_a_category_naming_a_clause_is_the_models_answer(self) -> None:
+        self.ingest([review_item(category="a-1"), review_item(line=2, category="A.2"), review_item(line=3, category="a-9")])
+        self.assertEqual([(e["rule_id"], e["rule_id_source"], e["rule_code"], e["severity"]) for e in self.events()],
+                         [("A.1", "model", "a-1", "should-fix"), ("A.2", "model", "A.2", "should-fix"),
+                          ("unmapped", "model", "a-9", "should-fix")])
+
+    def test_a_clause_cited_in_the_text_is_attributed(self) -> None:
+        out = self.ingest([review_item(summary="Breaks A.2 when the list is empty"),
+                           review_item(line=2, summary="Fine", failure_scenario="a-1 is violated here"),
+                           review_item(line=3, summary="No clause named")])
+        self.assertEqual([(e["rule_id"], e["rule_id_source"]) for e in self.events()],
+                         [("A.2", "attributed"), ("A.1", "attributed"), ("unmapped", "model")])
+        self.assertIn("1 unmapped, 2 labeled from the text", out)
 
 
 if __name__ == "__main__":

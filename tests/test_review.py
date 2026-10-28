@@ -64,7 +64,7 @@ class ReviewCase(RepoCase):
         return self.repo / ".ratchet" / "reviews"
 
     def saved(self) -> list[str]:
-        return sorted(p.name for p in self.reviews_dir().glob("*")) if self.reviews_dir().exists() else []
+        return sorted(p.name for p in self.reviews_dir().glob("*.txt")) if self.reviews_dir().exists() else []
 
 
 class RunningClaudeTest(ReviewCase):
@@ -170,6 +170,9 @@ class RecordingTest(ReviewCase):
         _, out, _ = self.review(self.fake_claude(review_text(FINDING_A, FINDING_B)))
         self.assertEqual([(e["run_id"], e["display_id"]) for e in self.findings()], [("r1", "r1-1"), ("r1", "r1-2")])
         self.assertEqual(self.saved(), ["r1.txt"])
+        snapshot = json.loads((self.reviews_dir() / "r1.evidence.json").read_text())
+        self.assertEqual(snapshot["run_id"], "r1")
+        self.assertEqual(snapshot["basis"], "local_pre_review")
         self.assertIn("r1-2", out)
         self.review(self.fake_claude(review_text(review_item(file="src/c.py", category="p1-1"))))
         self.assertEqual([e["display_id"] for e in self.findings()], ["r1-1", "r1-2", "r2-1"])
@@ -225,7 +228,7 @@ class RecordingTest(ReviewCase):
         raw = review_text(FINDING_A)
         self.review(self.fake_claude(raw), "--run", "R1")
         before = self.findings()
-        code, out, _ = self.review(self.fake_claude(raw), "--run", "R1")
+        code, out, _ = self.cli("review", "--from-file", str(self.reviews_dir() / "R1.txt"), "--run", "R1")
         self.assertEqual(code, 0)
         self.assertEqual(self.findings(), before)
         self.assertEqual(len(self.review_runs()), 1)  # re-ingesting a recorded run is not another round
@@ -235,7 +238,9 @@ class RecordingTest(ReviewCase):
     def test_a_different_review_under_a_used_run_id_is_refused(self) -> None:
         self.review(self.fake_claude(review_text(FINDING_A)), "--run", "R1")
         before = self.ledger_bytes()
-        code, _, err = self.review(self.fake_claude(review_text(FINDING_B)), "--run", "R1")
+        other = self.tmp / "other.txt"
+        other.write_text(review_text(FINDING_B), encoding="utf-8")
+        code, _, err = self.cli("review", "--from-file", str(other), "--run", "R1")
         self.assertEqual(code, 1)
         self.assertIn("already holds a different review", err)
         self.assertIn("--run", err)
@@ -526,12 +531,76 @@ class RoundCapTest(ReviewCase):
     def test_a_replayed_run_is_not_another_round(self) -> None:
         saved = self.tmp / "earlier.txt"
         saved.write_text(review_text(FINDING_A), encoding="utf-8")
-        for _ in range(2):
-            self.assertEqual(self.cli("review", "--from-file", str(saved), "--run", "F1")[0], 0)
+        first = self.cli("review", "--from-file", str(saved), "--run", "F1")
+        self.assertIn(f"review round 1/3 for {self.KEY}", first[1])
+        code, out, _ = self.cli("review", "--from-file", str(saved), "--run", "F1")
+        self.assertEqual(code, 0)
+        self.assertIn("review: replay of run F1 (already recorded; not another round)", out)
+        self.assertNotIn("review round", out)
         self.assertEqual([(e["run"], e["round"]) for e in self.review_runs()], [("F1", 1)])
         self.assertEqual(self.cli("review", "--from-file", str(saved), "--run", "F2")[0], 0)  # a new run id is the next round
         self.assertEqual([(e["run"], e["round"]) for e in self.review_runs()], [("F1", 1), ("F2", 2)])
         self.assertEqual(self.cli_ok("count").splitlines()[-1], f"review rounds on {self.KEY}: 2/3")
+
+    def test_a_replayed_run_is_not_refused_at_the_cap(self) -> None:
+        saved = self.tmp / "earlier.txt"
+        saved.write_text(review_text(FINDING_A), encoding="utf-8")
+        for number in (1, 2, 3):
+            self.assertEqual(self.cli("review", "--from-file", str(saved), "--run", f"F{number}")[0], 0)
+        before = self.ledger_bytes()
+        code, out, err = self.cli("review", "--from-file", str(saved), "--run", "F3")
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("review: replay of run F3", out)
+        self.assertNotIn("review round", out)
+        self.assertNotIn("(over the cap)", out)
+        self.assertEqual(self.ledger_bytes(), before)  # no finding, no round
+        self.assertEqual(self.cli("review", "--from-file", str(saved), "--run", "F4")[0], 3)  # a new run id still is one
+        code, out, _ = self.cli("review", "--dry-run", "--from-file", str(saved), "--run", "F2")
+        self.assertEqual(code, 0)
+        self.assertIn("review: replay of run F2", out)
+        self.assertNotIn("would be refused", out)
+
+    def test_a_recorded_run_id_is_refused_without_from_file_before_claude_runs(self) -> None:
+        for rounds in (1, 2, 3):  # below the cap and at it
+            with self.subTest(rounds_used=rounds):
+                self.run_rounds(1)
+                self.record.unlink()
+                before, saved = self.ledger_bytes(), self.saved()
+                code, out, err = self.review(self.fake_claude(review_text(FINDING_B)), "--run", "r1")
+                self.assertEqual(code, 1)
+                self.assertIn("run r1 is already recorded; omit --run for a new round, or pass --from-file", err)
+                self.assertNotIn("round cap", err)  # the run id is refused first, whatever the cap says
+                self.assertEqual(out, "")
+                self.assertFalse(self.record.exists(), "claude must not be invoked for a recorded run id")
+                self.assertEqual((self.ledger_bytes(), self.saved()), (before, saved))
+
+    def test_a_recorded_run_id_is_refused_without_from_file_even_with_over_cap_or_dry_run(self) -> None:
+        self.run_rounds(3)
+        self.record.unlink()
+        before = self.ledger_bytes()
+        for flag in ("--over-cap", "--dry-run"):
+            with self.subTest(flag):
+                code, out, err = self.review(self.fake_claude(review_text(FINDING_B)), "--run", "r3", flag)
+                self.assertEqual(code, 1)
+                self.assertIn("run r3 is already recorded", err)
+                self.assertEqual(out, "")
+                self.assertFalse(self.record.exists())
+                self.assertEqual(self.ledger_bytes(), before)
+
+    def test_the_default_run_id_is_never_a_recorded_one(self) -> None:
+        self.run_rounds(2)
+        code, out, err = self.review(self.fake_claude(review_text(FINDING_B)))
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("review round 3/3", out)
+        self.assertEqual([e["run"] for e in self.review_runs()], ["r1", "r2", "r3"])
+
+    def test_only_from_file_replays_a_recorded_run_at_the_cap(self) -> None:
+        self.run_rounds(3)
+        before = self.ledger_bytes()
+        code, out, err = self.cli("review", "--from-file", str(self.reviews_dir() / "r3.txt"), "--run", "r3")
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("replay of run r3", out)
+        self.assertEqual(self.ledger_bytes(), before)
 
     def test_claude_and_from_file_rounds_share_one_count(self) -> None:
         saved = self.tmp / "earlier.txt"
@@ -681,21 +750,38 @@ class RoundCountLineTest(ReviewCase):
         self.commit("f1")
         self.assertEqual(self.cli_ok("count").splitlines()[-1], f"review rounds on feature@{base[:12]}: 0/3")
 
-    def test_a_detached_head_has_no_line_and_no_error(self) -> None:
+    def test_a_detached_head_says_the_rounds_do_not_apply_and_is_no_error(self) -> None:
         self.commit("c1")
         git(self.repo, "checkout", "-q", "--detach")
         code, out, err = self.cli("count")
         self.assertEqual((code, err), (0, ""))
-        self.assertNotIn("review rounds on", out)
+        self.assertEqual(out.splitlines()[-1], "review rounds: n/a (detached HEAD)")
         self.assertTrue(out.startswith("findings:"))
 
-    def test_a_repo_with_no_default_branch_still_counts(self) -> None:
+    def test_a_repo_with_no_default_branch_still_counts_and_says_why_there_is_no_rounds_line(self) -> None:
         self.commit("c1")
         git(self.repo, "branch", "-m", "main", "trunk")
         git(self.repo, "switch", "-q", "-c", "feature")
         code, out, err = self.cli("count")
         self.assertEqual((code, err), (0, ""))
-        self.assertNotIn("review rounds on", out)
+        self.assertEqual(out.splitlines()[-1], "review rounds: n/a (no default branch found (no origin/HEAD, main or master))")
+
+    def test_a_branch_with_no_shared_history_says_so(self) -> None:
+        self.commit("c1")
+        git(self.repo, "switch", "-q", "--orphan", "island")
+        self.commit("i1")
+        code, out, err = self.cli("count")
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out.splitlines()[-1], "review rounds: n/a (island shares no history with main)")
+
+    def test_a_default_branch_that_is_not_a_branch_does_not_fail_count(self) -> None:
+        self.commit("c1")
+        self.write_config(rules_files=["rules.md"], default_branch="nope")
+        code, out, err = self.cli("count")
+        self.assertEqual((code, err), (0, ""))
+        self.assertTrue(out.startswith("findings:"))
+        self.assertEqual(out.splitlines()[-1], "review rounds: unavailable (config default_branch 'nope' is not a branch of this repo)")
+        self.assertEqual(self.cli("review", "--dry-run")[0], 1)  # review, which needs the rounds, still refuses
 
 
 class RoundCapConfigTest(ReviewCase):

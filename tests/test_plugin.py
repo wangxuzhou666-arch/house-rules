@@ -88,8 +88,8 @@ class SkillTest(unittest.TestCase):
     def skills(self) -> dict[str, str]:
         return {path.parent.name: path.read_text(encoding="utf-8") for path in sorted(SKILLS.glob("*/SKILL.md"))}
 
-    def test_there_are_a_setup_and_a_review_skill(self) -> None:
-        self.assertEqual(set(self.skills()), {"setup", "review"})
+    def test_the_plugin_exposes_setup_review_and_rule_maintenance(self) -> None:
+        self.assertEqual(set(self.skills()), {"setup", "review", "maintain"})
 
     def test_each_has_a_precise_description_that_says_when_to_use_it(self) -> None:
         for name, text in self.skills().items():

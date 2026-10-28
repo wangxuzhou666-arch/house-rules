@@ -192,7 +192,7 @@ class IngestResult:
     events: list[Event]
     merged_count: int  # reviewer items folded into another finding's also_matches
     unmapped_count: int
-    attributed_count: int  # no category given; the clause was read out of the summary or failure scenario
+    attributed_count: int  # no usable category; the clause was read out of the summary or failure scenario
     severity_filled_count: int  # reviewer gave no usable severity; taken from the rules file or defaulted
 
 
@@ -200,17 +200,20 @@ def _label(item: dict[str, Any], summary: str, rules: Rules) -> tuple[str, str, 
     """(rule_id, rule_code, rule_id_source) for one review item.
 
     A `category` the model gave is its answer, right or wrong: a known clause id in kebab-case, else `unmapped`, and
-    `rule_code` keeps what it wrote. Without one (missing, empty, not a string) the first known clause id mentioned in
+    `rule_code` keeps what it wrote. The exception is a Reviewer rule: no finding violates one, so naming it is no
+    answer. Without an answer (no category, or such a clause) the first clause that is not a Reviewer rule mentioned in
     the summary, then in the failure scenario, is taken instead (`attributed`); no mention at all is `unmapped`.
     """
     category = item.get("category")
     category_text = category.strip() if isinstance(category, str) else ""
-    if category_text:
-        return rules.from_kebab(category_text) or UNMAPPED, category_text, "model"
+    claimed = rules.from_kebab(category_text) if category_text else None
+    names_reviewer_rule = claimed is not None and rules.is_reviewer_rule(claimed)
+    if category_text and not names_reviewer_rule:
+        return claimed or UNMAPPED, category_text, "model"
     scenario = item.get("failure_scenario")
     mention = rules.first_clause_mention(summary) or rules.first_clause_mention(scenario if isinstance(scenario, str) else "")
     if mention is None:
-        return UNMAPPED, UNMAPPED, "model"
+        return UNMAPPED, category_text or UNMAPPED, "model"
     return mention[0], mention[1], "attributed"
 
 

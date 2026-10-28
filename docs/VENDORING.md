@@ -24,7 +24,9 @@ Nothing else: no tests, docs or plugin files. The template is vendored because i
 
 Run a vendored copy as `python3 third_party/ratchet/bin/ratchet ...`. If you run `ratchet init` from it and your git hooks directory is inside the repo (for example `.githooks`), the hooks look for the tool through `$RATCHET_BIN`, `bin` in `.ratchet.json`, then `PATH`; init prints the line to add, `"bin": "third_party/ratchet/bin/ratchet"` ([ONBOARDING.md](ONBOARDING.md#portable-and-pinned-blocks)). From Python with `third_party` on `sys.path` and `from ratchet.api import ...` ([GATES.md](GATES.md#python-api)).
 
-Running `vendor` again on a directory that holds a vendored copy replaces it: the files above are removed and copied afresh, so files the source dropped disappear and hand edits are lost. Anything else in the directory is left alone. A directory that has `ratchet/`, `bin/ratchet`, `schemas/`, `templates/` or `LICENSE` but no `VENDORED_FROM.json` is not a vendored copy; `vendor` refuses it and changes nothing. `--into` may not be the source checkout or a folder inside it.
+Running `vendor` again prepares a fresh copy and marker in a temporary sibling directory, checks the copy against the planned content hash, then replaces the owned entries. Files the source dropped disappear and hand edits are lost. Anything else in the directory, including other `bin/` tools, is left alone. A directory that has `ratchet/`, `bin/ratchet`, `schemas/`, `templates/` or `LICENSE` but no `VENDORED_FROM.json` is not a vendored copy; `vendor` refuses it and changes nothing. `--into` may not be the source checkout or a folder inside it.
+
+Copying or validation failure leaves the old files intact. An error during replacement restores the moved entries and old marker. If restoration itself fails, the error names the retained recovery directory; restore its `old/` entries before retrying. These are multiple file moves, not one atomic directory swap: concurrent use, process termination and power loss during replacement are not covered by automatic recovery. Run updates while the vendored tool is idle. Successful updates remove the temporary backup.
 
 ## `VENDORED_FROM.json`
 

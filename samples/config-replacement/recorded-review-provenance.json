@@ -1,0 +1,16 @@
+{
+  "run": "live-r3",
+  "raw_sha256": "2cb139edd0b67f427944ff19f83a6c59cecae3cd5b3b240a7ec39a30b74a9777",
+  "reviewed_sources": {
+    "config_store.py": "ed4645e47e0a118face81ed446b88f3ce13b06551bc5fd662eaa0c3bfbd90792",
+    "heldout_safe.py": "6a4210fcdcea4636c0526a81f9004ad949e4474537234cec3fa54463d4cd63ca",
+    "heldout_unsafe.py": "1c0f306a2f74b530c19ad302a9d438459fc536821121b2d3f415ee8ea70ae552"
+  },
+  "scope": "Single-writer synthetic local-file examples; no power-loss durability guarantee.",
+  "observed": {
+    "REL.1_on_heldout_unsafe": true,
+    "REL.1_on_controls": false,
+    "additional_unmapped_finding": "Original permission bits not preserved by replacement."
+  },
+  "followup": "Permission-bit preservation added to published safe examples and tested deterministically; no additional review beyond the 3-round cap."
+}
