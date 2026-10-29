@@ -17,7 +17,7 @@
    @CODING-STYLE.digest.md
    ```
 
-Claude Code expands `@path` imports in `CLAUDE.md`, and the built-in `/code-review` only reads `CLAUDE.md`, so the one line gives both coding sessions and the review the digest. Commit the digest; re-run `ratchet compile` whenever the rules change (see [check mode](#check-mode) for keeping it fresh automatically).
+Claude Code expands `@path` imports in `CLAUDE.md`, and for project rules the built-in `/code-review` follows `CLAUDE.md` (it does not read `REVIEW.md`), so the one line gives both coding sessions and the review the digest. Commit the digest; re-run `ratchet compile` whenever the rules change (see [check mode](#check-mode) for keeping it fresh automatically).
 
 ## What the digest contains
 

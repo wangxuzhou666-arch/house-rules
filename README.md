@@ -1,3 +1,5 @@
+English | [中文](README.zh.md)
+
 # review-ratchet
 
 Turn code-review feedback into inspectable proposals for your own coding standards.
@@ -21,6 +23,9 @@ dependencies and a coding-agent plugin. Findings live in a local, append-only
 ledger; private review data is not uploaded by the harness. A native reviewer may
 send code to its provider under that host's settings. This workflow does not train
 model weights or guarantee a review-quality improvement.
+
+Why the loop is built this way (the RL analogy and its limits, what went wrong along
+the way, how to carry it to another reviewer, prior art): [docs/METHOD.md](docs/METHOD.md).
 
 ## Make it yours
 
@@ -140,5 +145,7 @@ To give Claude Code's built-in `/code-review` the rules by hand instead of `init
 ```
 
 Tests: `python3 -m unittest discover -s tests`. Mutation self-test (applies one deliberate bug at a time to a temp copy and checks the suite goes red; `--full` lists every test that caught each one, `--jobs N` runs N at once): `python3 tests/mutation_check.py [--full] [--jobs N]`.
+
+Contributing: synthetic failing examples, regression pairs and rule proposals are welcome; findings from real private repositories are not. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 License: [MIT](LICENSE).

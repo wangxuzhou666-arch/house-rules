@@ -1,3 +1,5 @@
+English | [中文](RULE-WRITING.zh.md)
+
 # Write rules that can be applied and traced
 
 The coding-style file is an instruction document for both code authors and reviewers.
