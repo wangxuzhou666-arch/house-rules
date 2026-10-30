@@ -217,7 +217,7 @@ Nothing is said and nothing runs in these cases:
 | The commit was made outside a Claude Code session (`CLAUDE_CODE_SESSION_ID` is not set), for example from a terminal of your own | It is never noted: the git hook skips `ratchet auto note` in the shell. The next wrap-up counts that work all the same |
 | Inside ratchet's own review (`RATCHET_REVIEW_CHILD=1`) | Neither the note nor the Stop hook acts. ratchet sets the variable in the `claude` process of its reviews, so a review cannot start another |
 | Another Stop hook has continued the turn (`stop_hook_active` in the input) | This Stop is skipped and the records stay for a later one |
-| A headless session, which Claude Code marks with `CLAUDE_CODE_SESSION_ATTENDED=0` (`claude -p`, the SDK, a pipeline; see the limits below), unless `RATCHET_AUTO_HEADLESS=1` | They stay |
+| A headless session, which Claude Code marks with `CLAUDE_CODE_SESSION_ATTENDED=0` (as under `claude -p`; see the limits below), unless `RATCHET_AUTO_HEADLESS=1` | They stay |
 | A subagent, a workflow or a teammate is still running, or a background shell that runs `ratchet wrapup` or `ratchet review` | The judgement is deferred: they stay for the Stop after the task. Such a task may still commit, or review beside this one |
 | The worktree is gone, or its repo no longer has `wrapup_auto` on | They are dropped |
 

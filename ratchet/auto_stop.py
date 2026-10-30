@@ -36,8 +36,8 @@ from .review import REVIEW_CHILD_ENV, Refusal
 if TYPE_CHECKING:
     from .wrapup import WrapupPlan
 
-# Claude Code sets this to 0 in a session no one is at (`claude -p`, the SDK). It is not documented: it was seen as 1 in an attended
-# VS Code session. So only a 0 counts as headless, and anything else, or nothing, is attended.
+# Claude Code sets this to 0 in a session no one is at. It is not documented: it was seen as 0 under `claude -p` (2.1.312) and as 1
+# in an attended VS Code session. So only a 0 counts as headless, and anything else, or nothing, is attended.
 ATTENDED_ENV = "CLAUDE_CODE_SESSION_ATTENDED"
 HEADLESS_OK_ENV = "RATCHET_AUTO_HEADLESS"  # 1: judge in a headless session too (pipelines, the smoke test)
 ANNOUNCED_NAME = "announced.json"
