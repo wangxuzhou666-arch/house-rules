@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Callable
 
 from .blocks import HASH_BEGIN, HASH_END, HTML_BEGIN, HTML_END, split_block, upsert_block
-from .config import CONFIG_NAME, Config, read_config_file
+from .config import CONFIG_NAME, Config, read_config_file, rules_name, tracked_path
 from .digest import Output, display_path, plan_outputs
 from .errors import RatchetError
 from .fsutil import is_executable, read_text, write_text
@@ -34,6 +34,11 @@ EXECUTABLE_PATH = PACKAGE_ROOT / "bin" / "ratchet"
 TEMPLATE_TARGET = "CODING-STYLE.md"
 CLAUDE_MD_HEADING = "## Code style digest (review-ratchet)"
 COMMIT_MESSAGE = "chore: adopt review-ratchet"
+WRAPUP_AUTO_KEY = "wrapup_auto"
+WRAPUP_AUTO_QUESTION = ("Turn on the automatic wrap-up review after commits made in a Claude Code session? "
+                        "Each automatic run costs one /code-review.")
+HOOKS_QUESTION = ("Install git hooks (pre-commit: compile --check --staged; post-commit: infer, and in a Claude Code session "
+                  "with wrapup_auto on, noting the commit for the automatic wrap-up)?")
 # Local state: saved reviews (code excerpts), proposal batches, receipts and locks. The readable record of applied rule
 # changes, CODING-STYLE.changelog.md, sits beside the rules and is deliberately not ignored.
 LOCAL_STATE_ENTRY = ".ratchet/"
@@ -66,6 +71,7 @@ class InitOptions:
     use_template: bool  # --template
     install_hooks: bool  # false for --no-hooks
     edit_claude_md: bool  # false for --no-claude-md
+    offer_wrapup_auto: bool = True  # false for --no-wrapup-auto: `wrapup_auto` is written false, and nothing is asked
 
 
 @dataclass(frozen=True)
@@ -94,60 +100,99 @@ def _bundled_template() -> str:
                            "re-run `ratchet vendor`, or run init from a full checkout") from exc
 
 
-def _detected_rules_file(root: Path) -> Path | None:
-    return next((root / name for name in _RULES_CANDIDATES if (root / name).is_file()), None)
+def _detected_rules_file(worktree: Path) -> Path | None:
+    return next((worktree / name for name in _RULES_CANDIDATES if (worktree / name).is_file()), None)
 
 
-def _default_choice(root: Path) -> str:
-    detected = _detected_rules_file(root)
+def _default_choice(worktree: Path) -> str:
+    detected = _detected_rules_file(worktree)
     return "template" if detected is None else str(detected)
 
 
-def _ask_rules_choice(root: Path, ask: Ask) -> str:
-    default = _default_choice(root)
-    shown = default if default == "template" else Path(default).relative_to(root).as_posix()
+def _ask_rules_choice(worktree: Path, ask: Ask) -> str:
+    default = _default_choice(worktree)
+    shown = default if default == "template" else Path(default).relative_to(worktree).as_posix()
     answer = ask(f"Rules file: a path to your clause-labeled rules, or `template` for the bundled one [{shown}]: ").strip()
     return answer or default
 
 
-def _rules_choice(root: Path, options: InitOptions, ask: Ask | None) -> RulesChoice:
+def _rules_choice(worktree: Path, options: InitOptions, ask: Ask | None) -> RulesChoice:
     if options.rules_file is not None:
         choice = options.rules_file
     elif options.use_template:
         choice = "template"
     elif ask is not None:
-        choice = _ask_rules_choice(root, ask)
+        choice = _ask_rules_choice(worktree, ask)
     else:
-        choice = _default_choice(root)
+        choice = _default_choice(worktree)
     if choice == "template":
-        if not (root / TEMPLATE_TARGET).exists():
+        if not (worktree / TEMPLATE_TARGET).exists():
             _bundled_template()  # fail now, before the config step writes a rules_files entry that nothing can satisfy
         return RulesChoice([TEMPLATE_TARGET], from_template=True)
     path = Path(choice).expanduser().resolve()  # relative to the current directory, like every other path argument
     if not path.is_file():
         raise RatchetError(f"rules file not found: {choice}")
-    if path.is_relative_to(root):
-        return RulesChoice([path.relative_to(root).as_posix()], from_template=False)
+    if path.is_relative_to(worktree):
+        return RulesChoice([path.relative_to(worktree).as_posix()], from_template=False)
     return RulesChoice([str(path)], from_template=False)
+
+
+def _wrapup_auto_choice(options: InitOptions, ask: Ask | None) -> bool:
+    """The value `wrapup_auto` gets in a config that lacks it: --no-wrapup-auto says no and asks nothing; otherwise the answer,
+    which with nobody to ask (--yes, --dry-run) is the default, yes."""
+    return options.offer_wrapup_auto and _confirm(options, ask, WRAPUP_AUTO_QUESTION)
+
+
+def _wrapup_auto_hint(path: Path) -> str:
+    return (f'{WRAPUP_AUTO_KEY} is not set in {path}, which every worktree shares and init writes from the main worktree only: '
+            f'run `ratchet init` there, or add "{WRAPUP_AUTO_KEY}": true to it, to turn on the automatic wrap-up review')
+
+
+def _write_config(path: Path, raw: dict, added: dict, options: InitOptions) -> FileChange:
+    """`added` on top of the keys the config has, those in their order, written as init writes it; nothing is written for --dry-run."""
+    new_text = json.dumps({**raw, **added}, indent=2, ensure_ascii=False) + "\n"
+    change = FileChange(path, read_text(path), new_text)
+    if not options.dry_run:
+        write_text(path, new_text)
+    return change
+
+
+def _existing_config_step(config: Config, options: InitOptions, ask: Ask | None, names: list[str]) -> Step:
+    """A config that lists rules_files stays as it is, except that init adds the `wrapup_auto` it lacks (after asking). A linked
+    worktree shares the config of the main one and never writes it: it only says how to turn the switch on."""
+    path = config.root / CONFIG_NAME
+    detail = f"{CONFIG_NAME} already lists rules_files {names}"
+    raw = read_config_file(path)
+    if WRAPUP_AUTO_KEY in raw:
+        return Step("config", "ok", detail)
+    if config.worktree != config.root:
+        return Step("config", "ok", detail, notes=(_wrapup_auto_hint(path),) if options.offer_wrapup_auto else ())
+    wrapup_auto = _wrapup_auto_choice(options, ask)
+    change = _write_config(path, raw, {WRAPUP_AUTO_KEY: wrapup_auto}, options)
+    return Step("config", "update", f"{CONFIG_NAME}: {WRAPUP_AUTO_KEY} {json.dumps(wrapup_auto)}", (change,))
 
 
 def _config_step(config: Config, options: InitOptions, ask: Ask | None) -> tuple[Step, RulesChoice]:
     path = config.root / CONFIG_NAME
     if config.rules_files:
-        names = [display_path(rules_path, config.root) for rules_path in config.rules_files]
-        return Step("config", "ok", f"{CONFIG_NAME} already lists rules_files {names}"), RulesChoice(names, from_template=False)
+        names = [rules_name(config, rules_path) for rules_path in config.rules_files]
+        return _existing_config_step(config, options, ask, names), RulesChoice(names, from_template=False)
+    if config.worktree != config.root:  # the config is read from the main worktree only; writing it from here would change another tree
+        raise RatchetError(f"{path} lists no rules_files, and that config is shared by every worktree of this repo: "
+                           "run `ratchet init` in the main worktree first")
     raw = read_config_file(path) if path.exists() else {}
-    choice = _rules_choice(config.root, options, ask)
+    choice = _rules_choice(config.worktree, options, ask)
     status = "update" if path.exists() else "add"
-    new_text = json.dumps({**raw, "rules_files": choice.rules_files}, indent=2, ensure_ascii=False) + "\n"
-    change = FileChange(path, read_text(path), new_text)
-    if not options.dry_run:
-        write_text(path, new_text)
-    return Step("config", status, f"{CONFIG_NAME}: rules_files {choice.rules_files}", (change,)), choice
+    added: dict[str, object] = {"rules_files": choice.rules_files}
+    detail = f"{CONFIG_NAME}: rules_files {choice.rules_files}"
+    if WRAPUP_AUTO_KEY not in raw:
+        added[WRAPUP_AUTO_KEY] = _wrapup_auto_choice(options, ask)
+        detail += f", {WRAPUP_AUTO_KEY} {json.dumps(added[WRAPUP_AUTO_KEY])}"
+    return Step("config", status, detail, (_write_config(path, raw, added, options),)), choice
 
 
 def _rules_step(config: Config, choice: RulesChoice, options: InitOptions) -> Step:
-    target = config.root / choice.rules_files[0]
+    target = tracked_path(config.root, config.worktree, choice.rules_files[0])
     if not choice.from_template:
         return Step("rules file", "ok", f"using {choice.rules_files[0]}")
     if target.exists():
@@ -173,22 +218,23 @@ class _PendingFileReader(DiskReader):
 
 
 def _compile_detail(config: Config, stale: list[Output], digest_bytes: int) -> str:
-    parts = [f"digest {display_path(output.path, config.root)}: {digest_bytes} bytes" if output.kind == "digest"
-             else f"{display_path(output.path, config.root)} ({output.kind})" for output in stale]
+    parts = [f"digest {display_path(output.path, config.worktree)}: {digest_bytes} bytes" if output.kind == "digest"
+             else f"{display_path(output.path, config.worktree)} ({output.kind})" for output in stale]
     return ", ".join(parts)
 
 
 def _compile_step(config: Config, choice: RulesChoice, options: InitOptions) -> tuple[Step, Config]:
-    effective = dataclasses.replace(config, rules_files=tuple(config.root / name for name in choice.rules_files))
+    effective = dataclasses.replace(config, rules_files=tuple(tracked_path(config.root, config.worktree, name) for name in choice.rules_files),
+                                    rules_names=tuple(choice.rules_files))
     reader = DiskReader()
-    template_target = config.root / choice.rules_files[0]
+    template_target = tracked_path(config.root, config.worktree, choice.rules_files[0])
     if options.dry_run and choice.from_template and not template_target.exists():  # the template is not copied yet
         reader = _PendingFileReader(template_target, _bundled_template().encode("utf-8"))
     rules = load_rules(effective, reader)
     outputs = plan_outputs(effective, rules, reader)
     stale = [output for output in outputs if output.is_stale]
     if not stale:
-        return Step("compile", "ok", f"{display_path(effective.digest_path, effective.root)} is up to date"), effective
+        return Step("compile", "ok", f"{display_path(effective.digest_path, effective.worktree)} is up to date"), effective
     if not options.dry_run:
         for output in stale:
             write_text(output.path, output.new)
@@ -208,8 +254,8 @@ def _confirm(options: InitOptions, ask: Ask | None, question: str) -> bool:
 def _claude_md_step(config: Config, options: InitOptions, ask: Ask | None) -> Step:
     if not options.edit_claude_md:
         return Step("CLAUDE.md", "skip", "--no-claude-md")
-    path = config.root / "CLAUDE.md"
-    import_line = f"@{display_path(config.digest_path, config.root)}"
+    path = config.worktree / "CLAUDE.md"
+    import_line = f"@{display_path(config.digest_path, config.worktree)}"
     text = read_text(path)
     outside, has_block = split_block(text or "", HTML_BEGIN, HTML_END, "CLAUDE.md")
     if not has_block and any(line.strip() == import_line for line in outside):
@@ -228,10 +274,10 @@ def _claude_md_step(config: Config, options: InitOptions, ask: Ask | None) -> St
 
 # ---- step 5: git hooks ------------------------------------------------------------------------------------------
 
-def _is_portable(directory: Path, root: Path) -> bool:
+def _is_portable(directory: Path, worktree: Path) -> bool:
     """A hooks directory inside the work tree is meant to be committed (`.git/hooks` is not tracked), so its block must hold
     no path of this machine."""
-    return directory.is_relative_to(root) and not directory.is_relative_to(root / ".git")
+    return directory.is_relative_to(worktree) and not directory.is_relative_to(worktree / ".git")
 
 
 def _hook_label(path: Path, root: Path) -> str:
@@ -252,14 +298,14 @@ def _shadowed_notes(root: Path, directory: Path) -> tuple[str, ...]:
 
 
 def _hook_detail(path: Path, config: Config, pinned: Pinned | None) -> str:
-    detail = _hook_label(path, config.root)
-    origin = hooks_path_origin(config.root)
-    if origin is not None and not origin.is_relative_to(config.root / ".git"):
+    detail = _hook_label(path, config.worktree)
+    origin = hooks_path_origin(config.worktree)
+    if origin is not None and not origin.is_relative_to(config.root / ".git"):  # a linked worktree's repo config is the main one's
         detail += f" (core.hooksPath comes from {origin}, so every repo using that directory runs this hook; it skips repos without .ratchet.json)"
     if pinned is None:
         detail += " (portable: safe to commit; it finds ratchet through $RATCHET_BIN, `bin` in .ratchet.json, or PATH)"
-        if EXECUTABLE_PATH.is_relative_to(config.root):
-            detail += f'; this copy of ratchet is inside the repo, so set "bin": "{EXECUTABLE_PATH.relative_to(config.root).as_posix()}" in {CONFIG_NAME}'
+        if EXECUTABLE_PATH.is_relative_to(config.worktree):
+            detail += f'; this copy of ratchet is inside the repo, so set "bin": "{EXECUTABLE_PATH.relative_to(config.worktree).as_posix()}" in {CONFIG_NAME}'
         return detail
     if not EXECUTABLE_PATH.is_file():
         detail += f" WARNING: {EXECUTABLE_PATH} is missing"
@@ -277,7 +323,7 @@ def _install_hook(config: Config, options: InitOptions, hook: str, path: Path, p
     detail = _hook_detail(path, config, pinned)
     if options.dry_run:  # running the user's hook is not a read-only act, so a dry run only plans
         return Step(name, plan.status, detail, changes, notes)
-    problem = probe_hook(path, hook, config.root)
+    problem = probe_hook(path, hook, config.worktree)
     if problem is not None:
         return Step(name, "failed", problem, changes, notes)
     return Step(name, plan.status, f"{detail}; live check: the block ran", changes, notes)
@@ -286,12 +332,11 @@ def _install_hook(config: Config, options: InitOptions, hook: str, path: Path, p
 def _hooks_steps(config: Config, directory: Path | None, options: InitOptions, ask: Ask | None) -> list[Step]:
     if directory is None:
         return [Step("git hooks", "skip", "--no-hooks")]
-    pinned = None if _is_portable(directory, config.root) else (Path(sys.executable), EXECUTABLE_PATH)
+    pinned = None if _is_portable(directory, config.worktree) else (Path(sys.executable), EXECUTABLE_PATH)
     plans = {hook: plan_hook(directory / hook, hook, pinned) for hook in HOOK_NAMES}
-    if any(plan.status != "ok" for plan in plans.values()) and not _confirm(
-            options, ask, "Install git hooks (pre-commit: compile --check --staged; post-commit: infer)?"):
+    if any(plan.status != "ok" for plan in plans.values()) and not _confirm(options, ask, HOOKS_QUESTION):
         return [Step("git hooks", "skip", "declined")]
-    shadowed = _shadowed_notes(config.root, directory)
+    shadowed = _shadowed_notes(config.worktree, directory)
     return [_install_hook(config, options, hook, directory / hook, plan, pinned, shadowed if number == 0 else ())
             for number, (hook, plan) in enumerate(plans.items())]
 
@@ -305,7 +350,7 @@ def ignore_entries(config: Config) -> list[str]:
 
 
 def _gitignore_step(config: Config, options: InitOptions) -> Step:
-    path = config.root / ".gitignore"
+    path = config.worktree / ".gitignore"
     text = read_text(path)
     present = {line.strip() for line in split_block(text or "", HASH_BEGIN, HASH_END, ".gitignore")[0]}
     wanted = [entry for entry in ignore_entries(config) if entry not in present and f"/{entry}" not in present]
@@ -341,13 +386,13 @@ def files_to_stage(config: Config, options: InitOptions, hook_files: list[Path])
 
     CLAUDE.md, .gitignore and the hooks are shared with the user, so they count only when they carry init's marked block.
     """
-    owned = [config.root / CONFIG_NAME, *config.rules_files, config.digest_path, *(target.path for target in config.inject_targets)]
-    shared = [(config.root / "CLAUDE.md", HTML_BEGIN)] if options.edit_claude_md else []
-    shared += [(config.root / ".gitignore", HASH_BEGIN), *((path, HASH_BEGIN) for path in hook_files)]
+    owned = [config.worktree / CONFIG_NAME, *config.rules_files, config.digest_path, *(target.path for target in config.inject_targets)]
+    shared = [(config.worktree / "CLAUDE.md", HTML_BEGIN)] if options.edit_claude_md else []
+    shared += [(config.worktree / ".gitignore", HASH_BEGIN), *((path, HASH_BEGIN) for path in hook_files)]
     present = [path for path in owned if path.is_file()] + [path for path, marker in shared if marker in (read_text(path) or "")]
     tracked_here = [Path(os.path.normpath(path)) for path in dict.fromkeys(present)]
-    inside = [path for path in tracked_here if path.is_relative_to(config.root) and not path.is_relative_to(config.root / ".git")]
-    return uncommitted_paths(config.root, [path.relative_to(config.root).as_posix() for path in inside])
+    inside = [path for path in tracked_here if path.is_relative_to(config.worktree) and not path.is_relative_to(config.worktree / ".git")]
+    return uncommitted_paths(config.worktree, [path.relative_to(config.worktree).as_posix() for path in inside])
 
 
 def closing_lines(result: InitResult, options: InitOptions, command: str) -> list[str]:
@@ -378,7 +423,7 @@ def run_init(config: Config, options: InitOptions, ask: Ask | None, report: Call
     compile_step, effective = _compile_step(config, choice, options)
     finish(compile_step)
     finish(_claude_md_step(effective, options, ask))
-    directory = hooks_dir(effective.root) if options.install_hooks else None
+    directory = hooks_dir(effective.worktree) if options.install_hooks else None
     for step in _hooks_steps(effective, directory, options, ask):
         finish(step)
     finish(_gitignore_step(effective, options))

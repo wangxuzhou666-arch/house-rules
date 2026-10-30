@@ -10,7 +10,7 @@
    { "rules_files": ["docs/CODING-STYLE.md"] }
    ```
 
-2. Run `ratchet compile`. It writes `CODING-STYLE.digest.md` at the repo root.
+2. Run `ratchet compile`. It writes `CODING-STYLE.digest.md` at the repo root (the top of the worktree you run it in).
 3. Add this line to the repo's `CLAUDE.md`:
 
    ```
@@ -38,7 +38,7 @@ R.1 | Standards come from this file, not from the reviewer
 When you report findings as a JSON array, every finding object MUST carry two keys ...
 ```
 
-- **Header**: a single comment naming every rules file, relative to the repo root, with the first 12 hex digits of the sha256 of its bytes. Edit a source and its hash changes, so a stale digest is visible at a glance.
+- **Header**: a single comment naming every rules file, relative to the worktree (a rules file outside the repo, such as a shared `../rules.md`, is named relative to the main worktree, so every worktree writes the same bytes from the same rules; a name that starts with `~` keeps the spelling it has in the config, so it reads the same on every machine), with the first 12 hex digits of the sha256 of its bytes. Edit a source and its hash changes, so a stale digest is visible at a glance.
 - **Violations**: `ID | severity | short rule` for every clause that has a severity (see below), in rules-file order.
 - **Reviewer rules**: `ID | short rule` for the clauses that have none: guidance about how to review, not code defects.
 - **Labeling**: fixed text, the same for every repo. It says that every finding object in the JSON array a reviewer prints MUST carry two keys besides `file`, `line`, `summary` and `failure_scenario`: `"category"`, the violated clause id in kebab-case (`P0E.6` becomes `p0e-6`, which is what `ingest-code-review` reads) or `"unmapped"` when no clause truly matches (better than stretching a clause), and `"severity"`, one of `blocker`, `should-fix`, `nice`, as listed for that clause under Violations. A one-line example object shows the shape, and the text ends with: one finding per defect, other matching ids named in the summary. The wording is an order, not a suggestion, because a model that is only asked to label tends to cite ids in the summary ("(P0E.2, ...)") and leave the keys out. `ingest-code-review` reads such prose as a fallback ([LEDGER.md](LEDGER.md#commands)), but the keys are the reliable path.
@@ -75,6 +75,28 @@ The table is also the default severity for `ingest-code-review` and `add`: when 
 ```
 
 A later file may **add** clauses and table rows. It may not redefine a clause id, nor give a family a different severity than an earlier table did: both are errors that name both places. Append, never override. Equal rows repeated in a later file are fine. Table rows from all files are merged, so a project file can give its own new families a severity.
+
+### Outer layers
+
+An entry of `rules_files` that lies outside the worktree (the `../shared/CODING-STYLE.md` above, an absolute path, a file under `~`) is an **outer layer**: one file shared with other repositories. A leading `~` stands for the home directory of whoever runs the tool, in `rules_files`, `digest` and `inject_targets` alike.
+
+**An outer layer is read-only.** ratchet reads its clauses and never writes to it. A rule change it proposes goes into a rules file of this repository ([Rules outside this repository](DECISION-CARDS.md#rules-outside-this-repository)). A clause the outer layer defines is changed in the repository that owns that file, and so is moving a project rule up into the shared layer: ratchet has no command for that.
+
+**An outer layer has to be on the machine.** A command that ran without its clauses would judge or write against an incomplete rule set, so it stops with exit code 1 and writes nothing:
+
+```
+rules layer <name> is not on this machine (looked for <path>). It lies outside this repository, and without its clauses this command would run on an incomplete rule set: put the file there, or run this on a machine that has it
+```
+
+`<name>` is the entry as the config spells it (it can start with `~`), `<path>` the normalized path that was looked at. The commands that stop:
+
+- `compile`, with or without `--dry-run`; a digest that is already there stays as it is. `compile --check` is the exception, see [Check mode](#check-mode).
+- `review`, `--dry-run` and `--from-file` included, and `wrapup` once its review is due (`wrapup --dry-run` reports it as `would_refuse` of kind `rules`, [WRAPUP.md](WRAPUP.md#dry-run)).
+- `ingest-code-review`, `add` and `gate record`.
+- `decision-context`, `distill --drafts`, `prepare-decisions`, and applying a batch (`apply-decisions`, `apply-proposals`).
+- `init`, at its compile step. Unlike the others it has run its earlier steps by then, the config step among them.
+
+The others do not need the whole rule set and run without the layer: `count`, `label`, `label-page`, `apply-labels`, `infer`, `gate pass`, `distill` without `--drafts`, `rollback-proposals`, `recover-proposals`, `wrapup --report-only`, and the post-commit hook.
 
 ## Short rule
 
@@ -136,6 +158,15 @@ run `ratchet compile` to regenerate
 
 Use it in a pre-commit hook or CI to catch a rules edit committed without its regenerated digest. Hand edits inside an injected block, or to the digest, count as stale; edits outside the markers do not.
 
+**An outer layer that is not on this machine** ([Outer layers](#outer-layers)) does not fail the check. It exits 0 and prints nothing on stdout; stderr has a warning for each missing layer and one line saying what was not compared:
+
+```
+warning: rules layer <name> is not on this machine (looked for <path>); skipped
+compile --check: digest not compared, it is generated from every rules layer and this machine lacks <name>
+```
+
+With `--staged` the second line starts `compile --check --staged:`, and with several missing layers it names all of them, separated by commas. The digest is generated from every layer, so without one it cannot be rebuilt; neither the digest nor the inject targets are compared. The references that `tool_rule_map` and `scenarios` make to clauses of a skipped layer are not checked either. A rules file of the repository itself that is missing is still an error. The point is that the pre-commit hook does not stop a commit on a machine that lacks the shared file.
+
 ### `--check --staged`
 
 A plain `--check` compares the working tree, so it passes when you regenerated the digest but forgot to `git add` it. In a pre-commit hook that is the mistake you want caught, so `--check --staged` compares what the next commit will contain: the rules files, the digest and the injected targets are read from the git index (`git show :<path>`), not from disk.
@@ -149,11 +180,11 @@ The message says *staged* because the working-tree digest may well be fresh: it 
 
 - A digest that is not in the index is reported as `(digest, not staged)`. A rules file or inject target that is not in the index is an error that says so (`git add` it): the commit would contain no version of it. Errors about a staged file name it as `staged copy of <file>`. The usual one is ``staged copy of CLAUDE.md has no style-digest markers (the working tree copy does); stage it with `git add CLAUDE.md` ``: you added the markers but have not staged them.
 - An edit that is only in the working tree is not looked at: a file staged in full, or left alone, is judged as the commit will have it.
-- The config (`.ratchet.json`) is always read from the working tree. A rules file outside the repository (a shared `../rules.md`) cannot be staged and is read from disk.
-- Inside a hook, `GIT_INDEX_FILE` is honored, so `git commit <path>` (which builds a temporary index) is checked against that index. In a linked worktree the worktree's own index is used.
+- The config (`.ratchet.json`) is always read from the working tree (in a linked worktree, the main worktree's). A rules file outside the repository (a shared `../rules.md`) cannot be staged and is read from disk. An inject target outside it is read from disk too, and when it is missing the error says so (`inject target not found in the working tree: <path> (it is outside the repository, so it is read from disk and cannot be staged)`) instead of asking you to `git add` it.
+- Inside a hook, `GIT_INDEX_FILE` is honored, so `git commit <path>` (which builds a temporary index) is checked against that index. In a linked worktree the worktree's own index is used, and `compile` and `compile --check` there work on that worktree's own copies of the rules files, the digest and the injected targets.
 - `--staged` only applies to `--check`; `ratchet init` installs a pre-commit hook that runs it.
 
-`ratchet compile --dry-run` prints a unified diff of what a real run would change and writes nothing. Both modes still run every validation.
+`ratchet compile --dry-run` prints a unified diff of what a real run would change and writes nothing. Both modes still run every validation, and a dry run refuses a missing outer layer as a real run does.
 
 ## Size budget
 
@@ -163,12 +194,12 @@ The message says *staged* because the working-tree digest may well be fresh: it 
 
 | key | default | meaning |
 |---|---|---|
-| `digest` | `CODING-STYLE.digest.md` | digest output path, relative to the repo root |
+| `digest` | `CODING-STYLE.digest.md` | digest output path, relative to the repo root; in a linked worktree, that worktree's own file |
 | `digest_max_chars` | `90` | cap for one short rule, in characters (positive integer) |
 | `digest_max_bytes` | `4096` | size budget for the digest, in bytes (positive integer) |
-| `inject_targets` | `[]` | files that carry a `style-digest` marker pair to fill: a path, or `{"path": ..., "sections": [...]}` to choose sections ([Injection](#injection)) |
+| `inject_targets` | `[]` | files that carry a `style-digest` marker pair to fill: a path, or `{"path": ..., "sections": [...]}` to choose sections ([Injection](#injection)); in a linked worktree, that worktree's own files |
 
-`rules_files` and `clause_id_pattern` (see [LEDGER.md](LEDGER.md#config-ratchetjson)) decide which clauses exist.
+`rules_files` and `clause_id_pattern` (see [LEDGER.md](LEDGER.md#config-ratchetjson)) decide which clauses exist. A leading `~` in `rules_files`, `digest` or `inject_targets` stands for the home directory of whoever runs the tool ([Outer layers](#outer-layers)). All of these keys are read from the main worktree's `.ratchet.json`; a linked worktree's own copy is ignored, and the paths in it that lead into the repo name that worktree's own files ([Linked worktrees](ONBOARDING.md#linked-worktrees)).
 
 ## Exit status
 

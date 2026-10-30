@@ -54,7 +54,7 @@ def run_rollback(args: argparse.Namespace, config: Config) -> int:
 
 
 def run_recover(args: argparse.Namespace, config: Config) -> int:
-    print(f"restored {recover(config.root)} file(s) from the interrupted proposal transaction")
+    print(f"restored {recover(config.root, config.worktree)} file(s) from the interrupted proposal transaction")
     return 0
 
 

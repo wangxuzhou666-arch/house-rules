@@ -1543,10 +1543,13 @@ class LinkedWorktreeTest(SnippetCase):
     """`review` is about the worktree it is run in. The ledger, the saved reviews and the config stay in the main one.
 
     The two worktrees stand on different commits and hold different edits of src/a.py, so a review of the wrong one shows.
+    The rules are committed, so each worktree has its own copy of them.
     """
 
     def setUp(self) -> None:
         super().setUp()  # main: HEAD is the baseline, and src/a.py is edited to work-N, not committed
+        git(self.repo, "add", "rules.md")
+        self.commit("rules")  # the rules are tracked, so a linked worktree has its own copy from the day it is added
         self.baseline = git(self.repo, "rev-parse", "HEAD")
         self.tree = self.tmp / "feature-tree"
         git(self.repo, "worktree", "add", "-q", "-b", "feature", str(self.tree))

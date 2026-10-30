@@ -8,7 +8,8 @@ Three functions, nothing else in the package is promised to stay put:
     record_gate_pass(["src/a.py", "src/b.py"])
 
 `repo` is any path inside the repo (default: the current directory); config, rules and ledger location come from its
-`.ratchet.json`, exactly as for the command line. Problems raise `ratchet.errors.RatchetError`, including a ledger that
+`.ratchet.json`, exactly as for the command line. In a linked worktree the files are that worktree's and the ledger is the
+main worktree's. Problems raise `ratchet.errors.RatchetError`, including a ledger that
 cannot be written, so a gate that must not fail on the ledger catches that one exception type.
 """
 from __future__ import annotations
@@ -49,7 +50,7 @@ def record_gate_findings(findings: Iterable[dict[str, Any]], repo: Path | str | 
     """
     config = _config(repo)
     plan = plan_gate_findings(read_events(config.ledger_path), list(findings), config=config, rules=load_rules(config),
-                              sha=head_sha(config.root), ts=now_iso())
+                              sha=head_sha(config.worktree), ts=now_iso())
     append_events(config.ledger_path, plan.fresh)
     return GateRecording([event["id"] for event in plan.built], plan.fresh)
 
@@ -57,6 +58,6 @@ def record_gate_findings(findings: Iterable[dict[str, Any]], repo: Path | str | 
 def record_gate_pass(files: Iterable[str], repo: Path | str | None = None) -> Event:
     """Record that the gate passed over `files`; the open gate findings in those files are closed by `ratchet infer`."""
     config = _config(repo)
-    event = gate_pass_event(config, list(files), sha=head_sha(config.root), ts=now_iso())
+    event = gate_pass_event(config, list(files), sha=head_sha(config.worktree), ts=now_iso())
     append_events(config.ledger_path, [event])
     return event

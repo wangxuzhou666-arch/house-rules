@@ -50,6 +50,20 @@ def _run_line(hook: str) -> str:
     return f'"$_ratchet_py" "$_ratchet_bin" {HOOK_ARGS[hook]}{HOOK_STDOUT[hook]} || {HOOK_ON_FAILURE[hook]}'
 
 
+# post-commit also hands the commit to the automatic wrap-up (`ratchet auto note`). That does something only for a commit made in a
+# Claude Code session, which the shell can tell from the environment: every other commit skips starting Python for it.
+_NOTE_ARGS = "auto note"
+_ONLY_IN_A_SESSION = '[ -z "${CLAUDE_CODE_SESSION_ID:-}" ] || '
+
+
+def _note_lines(hook: str, indent: str) -> list[str]:
+    """What follows the tool's own run: the line that notes the commit for the automatic wrap-up (post-commit only). `|| true` keeps a
+    failing note from ending the hook, under `set -e` too."""
+    if hook != "post-commit":
+        return []
+    return [f'{indent}{_ONLY_IN_A_SESSION}"$_ratchet_py" "$_ratchet_bin" {_NOTE_ARGS} || true']
+
+
 def _warn(hook: str, message: str, advice: str = "") -> str:
     """A loud, non-blocking line on stderr; `message` and `advice` may use shell variables."""
     return f"printf '%s\\n' \"ratchet: WARNING: {message}; {hook} is NOT running.{advice}\" >&2"
@@ -71,6 +85,7 @@ def _pinned_body(hook: str, interpreter: Path, executable: Path) -> list[str]:
         _CONFIG_GUARD,
         '  if [ -x "$_ratchet_py" ] && [ -f "$_ratchet_bin" ]; then',
         f"    {_run_line(hook)}",
+        *_note_lines(hook, "    "),
         "  else",
         "    " + _warn(hook, "cannot run $_ratchet_bin with $_ratchet_py (interpreter or script missing)",
                     " Re-run 'ratchet init' to refresh this hook."),
@@ -101,6 +116,7 @@ def _portable_body(hook: str) -> list[str]:
         "    fi",
         '    if [ -f "$_ratchet_bin" ]; then',
         f"      {_run_line(hook)}",
+        *_note_lines(hook, "      "),
         "    else",
         "      " + _warn(hook, 'cannot find the ratchet executable (set RATCHET_BIN, add \\"bin\\" to .ratchet.json, or put ratchet on PATH)'),
         "    fi",
@@ -161,11 +177,20 @@ class HookPlan:
     note: str  # for "manual": what to do by hand
 
 
+def _manual_hint(path: Path, hook: str, pinned: Pinned | None) -> str:
+    """What to add by hand to a hook that is not a shell script: the tool's own run and, for post-commit, the automatic wrap-up's note."""
+    prefix = "" if pinned is None else f"{pinned[0]} {pinned[1]} "
+    hint = f"{path.name} is not a shell script; add this yourself: {prefix}{HOOK_ARGS[hook]}"
+    if hook != "post-commit":
+        return hint
+    return (f"{hint}\nand, for the automatic wrap-up (it does something only in a Claude Code session with wrapup_auto on): "
+            f"{prefix}{_NOTE_ARGS}")
+
+
 def plan_hook(path: Path, hook: str, pinned: Pinned | None) -> HookPlan:
     existing = read_text(path)
     if existing and not _SHELL_SHEBANG_RE.match(existing.splitlines()[0]):
-        command = HOOK_ARGS[hook] if pinned is None else f"{pinned[0]} {pinned[1]} {HOOK_ARGS[hook]}"
-        return HookPlan(None, "manual", f"{path.name} is not a shell script; add this yourself: {command}")
+        return HookPlan(None, "manual", _manual_hint(path, hook, pinned))
     base = existing if existing and existing.strip() else "#!/bin/sh\n"
     placement = place_block(base, hook_body(hook, pinned), path.name)
     status = placement.status

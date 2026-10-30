@@ -184,7 +184,7 @@ class LoadRulesTest(unittest.TestCase):
 
     def test_missing_rules_file_is_an_error(self) -> None:
         with self.assertRaisesRegex(RatchetError, "cannot read rules file"):
-            load_rules(make_config((self.dir / "absent.md",)))
+            load_rules(make_config((self.dir / "absent.md",), root=self.dir))  # a file of the repo; one outside it is a shared layer
 
     def test_same_clause_in_two_files_is_an_error(self) -> None:
         second = self.dir / "more.md"

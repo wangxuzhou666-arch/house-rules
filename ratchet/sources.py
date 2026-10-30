@@ -20,6 +20,9 @@ class FileReader(Protocol):
     def working_tree_copy(self, path: Path) -> bytes | None:
         """The file's bytes in the working tree when that differs from this view, else None."""
 
+    def missing_in(self, path: Path) -> tuple[str, str]:
+        """(label, missing_hint) for a "not found" message about `path`: where this view looked for it, and how to put it there."""
+
 
 class DiskReader:
     label = "the working tree"
@@ -37,24 +40,40 @@ class DiskReader:
     def working_tree_copy(self, path: Path) -> bytes | None:
         return None
 
+    def missing_in(self, path: Path) -> tuple[str, str]:
+        return self.label, self.missing_hint
+
 
 class IndexReader:
-    """What the next commit will contain. A file outside the repo (a shared rules file in `../`) cannot be staged, so it is read from disk."""
+    """What the next commit will contain, in the index of `worktree`: the main worktree's or a linked one's, each has its own.
+
+    The paths it is asked for are that worktree's own (`config.tracked_path`). A file outside the repo (a shared rules file in
+    `../`) cannot be staged, so it is read from disk.
+    """
 
     label = "the git index"
     missing_hint = " (stage it with `git add`)"
+    outside_hint = " (it is outside the repository, so it is read from disk and cannot be staged)"
     copy_label = "staged copy of "
 
-    def __init__(self, worktree: Path, root: Path) -> None:
+    def __init__(self, worktree: Path) -> None:
         self._worktree = worktree
-        self._root = root
         self._disk = DiskReader()
 
     def read(self, path: Path) -> bytes | None:
-        rel = Path(os.path.relpath(path, self._root))
-        if rel.parts[:1] == ("..",):
+        rel = Path(os.path.relpath(path, self._worktree))
+        if self._is_outside(rel):
             return self._disk.read(path)
         return index_blob(self._worktree, rel.as_posix())
 
     def working_tree_copy(self, path: Path) -> bytes | None:
         return self._disk.read(path)
+
+    def missing_in(self, path: Path) -> tuple[str, str]:
+        if self._is_outside(Path(os.path.relpath(path, self._worktree))):
+            return self._disk.label, self.outside_hint
+        return self.label, self.missing_hint
+
+    @staticmethod
+    def _is_outside(rel: Path) -> bool:
+        return rel.parts[:1] == ("..",)

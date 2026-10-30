@@ -40,17 +40,18 @@ class Commit:
     tokens: tuple[str, ...]  # every id named by a Fixes-Finding trailer, in order
 
 
-def trailer_commits(root: Path, all_refs: bool) -> list[Commit]:
+def trailer_commits(worktree: Path, all_refs: bool) -> list[Commit]:
     """Commits (oldest first) carrying at least one Fixes-Finding trailer, read with git's own trailer parser.
 
     git only recognizes trailers in the last paragraph of the message, so a stray "Fixes-Finding:" mid-body is ignored.
+    `HEAD` is that of `worktree`: a commit made in a linked worktree is on its branch, not on the main worktree's.
     """
-    if not all_refs and head_sha(root) == "none":
+    if not all_refs and head_sha(worktree) == "none":
         return []
     pretty = (f"%H{_FIELD_SEP}%s{_FIELD_SEP}"
               f"%(trailers:key={TRAILER_KEY},valueonly=true,unfold=true,separator=%x1e){_RECORD_END}")
     revs = ["--all"] if all_refs else ["HEAD"]
-    out = run_git(["log", "--reverse", f"--format={pretty}", *revs], root).stdout
+    out = run_git(["log", "--reverse", f"--format={pretty}", *revs], worktree).stdout
     commits = []
     for record in out.split(_RECORD_END):
         record = record.strip("\n")

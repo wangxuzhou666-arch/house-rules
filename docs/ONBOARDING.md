@@ -12,9 +12,9 @@ ratchet init --yes        # accepts the defaults (use this from scripts and from
 ratchet init --dry-run    # prints the plan and a diff per file, writes nothing
 ```
 
-Options: `--rules-file PATH` (use your own rules file instead of the template), `--template` (copy the bundled template), `--no-hooks`, `--no-claude-md`, `--repo PATH`. `--rules-file` and `--template` exclude each other.
+Options: `--rules-file PATH` (use your own rules file instead of the template), `--template` (copy the bundled template), `--no-hooks`, `--no-claude-md`, `--no-wrapup-auto` (answer no to the automatic wrap-up question without asking it, see [the `wrapup_auto` key](#the-wrapup_auto-key)), `--repo PATH`. `--rules-file` and `--template` exclude each other.
 
-Without `--yes` it needs a terminal; run from a pipe or a tool call it stops and says so rather than guessing. `--dry-run` never asks. Questions are asked only for a step that would change something, so rerunning on a finished repo asks nothing.
+Without `--yes` it needs a terminal; run from a pipe or a tool call it stops and says so rather than guessing. `--dry-run` never asks. There are up to four questions, in this order: the rules file, the automatic wrap-up, the `CLAUDE.md` import, the git hooks. A question is asked only for a step that would change something, so rerunning on a finished repo asks nothing.
 
 `--dry-run` prints, under each step that would change a file, the unified diff of exactly what a real run would write (new files appear as a diff against nothing; the digest a template copy would produce is rendered too). It writes nothing and never runs a hook, so it cannot show the live check below.
 
@@ -24,16 +24,35 @@ It is **idempotent**: each step checks what is already in place, only fills what
 
 | step | what it does | undo |
 |---|---|---|
-| config | Creates `.ratchet.json` with `rules_files`. If the file exists without `rules_files`, adds that key and keeps the rest. If it already lists rules, leaves it byte for byte. | delete the file |
-| rules file | Asks for a path to your own rules file, or offers the bundled template ([`templates/CODING-STYLE.template.md`](../templates/CODING-STYLE.template.md)), copied to `CODING-STYLE.md`. An existing `CODING-STYLE.md` or `docs/CODING-STYLE.md` is the default. The template is a draft: open it and read the `<!-- ADJUST: ... -->` comments, each marks a threshold, whitelist or tool code to fit to your repo. Never overwrites an existing file. | delete the copy |
+| config | Writes `.ratchet.json` with `rules_files` and `wrapup_auto`, the answer to the automatic wrap-up question ([below](#the-wrapup_auto-key)). If the file exists, adds whichever of the two it lacks and keeps the other keys; a file that has both is left byte for byte. In a linked worktree it is never created or edited, see [Linked worktrees](#linked-worktrees). | delete the file |
+| rules file | Asks for a path to your own rules file, or offers the bundled template ([`templates/CODING-STYLE.template.md`](../templates/CODING-STYLE.template.md)), copied to `CODING-STYLE.md`. An existing `CODING-STYLE.md` or `docs/CODING-STYLE.md` is the default. The template is a draft: open it and read the `<!-- ADJUST: ... -->` comments, each marks a threshold, whitelist or tool code to fit to your repo. Never overwrites an existing file. A rules file outside the repository is saved in the config as an absolute path and is read-only for ratchet ([Outer layers](COMPILE.md#outer-layers)). | delete the copy |
 | compile | Runs `ratchet compile`: writes `CODING-STYLE.digest.md` (see [COMPILE.md](COMPILE.md)). | delete the digest |
 | CLAUDE.md | Appends the heading `## Code style digest (review-ratchet)` and the line `@CODING-STYLE.digest.md` (your configured digest path) inside a `<!-- ratchet:begin -->` ... `<!-- ratchet:end -->` block, creating `CLAUDE.md` if absent. The heading is part of the block, so the import has a title of its own wherever it lands in your file. Claude Code expands the import, and the built-in `/code-review` reads `CLAUDE.md`, so reviews are judged against your clause IDs. An existing import line outside the block counts as done. | delete the block |
 | git hooks | Installs `pre-commit` and `post-commit`, then runs each once to prove its block is reached (below). | delete the `# ratchet:begin` ... `# ratchet:end` block from each hook |
 | .gitignore | Ignores the ledger, the label-page files and the whole `.ratchet/` directory (saved reviews, proposal batches, receipts: local state that can hold code excerpts) in a `# ratchet:begin` ... `# ratchet:end` block. Entries already listed elsewhere are not repeated. `CODING-STYLE.changelog.md`, the readable record of applied rule changes, is not ignored: commit it with the rules. A block written by an earlier version, which listed only `.ratchet/reviews/`, is refreshed in place on the next run and reported as `updated`. | delete the block |
 
+### The `wrapup_auto` key
+
+`wrapup_auto` turns on the automatic wrap-up review after commits made in a Claude Code session. It is a JSON boolean in `.ratchet.json`, `false` when absent; any other value is an error (`config 'wrapup_auto' must be true or false`). After the rules file, `init` asks:
+
+```
+Turn on the automatic wrap-up review after commits made in a Claude Code session? Each automatic run costs one /code-review. [Y/n]
+```
+
+Enter answers yes. `--yes` and `--dry-run`, which ask nothing, take that default; `--no-wrapup-auto` writes `false` and does not ask. What the config step does depends on what the file holds:
+
+| `.ratchet.json` | the config step |
+|---|---|
+| missing, or holds neither `rules_files` nor `wrapup_auto` | asks, then writes both keys, `wrapup_auto` after the keys that were there |
+| holds `wrapup_auto` but not `rules_files` | adds `rules_files`, keeps the value of `wrapup_auto`, asks nothing |
+| holds `rules_files` but not `wrapup_auto` (main worktree) | asks, adds only `wrapup_auto`; the step is `updated`, with the detail `.ratchet.json: wrapup_auto true` |
+| holds both | leaves the file byte for byte, `already ok`; `--no-wrapup-auto` does not overwrite the value |
+
+Whenever it writes, `init` serializes the whole file again with two-space indentation. The other keys and their order stay, but the layout is tidied. A dry run shows the change in its diff, for example `+  "wrapup_auto": true`. In a linked worktree `init` neither asks this question nor writes the config: see [Linked worktrees](#linked-worktrees).
+
 ### What it prints at the end
 
-- **The commit hint.** If init created or changed files that git sees as new or modified, it lists them and prints a ready line, for example `git add .ratchet.json CODING-STYLE.md CODING-STYLE.digest.md CLAUDE.md .githooks/pre-commit .githooks/post-commit && git commit -m "chore: adopt review-ratchet"`. Commit them together: the pre-commit hook checks the *staged* copies, so until the rules file and the digest are committed side by side, other commits are blocked. Only files init manages are listed, and a shared file (`CLAUDE.md`, `.gitignore`, a hook) only when it carries init's block. The ledger (`.style-findings.jsonl`) and the whole `.ratchet/` directory are git-ignored and stay local. `CODING-STYLE.changelog.md` is not: it appears the first time a rule change is applied (see [DECISION-CARDS.md](DECISION-CARDS.md#the-rule-change-record)), and you commit it with the rules. Hooks in `.git/hooks` are not tracked and never appear in the hint. A dry run prints no hint.
+- **The commit hint.** If init created or changed files that git sees as new or modified, it lists them and prints a ready line, for example `git add .ratchet.json CODING-STYLE.md CODING-STYLE.digest.md CLAUDE.md .githooks/pre-commit .githooks/post-commit && git commit -m "chore: adopt review-ratchet"`. Commit them together: the pre-commit hook checks the *staged* copies, so until the rules file and the digest are committed side by side, other commits are blocked. Only files init manages are listed, and a shared file (`CLAUDE.md`, `.gitignore`, a hook) only when it carries init's block. In a linked worktree the listed files are that worktree's. The ledger (`.style-findings.jsonl`) and the whole `.ratchet/` directory are git-ignored and stay local. `CODING-STYLE.changelog.md` is not: it appears the first time a rule change is applied (see [DECISION-CARDS.md](DECISION-CARDS.md#the-rule-change-record)), and you commit it with the rules. Hooks in `.git/hooks` are not tracked and never appear in the hint. A dry run prints no hint.
 - **The next steps.** Three lines: run a review (`ratchet review --level high`), see what is open by clause (`ratchet count --by-rule`), and close a stretch of work with `ratchet wrapup` (`/review-ratchet:wrapup` in Claude Code; see [WRAPUP.md](WRAPUP.md)). The third line goes on to name `ratchet label <id> --outcome fixed`, which records what became of a finding, and `ratchet label-page`, which does many at once.
 - **`review-ratchet is set up`** instead of the next steps when every step was already `ok` or skipped: a rerun on a finished repo says so and nothing else.
 
@@ -41,10 +60,39 @@ If a step is `FAILED` (see the live check below), the other steps still run, and
 
 ### The hooks
 
-- **pre-commit** runs `ratchet compile --check --staged`. If you staged a rules edit without the regenerated digest, the commit stops and says which staged file is stale; run `ratchet compile` if needed, `git add` the files it names, and commit again. A passing check prints nothing. See [`--check --staged`](COMPILE.md#--check---staged).
-- **post-commit** runs `ratchet infer --quiet`. A commit whose message ends with a `Fixes-Finding: <id>` trailer closes that finding in the ledger; the hook prints one line when it closes something and stays silent otherwise. It cannot fail a commit.
+`init` asks `Install git hooks (pre-commit: compile --check --staged; post-commit: infer, and in a Claude Code session with wrapup_auto on, noting the commit for the automatic wrap-up)?` and installs two:
+
+- **pre-commit** runs `ratchet compile --check --staged`. If you staged a rules edit without the regenerated digest, the commit stops and says which staged file is stale; run `ratchet compile` if needed, `git add` the files it names, and commit again. A passing check prints nothing, except that a shared rules layer which is not on this machine gets a warning and does not stop the commit ([Check mode](COMPILE.md#check-mode)). See [`--check --staged`](COMPILE.md#--check---staged).
+- **post-commit** runs `ratchet infer --quiet`. A commit whose message ends with a `Fixes-Finding: <id>` trailer closes that finding in the ledger; the hook prints one line when it closes something and stays silent otherwise. Then it runs `ratchet auto note`, which does something only in a Claude Code session with `wrapup_auto` on: it notes the commit for the automatic wrap-up ([below](#the-commit-note)). It cannot fail a commit.
 
 Both blocks only act in a repo that has a `.ratchet.json`, so a `core.hooksPath` shared by many repos is safe.
+
+#### The commit note
+
+The post-commit block ends with one more line, in the portable and the pinned block alike (the pre-commit block has none):
+
+```sh
+[ -z "${CLAUDE_CODE_SESSION_ID:-}" ] || "$_ratchet_py" "$_ratchet_bin" auto note || true
+```
+
+Outside a Claude Code session the shell skips it before Python starts, and `|| true` keeps a failure from ending the hook under `set -e`. `ratchet auto note` records the commit only when all four of these hold, and otherwise exits 0 without a word:
+
+- `CLAUDE_CODE_SESSION_ID` matches `[A-Za-z0-9_-]{1,128}`;
+- `RATCHET_REVIEW_CHILD` is not `1`. ratchet sets it to `1` for the `claude` process of its own reviews, so a commit made there is not noted; `0`, an empty value or `yes` do not stop the note;
+- `wrapup_auto` is exactly `true` in the main worktree's `.ratchet.json` (a linked worktree's own copy is ignored);
+- `HEAD` exists.
+
+The note only records. It appends one JSON line to `<state dir>/pending/<session id>.jsonl`:
+
+```json
+{"worktree": "<top of the worktree the commit was made in>", "head": "<full 40-hex sha>", "ts": "2026-10-30T09:12:41+00:00"}
+```
+
+`worktree` is the absolute path of the top of the worktree the commit was made in (a linked worktree records its own), `head` the full sha, `ts` the UTC time to the second.
+
+The state dir is the first of these that is set and not empty: `$RATCHET_STATE_DIR`, `$XDG_STATE_HOME/review-ratchet`, `~/.local/state/review-ratchet`. The note creates it and `pending/` with mode `0700`, and the files in them with `0600`. Each time a commit is noted, the files in `pending/` and in `claimed/` (where the Stop hook keeps the records it is judging) that nothing has written to for 7 days are deleted. The record stays on this machine because the paths and shas are private: nothing goes into the repository or its history. What reads the records at the end of the turn, and what else the state dir holds: [Automatic wrap-up](WRAPUP.md#automatic-wrap-up).
+
+A failure reaches neither the terminal nor the commit. It is one line in `<state dir>/hook.log`, `<UTC time> auto note: <ExceptionType>: <message> (at <file>:<line>)`, and that file is never trimmed.
 
 #### Portable and pinned blocks
 
@@ -66,11 +114,11 @@ A **pinned** block records, when you ran init, the interpreter that ran it (`sys
 
 #### Where the block goes, and the live check
 
-Existing hooks are never replaced. A shell-script hook gets the block added; a hook in another language is left untouched and `init` prints the line to add yourself (a `MANUAL` step). With `core.hooksPath` set, the hooks go there.
+Existing hooks are never replaced. A shell-script hook gets the block added; a hook in another language is left untouched and `init` prints the line to add yourself (a `MANUAL` step). For post-commit it prints a second line, `and, for the automatic wrap-up (it does something only in a Claude Code session with wrapup_auto on): <prefix>auto note`; `<prefix>` is the interpreter and the `bin/ratchet` of this checkout for a pinned block, and empty for a portable one. Pre-commit has no second line. With `core.hooksPath` set, the hooks go there.
 
-The block always goes at the **top** of the hook, right under the shebang line, in a new hook and in an existing one. Anywhere lower, your own code could end the script before it (an `exit` or `exec`, a function that exits, a failing command under `set -e`, an early return when nothing is staged) and the check would be installed but never run. At the top nothing of yours runs first. A block an earlier version appended after your `exit`, or one you moved further down, is moved back to the top by the next `init` and reported as `updated`; once it is at the top a rerun says `already ok`. Lines in your own hook (a `PATH` setup, say) run after the block, so the block (the portable kind; a pinned one carries its own paths) finds ratchet through `$RATCHET_BIN`, the `bin` key of `.ratchet.json`, or the `PATH` git started the hook with.
+The block always goes at the **top** of the hook, right under the shebang line, in a new hook and in an existing one. Anywhere lower, your own code could end the script before it (an `exit` or `exec`, a function that exits, a failing command under `set -e`, an early return when nothing is staged) and the check would be installed but never run. At the top nothing of yours runs first. A block an earlier version appended after your `exit`, or one you moved further down, is moved back to the top by the next `init` and reported as `updated`; once it is at the top a rerun says `already ok`. A post-commit block written before the commit note existed is brought up to date the same way: the next `init` rewrites it in place and reports `updated`, a second run says `already ok`, and nothing outside the block changes. Lines in your own hook (a `PATH` setup, say) run after the block, so the block (the portable kind; a pinned one carries its own paths) finds ratchet through `$RATCHET_BIN`, the `bin` key of `.ratchet.json`, or the `PATH` git started the hook with.
 
-Every installed block is also **run once**. `init` starts the hook from the repo root with `RATCHET_HOOK_PROBE=1`; the first thing the block does is print `ratchet-hook-probe <hook>` and exit 0, before touching the tool. The step is `ok` only if the hook exited 0 with that line on its stdout. Anything else (the shebang names an interpreter that is missing or cannot run the block, a hook that hangs past 60 seconds) makes the step `FAILED` with the status and the tail of the hook's output; the remaining steps still run, and `init` exits 1.
+Every installed block is also **run once**. `init` starts the hook from the top of the worktree with `RATCHET_HOOK_PROBE=1`; the first thing the block does is print `ratchet-hook-probe <hook>` and exit 0, before touching the tool (and before the commit note, so the probe leaves no record). The step is `ok` only if the hook exited 0 with that line on its stdout. Anything else (the shebang names an interpreter that is missing or cannot run the block, a hook that hangs past 60 seconds) makes the step `FAILED` with the status and the tail of the hook's output; the remaining steps still run, and `init` exits 1.
 
 - **There is no flag to skip it, on purpose.** The failure it catches is a check that is installed and silently never runs. A switch to turn that off would let the same silence back in.
 - **What the run costs: none of your code runs.** The block is the first thing in the hook and exits at once when it sees `RATCHET_HOOK_PROBE`, so everything of yours below it stays unexecuted during `init`: no deploy, no push, no lint auto-fix. The probe also uses a throwaway git index equal to `HEAD` (empty on an unborn branch), so it cannot touch yours. A dry run never probes.
@@ -85,16 +133,25 @@ ratchet review                       # /code-review at level high on the current
 ratchet review --level max           # low | medium | high | xhigh | max
 ratchet review --target 123          # a PR number, branch or path
 ratchet review --from-file out.txt   # ingest a review you saved earlier; claude is not run
-ratchet review --dry-run             # print the command it would run; with --from-file, show what would be recorded
+ratchet review --dry-run             # print the command it would run, and whether a real run would be refused; with --from-file, show what would be recorded
 ```
 
-It runs `claude -p "/code-review <level> [target]"` from the root of the worktree you run it in (about 30 seconds at `high`; the ledger and `.ratchet/` stay in the main worktree), saves the raw output to `.ratchet/reviews/<run>.txt`, ingests the findings as source `l1`, and prints a table: id, rule_id, severity, file:line, summary. The run id defaults to `r<k>`, where k is one more than the number of review runs so far (the ledger's, plus any run whose raw output was saved but recorded nothing), and the findings are `r<k>-1`, `r<k>-2`, ...: short enough to type in a `Fixes-Finding:` trailer. `--run ID` sets it instead. A run id that is already recorded is refused (omit `--run` for a new round); `--from-file <saved review> --run <that id>` re-ingests it instead: the same output records nothing twice, different output is refused. So is a default id that an earlier explicit `--run r<k>` already took (the numbering never skips ahead to hide that).
+It runs `claude -p "/code-review <level> [target]"` from the root of the worktree you run it in (about 30 seconds at `high`; the ledger and `.ratchet/` stay in the main worktree, while the rules it labels findings with and saves as evidence are that worktree's own), saves the raw output to `.ratchet/reviews/<run>.txt`, ingests the findings as source `l1`, and prints a table: id, rule_id, severity, file:line, summary. The run id defaults to `r<k>`, where k is one more than the number of review runs so far (the ledger's, plus any run whose raw output was saved but recorded nothing), and the findings are `r<k>-1`, `r<k>-2`, ...: short enough to type in a `Fixes-Finding:` trailer. `--run ID` sets it instead. A run id that is already recorded is refused (omit `--run` for a new round); `--from-file <saved review> --run <that id>` re-ingests it instead: the same output records nothing twice, different output is refused. So is a default id that an earlier explicit `--run r<k>` already took (the numbering never skips ahead to hide that).
 
 Each finding's `rule_id` comes from the `category` the model gave. The digest orders it to put a `category` (a clause ID in kebab-case) and a `severity` on every finding, and an answer that is not a known clause is recorded as `unmapped` rather than guessed. If a finding has no usable `category` (none at all, or one naming a Reviewer rule, a clause without a severity that no finding violates), the first clause ID that is not a Reviewer rule cited in its summary (then its failure scenario) is used and the finding is marked `attributed`; `ratchet count --by-rule --label-source` shows how many of each. If no clause in your rules has a severity at all (no tags, no family table), `compile` lists every clause under Reviewer rules and warns; `review` then counts none of them as one, so every clause can be a `category` and be attributed. Severity comes from the model if it gave one, otherwise from the clause's family.
 
 Each finding carries a short snippet of the code it points at, as the reviewer read it when the review started ([LEDGER.md](LEDGER.md#code-snippets)). The ledger also records which `claude` version ran the review; the first review on a new version prints `critic version changed: <old> -> <new> (first review on this version)` before the table, because a different critic is a different instrument.
 
-If `claude` is not on PATH, `review` says so and suggests `--from-file`. To use another command or wrapper, set `RATCHET_CLAUDE_CMD` (split like a shell command line; `-p "<prompt>"` is appended).
+If `claude` is not on PATH, `review` says so and suggests `--from-file`; it checks before it prints the `review round` line. To use another command or wrapper, set `RATCHET_CLAUDE_CMD` (split like a shell command line; `-p "<prompt>"` is appended).
+
+`ratchet review --dry-run` also says what a real run would be refused for. Two refusals are previewed and the dry run carries on past them, to print what it would run (or, with `--from-file`, record) and exit 0: the round cap, and a missing `claude`. Their line comes after `review round N/M for KEY` and before `[dry-run] review: would run ...`:
+
+```
+[dry-run] a real run would be refused: the round cap is reached; --over-cap runs it anyway, recorded
+[dry-run] a real run would be refused: `claude` not found on PATH; install Claude Code, or run the review elsewhere and pass its saved output with --from-file FILE
+```
+
+(The command in the second line is the first word of the one in use, so a `RATCHET_CLAUDE_CMD` wrapper is named there. A `--from-file` review runs no `claude`, so it never gets that line.) A rules file that does not load, and a change that has no round key (a detached HEAD, say), are not previewed: they are the same errors a real run stops on, exit 1.
 
 Close findings by committing a fix with a trailer:
 
@@ -106,11 +163,39 @@ Fixes-Finding: r3-2
 
 When many findings pile up, `ratchet label-page` writes a local HTML page to label them; see [LEDGER.md](LEDGER.md#labels).
 
+## Linked worktrees
+
+A repo can have several worktrees (`git worktree add`). ratchet keeps its shared state in the main worktree and works on the files git tracks in the worktree a command runs in, so every worktree feeds one ledger and compiles its own copy of the rules. A command runs in the worktree `--repo` points into, else the one the current directory is in (a subdirectory is fine). In the main worktree the shared state and the tracked files are in the same place, and nothing below applies.
+
+- **Shared, in the main worktree:** the ledger, the skips file (`skips_file`), the label page and batch (next to the ledger), everything under `.ratchet/` (saved reviews and their evidence, proposal batches, receipts, the journal of an interrupted write, the lock and `version.json`) and the config. A `.ratchet.json` in a linked worktree is ignored; the main worktree's decides.
+- **The worktree's own:** the files git tracks that ratchet reads or writes: the rules files (`rules_files`), the digest, the inject targets, `CODING-STYLE.changelog.md`, `CLAUDE.md` and `.gitignore`, and the code that is reviewed, measured, gated or put in a decision context.
+
+A file the config names that lies outside the repo (a shared `../rules.md`, an absolute path, a path under `~`) is one file for every worktree and is looked up from the main worktree. The digest header names it the same way from every worktree, so worktrees with the same rules compile to the same bytes.
+
+What each command does in a linked worktree:
+
+- `ratchet compile` writes that worktree's digest and injected blocks. `ratchet compile --check` compares them with its rules, and `--staged` with its own index ([COMPILE.md](COMPILE.md#--check---staged)).
+- `ratchet review` runs `claude` there, labels the findings with that worktree's rules, saves them as evidence and counts the review rounds of its branch ([LEDGER.md](LEDGER.md#review-rounds)); the raw review and the evidence go to the main worktree's `.ratchet/`. `ratchet wrapup` measures that worktree's changes ([WRAPUP.md](WRAPUP.md#the-base)).
+- `ratchet add`, `ratchet ingest-code-review` and `ratchet gate` stamp that worktree's HEAD on what they write and resolve rule ids against its rules; `gate` also reads its files ([GATES.md](GATES.md#in-a-linked-worktree)). The Python API does the same for the worktree its `repo` is in.
+- `ratchet infer` reads the `Fixes-Finding:` trailers in the history of that worktree's HEAD, so a commit made on another worktree's branch is not seen until it is merged; `--all` reads every ref ([LEDGER.md](LEDGER.md#commit-trailers)).
+- `ratchet decision-context` and the proposal commands read that worktree's rules and code. A rule change is applied, rolled back and recovered in one worktree: see [Worktrees](DECISION-CARDS.md#worktrees).
+- The hooks `init` installs run in the worktree a commit is made in: pre-commit checks that worktree's index and files, and post-commit runs `ratchet infer --quiet` on its HEAD and, in a Claude Code session with `wrapup_auto` on in the main worktree's config, notes the commit under that worktree's own path ([The commit note](#the-commit-note)). A hook block acts only when the top of that worktree holds a `.ratchet.json`, so keep the config committed.
+
+**`ratchet init` in a linked worktree** sets up that worktree's own files: the digest, the `CLAUDE.md` import, the `.gitignore` block and the hooks. Its heading names the worktree it runs in (`ratchet init: <path>`), and a second line says the config and the ledger stay shared with the main worktree. The commit it asks for lists that worktree's files. Hooks in the default `.git/hooks` are shared by every worktree, so one `init` serves them all; a `core.hooksPath` that points into the repo names a directory in each worktree, and `init` writes the portable blocks into the one it runs in.
+
+`init` never writes `.ratchet.json` from a linked worktree. If the main worktree's config lists no `rules_files`, it stops without writing anything (`--yes` and `--dry-run` alike) and tells you to run `ratchet init` in the main worktree first.
+
+It does not ask the automatic wrap-up question there either, since `wrapup_auto` is the main worktree's to write. When that config has no `wrapup_auto` and `--no-wrapup-auto` was not given, the config step prints one line under it, and with the key present it prints nothing:
+
+```
+wrapup_auto is not set in <path of the main worktree's .ratchet.json>, which every worktree shares and init writes from the main worktree only: run `ratchet init` there, or add "wrapup_auto": true to it, to turn on the automatic wrap-up review
+```
+
 ## With the Claude Code plugin
 
 The repository is also a Claude Code plugin (`.claude-plugin/plugin.json`) and a one-plugin marketplace (`.claude-plugin/marketplace.json`). Install it with `claude plugin marketplace add wangxuzhou666-arch/review-ratchet` and `claude plugin install review-ratchet@review-ratchet`, or load a checkout for one session with `claude --plugin-dir /path/to/review-ratchet`. Its `bin/` directory is on the Bash tool's PATH while the plugin is enabled, so the skills run `ratchet` directly.
 
-- `/review-ratchet:setup` walks through `ratchet init`: it previews with `--dry-run`, explains each line, runs `--yes`, and shows the next steps.
+- `/review-ratchet:setup` walks through `ratchet init`: it settles three choices with you first (the rules file, the git hooks, the automatic wrap-up), previews with `--dry-run`, explains each line, runs `--yes` with the flags those choices need, and shows the next steps.
 - `/review-ratchet:review [level] [target]` runs `ratchet review`, shows the table and the counts, and offers the label page when findings pile up.
 
 After a plugin update the install path changes. Pinned hooks (the default `.git/hooks`, or a hooks directory outside the repo) record that path, so run `/review-ratchet:setup` again to refresh them; portable hooks record none and need nothing.

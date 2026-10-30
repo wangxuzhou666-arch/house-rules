@@ -18,7 +18,7 @@ some-linter --format=json | convert-to-reports | ratchet gate record
 
 | key | meaning |
 |---|---|
-| `file` | path of the flagged file. Relative to the repo root (not the caller's cwd), or absolute inside it; absolute symlink aliases are resolved before the boundary check; stored relative with `/` |
+| `file` | path of the flagged file. Relative to the top of the worktree the gate runs in (not the caller's cwd), or absolute inside it (a file of another worktree is outside it); absolute symlink aliases are resolved before the boundary check; stored relative with `/` |
 | `line` | integer >= 0. `0` means "no position" (a syntax error that has none) and is stored as line 1 |
 | `code` | `<tool>:<code>` (`ruff:F811`, `gate:DEPTH`) or a clause id (`P1.1`) |
 | `message` | what the gate said, non-empty; becomes the finding's `summary` |
@@ -33,12 +33,12 @@ gate record: +1 finding(s), 0 already open
 
 ### How a report becomes a finding
 
-- **`rule_id`**: `code` is looked up in the config's `tool_rule_map` first, so `{"ruff:BLE001": "P0E.3"}` records every `ruff:BLE001` as clause `P0E.3` (`rule_id_source: tool`). A `<tool>:<code>` that is not mapped is recorded as that tool id. A clause id must be defined in the rules files, otherwise the report is refused; nothing is coerced.
+- **`rule_id`**: `code` is looked up in the config's `tool_rule_map` first, so `{"ruff:BLE001": "P0E.3"}` records every `ruff:BLE001` as clause `P0E.3` (`rule_id_source: tool`). A `<tool>:<code>` that is not mapped is recorded as that tool id. A clause id must be defined in the rules files, otherwise the report is refused; nothing is coerced. If a rules layer outside the repository is not on this machine, `gate record` is refused as a whole, because it would run against an incomplete rule set ([Outer layers](COMPILE.md#outer-layers)). `gate pass` is not affected.
 - **`rule_code`**: the code the gate used, without the tool prefix: `F811` for `ruff:F811`, `P1.1` for `P1.1`.
 - **`severity`**: the report's, else the clause's (tag or family table), else `should-fix`.
 - **`failure_scenario`**: the config's `scenarios[rule_id]`, else `The gate flagged <rule_id>: <message>`.
-- **`snippet`**: the flagged line and two lines either side, read from the working tree.
-- `verdict` is `CONFIRMED`, `run_id` is `gate`, `sha` is HEAD (`none` before the first commit).
+- **`snippet`**: the flagged line and two lines either side, read from the working tree of the worktree the gate runs in.
+- `verdict` is `CONFIRMED`, `run_id` is `gate`, `sha` is that worktree's HEAD (`none` before the first commit).
 
 ### The finding id
 
@@ -58,9 +58,13 @@ This is the id recipe a gate that wrote the ledger by hand would already be usin
 ratchet gate pass --files src/a.py src/b.py
 ```
 
-Writes `{kind: "gate_pass", repo, ts, sha: HEAD, files}`: sorted, de-duplicated, repo-relative paths. Call it when the gate passes, with the files it checked. Open gate findings in those files are closed by the next `ratchet infer` (the post-commit hook runs it).
+Writes `{kind: "gate_pass", repo, ts, sha: HEAD, files}`: the HEAD of the worktree the gate runs in, and sorted, de-duplicated, worktree-relative paths. Call it when the gate passes, with the files it checked. Open gate findings in those files are closed by the next `ratchet infer` (the post-commit hook runs it).
 
-A gate that only inspects changed lines can pass over a file that still holds a violation it let through on purpose. List the ids of those findings in the config's `skips_file` and a later pass will not close them ([LEDGER.md](LEDGER.md#gate-passes)).
+A gate that only inspects changed lines can pass over a file that still holds a violation it let through on purpose. List the ids of those findings in the config's `skips_file` and a later pass will not close them ([LEDGER.md](LEDGER.md#gate-passes)). The skips file is shared state in the main worktree, like the ledger: a gate that appends to it writes that copy, not one in its own worktree.
+
+## In a linked worktree
+
+A gate sees the worktree it runs in (`--repo`, else the current directory): `file` paths are relative to the top of that worktree, the snippet and the line text behind the finding id are read from its files, a clause id given as `code` is checked against its rules, and `sha` is its HEAD. So the same violation on a line that differs between two worktrees is two findings. What the gate records, findings and passes alike, goes into the one ledger in the main worktree, and the skips file is the main worktree's too ([Linked worktrees](ONBOARDING.md#linked-worktrees)). The Python API does the same for the worktree its `repo` is in.
 
 ## Python API
 
@@ -68,7 +72,7 @@ A gate that only inspects changed lines can pass over a file that still holds a 
 from ratchet.api import ledger_path, record_gate_findings, record_gate_pass
 ```
 
-Three functions are the stable surface; nothing else in the package is promised to keep its name or signature. `repo` is any path inside the repo (default: the current directory); config, rules and ledger location come from its `.ratchet.json`, exactly as for the command line.
+Three functions are the stable surface; nothing else in the package is promised to keep its name or signature. `repo` is any path inside the repo (default: the current directory); config, rules and ledger location come from its `.ratchet.json`, exactly as for the command line. In a linked worktree the files are that worktree's and the ledger is the main worktree's.
 
 | call | does |
 |---|---|
@@ -76,7 +80,7 @@ Three functions are the stable surface; nothing else in the package is promised 
 | `record_gate_findings(findings, repo=None) -> GateRecording` | what `gate record` does. `findings` is an iterable of the report dicts above. `GateRecording.ids` lists the id of every report, including ones already open; `GateRecording.recorded` the events appended just now |
 | `record_gate_pass(files, repo=None) -> dict` | what `gate pass` does; returns the event it appended |
 
-Failures (a bad report, an unknown clause, a ledger that cannot be written) raise `ratchet.errors.RatchetError`, which `ratchet.api` re-exports. A gate whose verdict must not depend on the ledger catches that one type and warns:
+Failures (a bad report, an unknown clause, a rules layer outside the repository that is not on this machine, a ledger that cannot be written) raise `ratchet.errors.RatchetError`, which `ratchet.api` re-exports (the missing layer raises a subclass of it, so catching `RatchetError` covers it). `record_gate_pass`, like `gate pass`, is not affected by a missing layer. A gate whose verdict must not depend on the ledger catches that one type and warns:
 
 ```python
 try:

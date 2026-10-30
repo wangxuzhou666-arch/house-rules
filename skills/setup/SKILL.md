@@ -9,9 +9,10 @@ allowed-tools: Bash(ratchet *) Bash(git rev-parse *)
 `ratchet` is the plugin's `bin/ratchet`. If the shell cannot find it, use `${CLAUDE_PLUGIN_ROOT}/bin/ratchet`. Arguments given to this skill: `$ARGUMENTS`.
 
 1. Run `git rev-parse --show-toplevel`. If it fails, tell the user review-ratchet needs a git repo and stop.
-2. Settle two choices with the user, skipping any they already stated:
+2. Settle three choices with the user, skipping any they already stated:
    - Rules: copy the bundled template (a draft they should edit; its `<!-- ADJUST -->` comments mark every knob) or use their own rules file whose clauses look like `1. **[P0E.1]** text`. For their own file, add `--rules-file PATH` below.
-   - Git hooks: a pre-commit check that the digest is fresh, and a post-commit step that closes findings from `Fixes-Finding:` trailers. To skip them, add `--no-hooks`.
+   - Git hooks: a pre-commit check that the digest is fresh, and a post-commit step that closes findings from `Fixes-Finding:` trailers and, when the automatic wrap-up (next) is on, also notes the commit for it. To skip them, add `--no-hooks`.
+   - Automatic wrap-up: whether to review by itself after commits made in a Claude Code session, once the work since the last review is big enough. Each automatic run costs one `/code-review`. `--yes` turns it on; to leave it off, add `--no-wrapup-auto`.
 3. Preview with `ratchet init --dry-run <flags>` and explain each printed line in one sentence: config, rules file, compile, CLAUDE.md, hooks, .gitignore.
 4. When the user agrees, run `ratchet init --yes <flags>` (init asks questions in a terminal, so `--yes` is required here) and show its output, including the commit line and the three "next" lines. If a hook step is FAILED, init exits 1: the hook did not answer the live check even though init put the block right under its shebang (usually a shebang line that names an interpreter which is missing). Relay the message, fix that line, then run init again.
 5. Tell the user:

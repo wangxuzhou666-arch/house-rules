@@ -1,12 +1,16 @@
 import json
 import os
 import re
+import shlex
 import unittest
+from pathlib import Path
 
 import support  # noqa: F401  (puts the repo root on sys.path)
 from support import REPO_ROOT
 
 PLUGIN_JSON = REPO_ROOT / ".claude-plugin" / "plugin.json"
+HOOKS_JSON = REPO_ROOT / "hooks" / "hooks.json"
+AUTO_STOP = REPO_ROOT / "ratchet" / "auto_stop.py"
 MARKETPLACE_JSON = REPO_ROOT / ".claude-plugin" / "marketplace.json"
 OWNER = "wangxuzhou666-arch"
 REPOSITORY = f"https://github.com/{OWNER}/review-ratchet"
@@ -68,6 +72,51 @@ class MarketplaceTest(unittest.TestCase):
     def test_the_keys_are_ones_claude_code_reads(self) -> None:
         self.assertLessEqual(set(self.marketplace), {"name", "description", "owner", "plugins"})
         self.assertLessEqual(set(self.marketplace["plugins"][0]), {"name", "source", "description"})
+
+
+class HooksTest(unittest.TestCase):
+    """hooks/hooks.json is loaded by Claude Code from the plugin root on its own; the manifest does not name it."""
+
+    def setUp(self) -> None:
+        self.config = json.loads(HOOKS_JSON.read_text(encoding="utf-8"))
+        (group,) = self.config["hooks"]["Stop"]
+        (self.hook,) = group["hooks"]
+        self.group = group
+
+    def test_only_the_stop_event_is_registered(self) -> None:
+        self.assertEqual(list(self.config), ["hooks"])
+        self.assertEqual(list(self.config["hooks"]), ["Stop"])
+
+    def test_it_has_no_matcher_because_a_stop_hook_takes_none_and_no_condition(self) -> None:
+        self.assertEqual(list(self.group), ["hooks"])
+        self.assertEqual(set(self.hook), {"type", "command", "timeout"})
+
+    def test_it_is_a_command_with_a_timeout_of_30_seconds(self) -> None:
+        self.assertEqual((self.hook["type"], self.hook["timeout"]), ("command", 30))
+
+    def test_the_command_runs_the_plugins_executable_run_sh_with_auto_stop_and_quotes_the_plugin_path(self) -> None:
+        command = self.hook["command"]
+        self.assertTrue(command.startswith('"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh" '), command)  # a shell reads it, and a path may hold a space
+        script, *arguments = shlex.split(command.replace("${CLAUDE_PLUGIN_ROOT}", str(REPO_ROOT)))
+        self.assertEqual((Path(script), arguments), (REPO_ROOT / "hooks" / "run.sh", ["auto", "stop"]))
+        self.assertTrue(os.access(script, os.X_OK))
+
+    def test_run_sh_is_a_posix_shell_script(self) -> None:
+        self.assertEqual((REPO_ROOT / "hooks" / "run.sh").read_text(encoding="utf-8").splitlines()[0], "#!/bin/sh")
+
+    def test_the_subcommand_it_runs_exists(self) -> None:
+        from ratchet.cli import build_parser
+        args = build_parser().parse_args(["auto", "stop"])
+        self.assertTrue(args.standalone)
+
+    def test_the_manifest_does_not_name_the_hooks_file_which_would_load_it_twice(self) -> None:
+        self.assertNotIn("hooks", json.loads(PLUGIN_JSON.read_text(encoding="utf-8")))
+
+    def test_the_skill_the_hook_asks_for_is_one_the_plugin_has_under_the_name_the_hook_gives(self) -> None:
+        plugin = json.loads(PLUGIN_JSON.read_text(encoding="utf-8"))["name"]
+        self.assertIn(f"/{plugin}:wrapup auto ", AUTO_STOP.read_text(encoding="utf-8"))
+        self.assertIn(f"Skill tool: {plugin}:wrapup, args: auto ", AUTO_STOP.read_text(encoding="utf-8"))
+        self.assertEqual(frontmatter((SKILLS / "wrapup" / "SKILL.md").read_text(encoding="utf-8"))["name"], "wrapup")
 
 
 class DistributionTest(unittest.TestCase):
@@ -142,6 +191,15 @@ class SkillTest(unittest.TestCase):
         self.assertIn("4 most severe at most", text)
         self.assertIn("`Now (Recommended)`", text)
         self.assertIn("(Recommended)", text)
+
+    def test_wrapup_takes_auto_worktree_and_runs_the_review_in_the_background(self) -> None:
+        text = self.skills()["wrapup"]
+        self.assertIn("auto <worktree>", frontmatter(text)["argument-hint"])
+        self.assertIn("auto <worktree>", frontmatter(text)["description"])
+        self.assertIn("ratchet wrapup --repo <worktree> --json", text)
+        self.assertIn("`run_in_background`", text)
+        self.assertIn("completion notice", text)
+        self.assertIn("one sentence and no question", text)
 
     def test_wrapup_records_only_false_positive_with_one_direct_label_command(self) -> None:
         text = self.skills()["wrapup"]

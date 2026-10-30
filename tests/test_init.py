@@ -67,7 +67,7 @@ class InitCase(RepoCase):
 class FreshRepoTest(InitCase):
     def test_yes_sets_everything_up_from_the_template(self) -> None:
         out = self.init("--yes")
-        self.assertEqual(json.loads(self.text(".ratchet.json")), {"rules_files": ["CODING-STYLE.md"]})
+        self.assertEqual(json.loads(self.text(".ratchet.json")), {"rules_files": ["CODING-STYLE.md"], "wrapup_auto": True})
         self.assertEqual(self.text("CODING-STYLE.md"), TEMPLATE_PATH.read_text(encoding="utf-8"))
         self.assertTrue((self.repo / DIGEST).is_file())
         self.assertEqual(self.text("CLAUDE.md"), f"{HTML_BEGIN}\n{CLAUDE_MD_HEADING}\n@{DIGEST}\n{HTML_END}\n")
@@ -203,7 +203,7 @@ class RulesFileTest(InitCase):
         (self.repo / "docs").mkdir()
         (self.repo / "docs" / "CODING-STYLE.md").write_text(STYLE_RULES, encoding="utf-8")
         self.init("--yes")
-        self.assertEqual(json.loads(self.text(".ratchet.json")), {"rules_files": ["docs/CODING-STYLE.md"]})
+        self.assertEqual(json.loads(self.text(".ratchet.json")), {"rules_files": ["docs/CODING-STYLE.md"], "wrapup_auto": True})
         self.assertFalse((self.repo / "CODING-STYLE.md").exists())
 
     def test_template_never_overwrites_an_existing_file(self) -> None:
@@ -216,14 +216,14 @@ class RulesFileTest(InitCase):
         mine = self.repo / "mine.md"
         mine.write_text(STYLE_RULES, encoding="utf-8")
         self.init("--yes", "--rules-file", str(mine))
-        self.assertEqual(json.loads(self.text(".ratchet.json")), {"rules_files": ["mine.md"]})
+        self.assertEqual(json.loads(self.text(".ratchet.json")), {"rules_files": ["mine.md"], "wrapup_auto": True})
         self.assertFalse((self.repo / "CODING-STYLE.md").exists())
 
     def test_rules_file_outside_the_repo_is_stored_absolute(self) -> None:
         shared = self.tmp / "shared.md"
         shared.write_text(STYLE_RULES, encoding="utf-8")
         self.init("--yes", "--rules-file", str(shared))
-        self.assertEqual(json.loads(self.text(".ratchet.json")), {"rules_files": [str(shared)]})
+        self.assertEqual(json.loads(self.text(".ratchet.json")), {"rules_files": [str(shared)], "wrapup_auto": True})
         self.assertTrue((self.repo / DIGEST).is_file())
 
     def test_a_missing_rules_file_is_an_error_and_nothing_is_written(self) -> None:
@@ -251,14 +251,16 @@ class ConfigFileTest(InitCase):
         self.write_config(label_page_threshold=5, repo_slug="mine")
         out = self.init("--yes")
         self.assertEqual(json.loads(self.text(".ratchet.json")),
-                         {"label_page_threshold": 5, "repo_slug": "mine", "rules_files": ["CODING-STYLE.md"]})
+                         {"label_page_threshold": 5, "repo_slug": "mine", "rules_files": ["CODING-STYLE.md"], "wrapup_auto": True})
         self.assertEqual(self.statuses(out)["config"], "updated")
 
-    def test_a_config_with_rules_files_is_left_byte_for_byte(self) -> None:
+    def test_a_config_with_rules_files_and_wrapup_auto_is_left_byte_for_byte(self) -> None:
         self.write_rules(STYLE_RULES)
-        (self.repo / ".ratchet.json").write_text('{"rules_files":["rules.md"],   "scenarios": {}}', encoding="utf-8")
-        self.init("--yes")
-        self.assertEqual(self.text(".ratchet.json"), '{"rules_files":["rules.md"],   "scenarios": {}}')
+        config = '{"rules_files":["rules.md"],   "scenarios": {}, "wrapup_auto": false}'
+        (self.repo / ".ratchet.json").write_text(config, encoding="utf-8")
+        out = self.init("--yes")
+        self.assertEqual(self.text(".ratchet.json"), config)
+        self.assertEqual(self.statuses(out)["config"], "already ok")
         self.assertFalse((self.repo / "CODING-STYLE.md").exists())
 
     def test_a_configured_rules_file_that_is_missing_is_an_error(self) -> None:
@@ -346,7 +348,21 @@ class HooksTest(InitCase):
         self.assertEqual(path.read_text(encoding="utf-8"), original)
         self.assertEqual(self.statuses(out)["hook pre-commit"], "MANUAL")
         self.assertIn(f"{sys.executable} {EXECUTABLE_PATH} compile --check --staged", out)  # the line to add names the interpreter too
+        self.assertNotIn("and, for the automatic wrap-up", out)  # only post-commit notes a commit
         self.assertEqual(self.statuses(out)["hook post-commit"], "added")
+
+    def test_a_post_commit_hook_in_another_language_is_told_the_wrap_up_note_as_well(self) -> None:
+        path = self.hook("post-commit")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        original = "#!/usr/bin/env python3\nprint('hi')\n"
+        path.write_text(original, encoding="utf-8")
+        out = self.init("--yes")
+        self.assertEqual(path.read_text(encoding="utf-8"), original)
+        self.assertEqual(self.statuses(out)["hook post-commit"], "MANUAL")
+        command = f"{sys.executable} {EXECUTABLE_PATH}"
+        self.assertIn(f"add this yourself: {command} infer --quiet\n", out)
+        [note] = [line.strip() for line in out.splitlines() if line.strip().startswith("and, for the automatic wrap-up")]
+        self.assertTrue(note.endswith(f"in a Claude Code session with wrapup_auto on): {command} auto note"), note)
 
     def test_a_hook_without_a_shebang_is_not_touched(self) -> None:
         path = self.hook("post-commit")
@@ -403,6 +419,7 @@ class HooksTest(InitCase):
     def test_hooks_in_a_linked_worktree_go_to_the_shared_hooks_dir(self) -> None:
         self.write_rules(STYLE_RULES)
         self.write_config(rules_files=["rules.md"])
+        git(self.repo, "add", "rules.md")  # the rules are tracked, so the linked worktree has its own copy
         self.commit("base")
         linked = self.tmp / "linked"
         git(self.repo, "worktree", "add", "-q", "-b", "side", str(linked))
@@ -590,6 +607,8 @@ class GitignoreTest(InitCase):
 
 
 class InteractiveTest(InitCase):
+    """A fresh repo asks four questions, one answer line each: the rules file, the automatic wrap-up, CLAUDE.md, the hooks."""
+
     def test_without_yes_and_without_a_terminal_it_refuses_and_writes_nothing(self) -> None:
         before = self.files()
         code, _, err = self.cli("init")
@@ -599,43 +618,49 @@ class InteractiveTest(InitCase):
         self.assertEqual(self.files(), before)
 
     def test_pressing_enter_everywhere_equals_yes(self) -> None:
-        code, out, err = self.ask("\n\n\n")
+        code, out, err = self.ask("\n\n\n\n")
         self.assertEqual(code, 0, err)
         self.assertEqual(set(self.statuses(out).values()), {"added"})
         self.assertTrue(self.hook("pre-commit").is_file())
 
     def test_the_default_offered_is_an_existing_rules_file(self) -> None:
         (self.repo / "CODING-STYLE.md").write_text(STYLE_RULES, encoding="utf-8")
-        _, out, _ = self.ask("\n\n\n")
+        _, out, _ = self.ask("\n\n\n\n")
         self.assertIn("[CODING-STYLE.md]", out)
         self.assertEqual(self.text("CODING-STYLE.md"), STYLE_RULES)
 
     def test_typing_a_path_uses_that_file(self) -> None:
         mine = self.repo / "mine.md"
         mine.write_text(STYLE_RULES, encoding="utf-8")
-        code, _, err = self.ask(f"{mine}\n\n\n")
+        code, _, err = self.ask(f"{mine}\n\n\n\n")
         self.assertEqual(code, 0, err)
-        self.assertEqual(json.loads(self.text(".ratchet.json")), {"rules_files": ["mine.md"]})
+        self.assertEqual(json.loads(self.text(".ratchet.json")), {"rules_files": ["mine.md"], "wrapup_auto": True})
 
     def test_typing_template_copies_the_template_even_when_a_file_is_detected(self) -> None:
         (self.repo / "docs").mkdir()
         (self.repo / "docs" / "CODING-STYLE.md").write_text(STYLE_RULES, encoding="utf-8")
-        self.ask("template\n\n\n")
+        self.ask("template\n\n\n\n")
         self.assertEqual(self.text("CODING-STYLE.md"), TEMPLATE_PATH.read_text(encoding="utf-8"))
 
     def test_declining_claude_md_skips_it(self) -> None:
-        code, out, _ = self.ask("\nn\n\n")
+        code, out, _ = self.ask("\n\nn\n\n")
         self.assertEqual(code, 0)
         self.assertFalse((self.repo / "CLAUDE.md").exists())
         self.assertEqual(self.statuses(out)["CLAUDE.md"], "skipped")
         self.assertTrue(self.hook("pre-commit").is_file())
 
     def test_declining_the_hooks_skips_both(self) -> None:
-        code, out, _ = self.ask("\n\nn\n")
+        code, out, _ = self.ask("\n\n\nn\n")
         self.assertEqual(code, 0)
         self.assertFalse(self.hook("pre-commit").exists())
         self.assertFalse(self.hook("post-commit").exists())
         self.assertEqual(self.statuses(out)["git hooks"], "skipped")
+
+    def test_the_hooks_question_says_what_post_commit_does_besides_infer(self) -> None:
+        _, out, _ = self.ask("\n\n\n\n")
+        [question] = re.findall(r"Install git hooks \(.*?\)\? \[Y/n\]", out)
+        for phrase in ("post-commit: infer", "in a Claude Code session", "wrapup_auto on", "automatic wrap-up"):
+            self.assertIn(phrase, question)
 
     def test_an_initialized_repo_asks_nothing(self) -> None:
         self.init("--yes")

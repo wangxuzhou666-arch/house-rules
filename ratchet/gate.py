@@ -37,7 +37,7 @@ def finding_hash(file: str, rule_code: str, line_text: str) -> str:
 
 
 def repo_relative(root: Path, file: str) -> str:
-    """The path as the ledger spells it: relative to the repo root, `/`-separated, no `./` or `..` steps."""
+    """The path as the ledger spells it: relative to the worktree's top, `/`-separated, no `./` or `..` steps."""
     path = Path(os.path.normpath(file))
     if path.is_absolute():
         path = path.resolve()
@@ -90,10 +90,10 @@ def gate_events(items: list[dict[str, Any]], *, config: Config, rules: Rules, sh
         raw_code = _item_text(item, "code", number)
         rule_id, rule_id_source = rules.resolve_reported(raw_code)
         rule_code = rule_code_of(raw_code)
-        rel = repo_relative(config.root, _item_text(item, "file", number))
+        rel = repo_relative(config.worktree, _item_text(item, "file", number))
         line = _item_line(item, number)
         if rel not in line_cache:
-            line_cache[rel] = _file_lines(config.root, rel, number)
+            line_cache[rel] = _file_lines(config.worktree, rel, number)
         lines = line_cache[rel]
         digest = finding_hash(rel, rule_code, lines[line - 1] if 0 < line <= len(lines) else "")
         summary = _item_text(item, "message", number)
@@ -124,5 +124,5 @@ def plan_gate_findings(existing: list[Event], items: list[dict[str, Any]], *, co
 
 def gate_pass_event(config: Config, files: list[str], *, sha: str, ts: str) -> Event:
     """A gate passed over `files`: every open gate finding in one of them is closed by it."""
-    paths = sorted({repo_relative(config.root, file) for file in files})
+    paths = sorted({repo_relative(config.worktree, file) for file in files})
     return {"v": 1, "kind": "gate_pass", "repo": config.repo_slug, "ts": ts, "sha": sha, "files": paths}

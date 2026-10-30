@@ -59,7 +59,10 @@ class ReviewEvidenceTest(RepoCase):
 
 
 class LinkedTreeEvidenceTest(RepoCase):
-    """The evidence is about the worktree being reviewed; where it is kept is the main worktree's business."""
+    """The evidence is about the worktree being reviewed; where it is kept is the main worktree's business.
+
+    The rules are tracked files, so they are the tree's own.
+    """
 
     def setUp(self):
         super().setUp()
@@ -95,9 +98,15 @@ class LinkedTreeEvidenceTest(RepoCase):
         record = json.loads((self.repo / ".ratchet" / "reviews" / "R1.evidence.json").read_text(encoding="utf-8"))
         self.assertEqual(record["source_stable_during_review"], {"only_in_feature.py": True, "source.py": False})
 
-    def test_the_rules_are_still_the_config_s_own(self):
-        rules = capture(self.config, self.tree, None)["rules"]
-        self.assertEqual([Path(rule["absolute_path"]) for rule in rules], [self.repo / "rules.md"])
+    def test_the_rules_are_those_of_the_tree_being_reviewed(self):
+        (self.tree / "rules.md").write_text("tree rules\n")  # the feature branch edited its rules
+        tree_config = load_config(self.tree, None, None, self.tree)
+        (rules,) = capture(tree_config, self.tree, None)["rules"]
+        self.assertEqual(Path(rules["absolute_path"]), self.tree / "rules.md")
+        self.assertEqual(rules["text"], "tree rules")
+        (main_rules,) = capture(self.config, self.repo, None)["rules"]
+        self.assertEqual(Path(main_rules["absolute_path"]), self.repo / "rules.md")
+        self.assertNotEqual(main_rules["text"], "tree rules")
 
 
 class CommittedSourceTest(RepoCase):

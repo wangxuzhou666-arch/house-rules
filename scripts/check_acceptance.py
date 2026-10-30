@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-PAYLOAD = ("ratchet", "bin", "schemas", "templates", "skills", ".claude-plugin", "docs", "samples", "scripts", "LICENSE", "README.md")
+PAYLOAD = ("ratchet", "bin", "schemas", "templates", "skills", "hooks", ".claude-plugin", "docs", "samples", "scripts", "LICENSE", "README.md")
 
 
 def main() -> None:
@@ -35,11 +35,14 @@ def main() -> None:
             shutil.copy2(source, tool / name)
     repo = output / "own-style-repo"
     repo.mkdir()
-    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    # Run from a Claude Code session, the commits below would look like a session's to the installed post-commit hook: they would
+    # be recorded in the developer's real state directory, and the wrap-up would then review a scratch repo. So the children get
+    # no CLAUDE* variable (the session id is one) and a state directory of this run's own.
+    env = {key: value for key, value in os.environ.items() if not key.startswith(("GIT_", "CLAUDE"))}
     env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
                GIT_AUTHOR_NAME="Synthetic acceptance", GIT_AUTHOR_EMAIL="acceptance@example.invalid",
                GIT_COMMITTER_NAME="Synthetic acceptance", GIT_COMMITTER_EMAIL="acceptance@example.invalid",
-               PYTHON_DOTENV_DISABLED="1", PYTHONDONTWRITEBYTECODE="1")
+               PYTHON_DOTENV_DISABLED="1", PYTHONDONTWRITEBYTECODE="1", RATCHET_STATE_DIR=str(output / "state"))
     commands = []
 
     def run(argv, cwd=repo, expected=0):

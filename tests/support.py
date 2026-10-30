@@ -4,6 +4,7 @@ Everything here is synthetic: sample rules, sample findings and throwaway git re
 """
 from __future__ import annotations
 
+import atexit
 import contextlib
 import dataclasses
 import io
@@ -24,6 +25,17 @@ from ratchet.cli import main  # noqa: E402
 from ratchet.config import DEFAULT_CLAUSE_ID_PATTERN, Config  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+# The suite runs inside Claude Code, which exports CLAUDE* variables (the session id among them), and a ratchet review's own claude
+# process carries the review marker. A commit made by a test with those set would look like a session's commit to the post-commit
+# hook and land in the developer's real pending directory. So every test starts without them, and the state the tool keeps goes to
+# a directory of this run's own. This comes before _GIT_ENV below copies the environment, which the commits and hooks inherit.
+SCRUBBED_ENV = ("RATCHET_REVIEW_CHILD", "RATCHET_AUTO_HEADLESS")
+for _name in [name for name in os.environ if name.startswith("CLAUDE") or name in SCRUBBED_ENV]:
+    del os.environ[_name]
+_STATE_DIR = tempfile.TemporaryDirectory(prefix="ratchet-test-state-")
+atexit.register(_STATE_DIR.cleanup)
+os.environ["RATCHET_STATE_DIR"] = os.path.realpath(_STATE_DIR.name)
 
 # Isolate test repos from the developer's own git config (signing, hooks, identity).
 _GIT_ENV = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
@@ -102,12 +114,13 @@ STYLE_RULES = """\
 
 
 def make_config(rules_files: tuple[Path, ...] = (), **overrides: object) -> Config:
-    """A Config that never touches git or the disk; override any field by name."""
+    """A Config that never touches git or the disk; override any field by name. The worktree is the root unless it is overridden too."""
     config = Config(
-        root=Path("."), repo_slug="demo", ledger_path=Path("ledger.jsonl"), rules_files=rules_files, tool_rule_map={},
-        scenarios={}, skips_path=None, label_page_threshold=20, clause_id_pattern=DEFAULT_CLAUSE_ID_PATTERN,
+        root=Path("."), worktree=Path("."), repo_slug="demo", ledger_path=Path("ledger.jsonl"), rules_files=rules_files,
+        tool_rule_map={}, scenarios={}, skips_path=None, label_page_threshold=20, clause_id_pattern=DEFAULT_CLAUSE_ID_PATTERN,
         legacy_unmapped_alias=frozenset(), digest_path=Path("digest.md"), digest_max_chars=90, digest_max_bytes=4096,
         inject_targets=())
+    overrides.setdefault("worktree", overrides.get("root", config.root))
     return dataclasses.replace(config, **overrides)
 
 

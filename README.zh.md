@@ -17,6 +17,10 @@ flowchart LR
   F --> B
 ```
 
+装上 Claude Code 插件后，这个循环会自己转：运行一次 `/review-ratchet:setup`，之后照常提交。
+改动攒够了，Claude 会去跑 review；只有发现了新的盲点（没有任何规则覆盖的问题）时，
+才会问你一个问题。见[快速开始](#快速开始)和[融进日常工作](docs/INTEGRATION.md)。
+
 参考实现是一个 Python 3.10+ 的 CLI（没有第三方运行时依赖），外加一个编码 agent 插件。
 发现记录在本地的只追加（append-only）ledger 里；harness 不会上传私有的 review 数据。
 原生 reviewer 可能会按其宿主的设置，把代码发给它的服务商。这套流程不训练模型权重，
@@ -94,12 +98,14 @@ claude --plugin-dir /path/to/review-ratchet
 
 使用插件：
 
-1. 在你的仓库里运行 `/review-ratchet:setup`。它先预览，再运行 `ratchet init`：一个规则文件（内置模板只是待调整的草稿）、编译出的风格 digest、`CLAUDE.md` 里的一行 `@import`、git hooks（每个都会被实际运行一次，证明确实被触发）以及 `.gitignore` 条目。结尾会给出一行现成的 `git add ... && git commit`，对应它创建的那些文件：请执行它，因为 pre-commit hook 检查的是暂存的副本。
-2. 运行 `/review-ratchet:review`。它会运行 Claude Code 的 `/code-review`，按你规则的条款 ID 记录发现，并用表格展示。
-3. 做完一段工作后，运行 `/review-ratchet:wrapup`（或直接说“收口”）。它统计上次 review 之后改了多少，只有改动够多（`wrapup_min_changed_lines` 默认 200 行，或 `wrapup_min_files` 默认 5 个文件）才 review 一次，并且只在 review 发现了没有任何规则覆盖的问题时才问你一个问题。详见[收口](docs/WRAPUP.md)。
-4. 想根据这些发现维护规则，运行 `/review-ratchet:maintain`。agent 会收集代码证据，提出限定范围的改动，并通过宿主原生的提问工具来问你。被接受的改动会更新规则和 digest；拒绝、暂缓和要求修改也都会被记录。不需要自定义 UI，也不需要手动复制 JSON。详见[工作流与评估契约](docs/DECISION-CARDS.md)。
+1. [安装插件](#安装)。
+2. 在你的仓库里运行一次 `/review-ratchet:setup`。它先预览，再运行 `ratchet init`：一个规则文件（内置模板只是待调整的草稿）、编译出的风格 digest、`CLAUDE.md` 里的一行 `@import`、git hooks（每个都会被实际运行一次，证明确实被触发）、`.gitignore` 条目，以及（由你选择是否开启的）自动收口。结尾会给出一行现成的 `git add ... && git commit`，对应它创建的那些文件：请执行它，因为 pre-commit hook 检查的是暂存的副本。
+3. 照常提交。当某个回合在一次提交之后结束、并且上次 review 之后的改动已达到阈值（`wrapup_min_changed_lines` 默认 200 行，或 `wrapup_min_files` 默认 5 个文件）时，Claude 会在后台跑一次收口 review。只有 review 发现了没有任何规则覆盖、而且你还没被问过的盲点时，才会问你一个问题。没到阈值，什么都不会运行。这需要 Claude Code 2.1.163 或更高版本；详见[自动收口](docs/WRAPUP.md#automatic-wrap-up)。
+4. 想根据这些发现维护规则，运行 `/review-ratchet:maintain`；那个问题会提议替你启动它。agent 会收集代码证据，提出限定范围的改动，并通过宿主原生的提问工具来问你。被接受的改动会更新规则和 digest；拒绝、暂缓和要求修改也都会被记录。不需要自定义 UI，也不需要手动复制 JSON。详见[工作流与评估契约](docs/DECISION-CARDS.md)。
 
-不用插件，在你仓库的终端里：
+整个循环就是这些。[把 review-ratchet 融进日常工作](docs/INTEGRATION.md)补充了多 worktree、共享规则层、隐私和成本。想改为手动跑某一步：`/review-ratchet:review` 做一次 review，按你规则的条款 ID 记录发现，并用表格展示；`/review-ratchet:wrapup`（或直接说“收口”）统计上次 review 之后改了多少，只有改动够多才 review 一次。详见[收口](docs/WRAPUP.md)。
+
+不用插件的话，没有任何东西会自动触发：自己运行命令，或者在自己的收尾步骤里调用 `ratchet wrapup`（[做法](docs/INTEGRATION.md#with-and-without-the-plugin)）。在你仓库的终端里：
 
 ```sh
 /path/to/review-ratchet/bin/ratchet init            # 会问几个问题；--yes 接受默认值，--dry-run 只打印计划
@@ -133,7 +139,7 @@ cp /path/to/review-ratchet/templates/CODING-STYLE.template.zh.md CODING-STYLE.md
 [规则编写](docs/RULE-WRITING.zh.md)，以及未来的[个人决策指标](docs/DECISION-METRICS.md)方向。
 
 ```sh
-bin/ratchet init [--yes] [--dry-run]                                       # 初始化当前仓库（配置、规则文件、digest、CLAUDE.md、hooks、.gitignore）
+bin/ratchet init [--yes] [--dry-run] [--no-wrapup-auto]                    # 初始化当前仓库（配置、规则文件、digest、CLAUDE.md、hooks、.gitignore）
 bin/ratchet review [--level high] [--target T] [--from-file F] [--over-cap] # 运行 /code-review，保存原始输出，记录发现；每个改动最多 3 轮，之后以退出码 3 退出
 bin/ratchet wrapup [--level high] [--base REF] [--from-file F] [--json] [--dry-run] # 统计上次 review 之后的改动；够多才 review 一次（见 docs/WRAPUP.md）；到轮次上限以退出码 3 退出
 bin/ratchet ingest-code-review --source l1 --run R12 < review-output.txt   # JSON 数组，或包含 ```json 代码块的文本
@@ -154,9 +160,10 @@ bin/ratchet compile --check [--staged]                                     # 不
 bin/ratchet gate record --input reports.json                               # 一个 gate 的发现 [{file, line, code, message}] -> ledger
 bin/ratchet gate pass --files a.py b.py                                    # gate 对这些文件通过
 bin/ratchet vendor --into third_party/ratchet [--check [--against-source]] # 把工具复制进一个仓库 / 校验该副本
+bin/ratchet auto {note|stop}                                               # 由 git post-commit hook（note）和插件的 Stop hook（stop）调用；不供直接使用（见 docs/WRAPUP.md#automatic-wrap-up）
 ```
 
-除 `vendor` 外，每个命令都接受 `--repo PATH`；除 `init` 和 `vendor` 外，其余命令还接受 `--ledger FILE` 和 `--config FILE`。每个会写入的命令都接受 `--dry-run`，只有 `recover-proposals` 例外（它只还原被中断的写入留下的半成品）。`--dry-run` 什么都不写，只打印本来会写的内容（`compile` 打印 diff，`init` 打印计划，`review` 打印它将要运行的命令，`wrapup` 打印统计结果以及是否会 review）。
+除 `vendor` 和 `auto` 外，每个命令都接受 `--repo PATH`；除 `init`、`vendor` 和 `auto` 外，其余命令还接受 `--ledger FILE` 和 `--config FILE`。两个 `auto` 命令是给 hook 调用的：`auto note` 只接受 `--repo`，`auto stop` 不接受任何选项，因为它从 stdin 读取 hook 传来的 JSON。每个会写入的命令都接受 `--dry-run`，只有 `recover-proposals`（它只还原被中断的写入留下的半成品）和两个 `auto` 命令（它们只写[本机的状态目录](docs/WRAPUP.md#the-state-directory)）例外。`--dry-run` 什么都不写，只打印本来会写的内容（`compile` 打印 diff，`init` 打印计划，`review` 打印它将要运行的命令，`wrapup` 打印统计结果以及是否会 review）。
 
 如果不用 `init`，想手动让 Claude Code 内置的 `/code-review` 拿到这些规则，运行 `ratchet compile`，并在仓库的 `CLAUDE.md` 里加一行：
 

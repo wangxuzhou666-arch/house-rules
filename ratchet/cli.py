@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import dataclasses
 import functools
 import json
 import shlex
@@ -10,6 +11,8 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+from .auto import note_commit
+from .auto_stop import stop_hook
 from .config import Config, load_config
 from .decision_context import add_parser as add_decision_parser
 from .native_decisions import add_parsers as add_native_parsers
@@ -21,7 +24,7 @@ from .direct_label import DEFAULT_EVIDENCE, direct_label_events
 from .errors import RatchetError, RoundCapReached, RoundKeyUnavailable
 from .fsutil import diff_lines, write_text
 from .gate import gate_pass_event, plan_gate_findings
-from .git import commit_sha, head_sha, worktree_root
+from .git import commit_sha, head_sha
 from .ingest import (
     IngestResult, Locator, code_review_events, extract_review_items_lenient, parse_json_items, report_events,
 )
@@ -33,11 +36,11 @@ from .outcomes import (
     BATCH_NAME, PAGE_NAME, TRAILER_KEY, build_page, commit_outcomes, false_positive_skips, gate_pass_outcomes, label_events,
     new_batch_id, read_skips, skipped_finding_ids, trailer_commits, validate_labels,
 )
-from .onboard import STATUS_WORDS, InitOptions, Step, closing_lines, command_name, ignore_entries, run_init
+from .onboard import STATUS_WORDS, InitOptions, Step, closing_lines, command_name, run_init
 from .review import (
-    DEFAULT_LEVEL, LEVELS, NO_COMMIT, check_run_id, check_target, claude_command, critic_version, critic_version_counts,
-    default_run_id, findings_table, replaced_critic_version, require_claude, review_path, review_rounds_used,
-    review_run_event, review_run_ids, round_key, run_claude, save_review,
+    DEFAULT_LEVEL, LEVELS, NO_COMMIT, REFUSE_CLAUDE, REFUSE_ROUND_CAP, Refusal, check_run_id, check_target, claude_command,
+    critic_version, critic_version_counts, default_run_id, findings_table, replaced_critic_version, review_path,
+    review_refusal, review_rounds_used, review_run_event, review_run_ids, round_key, run_claude, save_review,
 )
 from .rules import Rules, load_rules
 from .proposal_commands import add_parsers as add_proposal_parsers
@@ -45,9 +48,8 @@ from .sources import DiskReader, FileReader, IndexReader
 from .state_tree import state_tree
 from .vendor import MARKER_NAME, SOURCE_ROOT, check_vendored, plan_vendor, vendor_into
 from .wrapup import (
-    CAPPED, DRY_RUN, REPORTED, REVIEWED, SKIPPED, Thresholds, blind_spot_lines, choose_base, count_changes, measure_lines,
-    open_unmapped_line, report, review_run_events, rule_change_entries, run_blind_spots, skip_reason, thresholds_reached,
-    unmapped_findings,
+    CAPPED, DRY_RUN, REPORTED, REVIEWED, SKIPPED, Thresholds, blind_spot_lines, config_thresholds, measure_lines, open_unmapped_line,
+    plan_wrapup, report, review_run_events, run_blind_spots, unmapped_findings, wrapup_cap_message,
 )
 
 
@@ -87,7 +89,7 @@ def cmd_add(args: argparse.Namespace, config: Config) -> int:
     rules = load_rules(config)
     items = parse_json_items(_read_input(args.input))
     events = report_events(items, config=config, rules=rules, source=args.source, run_id=args.run,
-                           sha=head_sha(config.root), ts=now_iso())
+                           sha=head_sha(config.worktree), ts=now_iso())
     fresh = select_new_events(read_events(config.ledger_path), events)
     added = sum(1 for event in fresh if event["kind"] == "finding")
     sent = sum(1 for event in events if event["kind"] == "finding")
@@ -121,21 +123,12 @@ def _ingest_summary(label: str, fresh: list[Event], item_count: int, ingest_resu
 def cmd_ingest_code_review(args: argparse.Namespace, config: Config) -> int:
     rules = load_rules(config)
     fresh, summary, _ = _ingest_review_text(config, rules, _read_input(args.input), source=args.source, run_id=args.run,
-                                         verdict=args.verdict, sha=head_sha(config.root), discovered_at=args.discovered_at,
+                                         verdict=args.verdict, sha=head_sha(config.worktree), discovered_at=args.discovered_at,
                                          label="ingest-code-review")
     for event in fresh:
         print(f"  {event['display_id']}  {event['file']}:{event['line']}  {event['rule_id']}  {event['severity']}")
     _append_or_preview(args, config, fresh, summary)
     return 0
-
-
-def _current_worktree(args: argparse.Namespace) -> Path:
-    """The worktree `--repo` (else the current directory) is in, which a linked worktree makes different from `config.root`.
-
-    `config.root` is the main worktree: the ledger, `.ratchet/` and the config live there, shared by all of them. A review is
-    about the tree it is run in, and that tree has its own HEAD, branch and files.
-    """
-    return worktree_root(Path(args.repo).expanduser().resolve() if args.repo else Path.cwd())
 
 
 def _read_critic_version(tree: Path) -> str | None:
@@ -160,6 +153,16 @@ def _record_state_tree(tree: Path) -> str | None:
         return None
 
 
+# The refusals a dry run reports and carries on past. The others leave nothing to preview: no rules to ingest with, no round to name.
+_DRY_RUN_PREVIEWED = (REFUSE_ROUND_CAP, REFUSE_CLAUDE)
+
+
+def _dry_run_refusal_line(refusal: Refusal) -> str:
+    if refusal.kind == REFUSE_ROUND_CAP:
+        return "[dry-run] a real run would be refused: the round cap is reached; --over-cap runs it anyway, recorded"
+    return f"[dry-run] a real run would be refused: {refusal.message}"
+
+
 def cmd_review(args: argparse.Namespace, config: Config) -> int:
     if args.from_file and (args.level or args.target):
         raise RatchetError("--level and --target choose what to review; they do nothing with --from-file")
@@ -169,24 +172,23 @@ def cmd_review(args: argparse.Namespace, config: Config) -> int:
     if replayed and not args.from_file:  # only a re-ingest is free; a fresh `claude` run under a recorded id is billed and then fails in save_review
         raise RatchetError(f"run {run_id} is already recorded; omit --run for a new round, "
                            "or pass --from-file to re-ingest a saved review under that run id")
-    rules = load_rules(config)
     check_target(args.target)
-    tree = _current_worktree(args)  # the code under review; the ledger, saved reviews and config stay under config.root
+    refusal = review_refusal(config, events, target=args.target, from_file=bool(args.from_file),
+                             over_cap_allowed=args.over_cap, replayed=replayed)
+    if refusal is not None and not (args.dry_run and refusal.kind in _DRY_RUN_PREVIEWED):  # before claude runs: a refused round costs nothing
+        raise refusal.error()
+    rules = load_rules(config)  # the check above only looked at them; the ingest below needs them loaded
+    tree = config.worktree  # the code under review; the ledger, saved reviews and config stay under config.root
     key = round_key(tree, args.target, config.default_branch)
     used = review_rounds_used(events, key)
     round_number = used + 1
     over_cap = round_number > config.max_review_rounds
-    refused = over_cap and not args.over_cap and not replayed
-    if refused and not args.dry_run:  # before claude runs: a refused round costs nothing
-        raise RoundCapReached(
-            f"round cap reached for {key}: {used}/{config.max_review_rounds} rounds used; {len(open_findings(events))} findings "
-            "still open (ratchet count). Fix blockers, let the rest go to distill, or rerun with --over-cap (recorded).")
     if replayed:
         print(f"review: replay of run {run_id} (already recorded; not another round)")
     else:
         print(f"review round {round_number}/{config.max_review_rounds} for {key}" + (" (over the cap)" if over_cap else ""))
-    if refused:
-        print("[dry-run] a real run would be refused: the round cap is reached; --over-cap runs it anyway, recorded")
+    if refusal is not None:  # only a dry run is still here
+        print(_dry_run_refusal_line(refusal))
     evidence_snapshot = None
     level, reviewer_version = None, None  # a --from-file review does not know either
     if args.from_file:
@@ -200,7 +202,6 @@ def cmd_review(args: argparse.Namespace, config: Config) -> int:
         if args.dry_run:
             print(f"[dry-run] review: would run `{shlex.join(argv)}` in {tree} (run {run_id}); nothing run or written")
             return 0
-        require_claude(argv)
         evidence_snapshot = capture_review_evidence(config, tree, args.target)
         head = evidence_snapshot["head"] or NO_COMMIT  # HEAD as the reviewer starts, not as it is when the review ends
         # A --target round key names no branch and a wrap-up measures only from a branch's review: its tree would be objects nothing reads.
@@ -264,7 +265,7 @@ def cmd_count(args: argparse.Namespace, config: Config) -> int:
         print("by critic version:")
         for version, finding_total, open_total in version_rows:
             print(f"  {version or 'no version recorded'}: {finding_total} total, {open_total} open")
-    print(_review_rounds_line(events, config, _current_worktree(args)))
+    print(_review_rounds_line(events, config, config.worktree))
     return 0
 
 
@@ -279,7 +280,7 @@ def _label_sources(rule_id: str, open_list: list[Event], config: Config) -> str:
 def cmd_infer(args: argparse.Namespace, config: Config) -> int:
     events = _load_events(args, config)
     ts = now_iso()
-    trailers = commit_outcomes(events, trailer_commits(config.root, args.all), ts)
+    trailers = commit_outcomes(events, trailer_commits(config.worktree, args.all), ts)  # HEAD of the worktree the commit was made in
     skipped = skipped_finding_ids(read_skips(config.skips_path))
     # Fold the trailer outcomes in first so one finding never gets two outcomes in the same run.
     by_gate = gate_pass_outcomes(events + trailers.outcomes, ts, skipped)
@@ -385,38 +386,42 @@ def _compile_reader(args: argparse.Namespace, config: Config) -> FileReader:
         return DiskReader()
     if not args.check:
         raise RatchetError("--staged only applies to --check")
-    return IndexReader(worktree_root(Path(args.repo).expanduser().resolve() if args.repo else Path.cwd()), config.root)
+    return IndexReader(config.worktree)
 
 
 def cmd_compile(args: argparse.Namespace, config: Config) -> int:
     if not config.rules_files:
         raise RatchetError("compile needs rules_files in the config")
     reader = _compile_reader(args, config)
-    rules = load_rules(config, reader)
+    rules = load_rules(config, reader, skip_missing=args.check)  # a plain compile would write a digest that lacks a layer's clauses
+    if rules.missing:  # a pre-commit hook must not block a commit on a machine that lacks the shared file
+        print(f"compile --check{' --staged' if args.staged else ''}: digest not compared, it is generated from every rules layer "
+              f"and this machine lacks {', '.join(rules.missing)}", file=sys.stderr)
+        return 0
     if not any(rules.severity_of(clause_id) for clause_id in rules.clauses):
         print("warning: no clause has a severity (no `| family | severity |` table found); "
               "every clause is listed under Reviewer rules", file=sys.stderr)
     outputs = plan_outputs(config, rules, reader)
     stale = [output for output in outputs if output.is_stale]
 
-    digest_name = display_path(config.digest_path, config.root)
+    digest_name = display_path(config.digest_path, config.worktree)
     digest_bytes = len(outputs[0].new.encode("utf-8"))
     over_budget = digest_bytes > config.digest_max_bytes
     if over_budget:
         print(f"warning: digest {digest_name} is {digest_bytes} bytes, over digest_max_bytes {config.digest_max_bytes}", file=sys.stderr)
 
     if args.check:
-        status = _compile_check(stale, len(outputs), config.root, args.staged)
+        status = _compile_check(stale, len(outputs), config.worktree, args.staged)
     elif args.dry_run:
         for output in stale:
-            print(f"[dry-run] compile: would write {display_path(output.path, config.root)} ({output.kind})")
-            _print_diff(output, config.root)
+            print(f"[dry-run] compile: would write {display_path(output.path, config.worktree)} ({output.kind})")
+            _print_diff(output, config.worktree)
         print(f"[dry-run] compile: {len(stale)} of {len(outputs)} output(s) would change; nothing written")
         status = 0
     else:
         for output in stale:
             write_text(output.path, output.new)
-            print(f"wrote {display_path(output.path, config.root)} ({output.kind})")
+            print(f"wrote {display_path(output.path, config.worktree)} ({output.kind})")
         print(f"compile: {len(stale)} written, {len(outputs) - len(stale)} unchanged; "
               f"digest {digest_name}: {digest_bytes} bytes (limit {config.digest_max_bytes})")
         status = 0
@@ -435,7 +440,7 @@ def _read_gate_input(value: str | None) -> str:
 def cmd_gate_record(args: argparse.Namespace, config: Config) -> int:
     items = parse_json_items(_read_gate_input(args.input))
     plan = plan_gate_findings(read_events(config.ledger_path), items, config=config, rules=load_rules(config),
-                              sha=head_sha(config.root), ts=now_iso())
+                              sha=head_sha(config.worktree), ts=now_iso())
     new_ids = {event["id"] for event in plan.fresh}
     for event in plan.built:
         print(f"  {event['id']}  {event['file']}:{event['line']}  {event['rule_id']}  "
@@ -446,7 +451,7 @@ def cmd_gate_record(args: argparse.Namespace, config: Config) -> int:
 
 
 def cmd_gate_pass(args: argparse.Namespace, config: Config) -> int:
-    event = gate_pass_event(config, args.files, sha=head_sha(config.root), ts=now_iso())
+    event = gate_pass_event(config, args.files, sha=head_sha(config.worktree), ts=now_iso())
     _append_or_preview(args, config, [event], f"gate pass: {len(event['files'])} file(s) at {event['sha']}")
     return 0
 
@@ -472,6 +477,15 @@ def cmd_vendor(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_auto_note(args: argparse.Namespace) -> int:
+    note_commit(Path(args.repo).expanduser().resolve() if args.repo else None)
+    return 0
+
+
+def cmd_auto_stop(args: argparse.Namespace) -> int:
+    return stop_hook(sys.stdin)
+
+
 def _print_step(step: Step, dry_run: bool, root: Path) -> None:
     first, *more = step.detail.split("\n")
     print(f"  {step.name:<16} {STATUS_WORDS[step.status][1 if dry_run else 0]:<12} {first}")
@@ -490,10 +504,13 @@ def cmd_init(args: argparse.Namespace, config: Config) -> int:
         raise RatchetError("init asks questions but stdin is not a terminal; pass --yes to accept the defaults, "
                            "or --dry-run to see the plan")
     options = InitOptions(dry_run=args.dry_run, rules_file=args.rules_file, use_template=args.template,
-                          install_hooks=not args.no_hooks, edit_claude_md=not args.no_claude_md)
+                          install_hooks=not args.no_hooks, edit_claude_md=not args.no_claude_md,
+                          offer_wrapup_auto=not args.no_wrapup_auto)
 
-    print(f"{'[dry-run] ' if args.dry_run else ''}ratchet init: {config.root}")
-    init_result = run_init(config, options, _prompt if ask_for_answers else None, lambda step: _print_step(step, args.dry_run, config.root))
+    print(f"{'[dry-run] ' if args.dry_run else ''}ratchet init: {config.worktree}")
+    if config.worktree != config.root:
+        print(f"  a linked worktree: its tracked files are set up here; the config and the ledger stay shared with {config.root}")
+    init_result = run_init(config, options, _prompt if ask_for_answers else None, lambda step: _print_step(step, args.dry_run, config.worktree))
     failed = [step.name for step in init_result.steps if step.status == "failed"]
     if failed:
         raise RatchetError(f"init finished with FAILED step(s): {', '.join(failed)}; the reason is printed above. Fix it and rerun")
@@ -526,9 +543,7 @@ def _run_wrapup_review(args: argparse.Namespace, config: Config, events: list[Ev
     try:
         cmd_review(_review_args(args), config)
     except RoundCapReached as exc:
-        refusal = RoundCapReached(f"{exc} ratchet wrapup has no --over-cap: `ratchet review --over-cap` runs one more round, "
-                                  "recorded")
-        raise refusal from exc
+        raise RoundCapReached(wrapup_cap_message(str(exc))) from exc
     runs = review_run_events(read_events(config.ledger_path))
     assert len(runs) == len(review_run_events(events)) + 1, "a review that ends without error records exactly one review_run"
     return runs[-1]["run"]
@@ -554,37 +569,33 @@ def _wrapup_report_only(events: list[Event], config: Config, thresholds: Thresho
 
 def _wrapup(args: argparse.Namespace, config: Config, events: list[Event]) -> tuple[int, dict]:
     """Measure the work, review once if it is enough, and print what was found. Returns (exit code, the `--json` object)."""
-    thresholds = Thresholds(config.wrapup_min_changed_lines, config.wrapup_min_files)
     if args.report_only:
-        return 0, _wrapup_report_only(events, config, thresholds)
-    worktree = _current_worktree(args)  # the tree a review would read, which is not config.root in a linked worktree
-    base = choose_base(worktree, events, args.base, config.default_branch)
-    changes = count_changes(worktree, base, [*ignore_entries(config), *rule_change_entries(config)])
-    print("\n".join(measure_lines(base, changes)))
-    summary = functools.partial(report, base=base, changes=changes, thresholds=thresholds)
-    open_before = len(unmapped_findings(events, config.legacy_unmapped_alias))
-    hits = thresholds_reached(changes, thresholds)
-    if not hits:
-        reason = skip_reason(changes, thresholds)
-        print(f"wrapup: skipped, {reason}; no review run\n{open_unmapped_line(open_before)}")
-        return 0, summary(SKIPPED, open_unmapped=open_before, reason=reason)
-    reason = "; ".join(hits)
+        return 0, _wrapup_report_only(events, config, config_thresholds(config))
+    plan = plan_wrapup(config, events, explicit_base=args.base, from_file=bool(args.from_file), foresee_refusal=args.dry_run)
+    print("\n".join(measure_lines(plan.base, plan.changes)))
+    summary = functools.partial(report, base=plan.base, changes=plan.changes, thresholds=plan.thresholds)
+    if not plan.due:
+        print(f"wrapup: skipped, {plan.reason}; no review run\n{open_unmapped_line(plan.open_unmapped)}")
+        return 0, summary(SKIPPED, open_unmapped=plan.open_unmapped, reason=plan.reason)
     if args.dry_run:
-        print(f"[dry-run] wrapup: {reason}; {_review_plan(args)}; nothing run or written")
-        return 0, summary(DRY_RUN, open_unmapped=open_before, reason=reason)
-    print(f"wrapup: {reason}; running a review")
+        refusal = plan.would_refuse
+        step = _review_plan(args) if refusal is None else f"a real run would be refused: {refusal.message}"
+        print(f"[dry-run] wrapup: {plan.reason}; {step}; nothing run or written")
+        return 0, summary(DRY_RUN, open_unmapped=plan.open_unmapped, reason=plan.reason,
+                          would_refuse=None if refusal is None else dataclasses.asdict(refusal))
+    print(f"wrapup: {plan.reason}; running a review")
     try:
         run = _run_wrapup_review(args, config, events)
     except RoundCapReached as exc:
         if not args.json:
             raise
         print(f"wrapup: {exc}")
-        return exc.exit_code, summary(CAPPED, open_unmapped=open_before, reason=str(exc))
+        return exc.exit_code, summary(CAPPED, open_unmapped=plan.open_unmapped, reason=str(exc))
     after = read_events(config.ledger_path)
     blind_spots = run_blind_spots(after, config.legacy_unmapped_alias, run)
     open_after = len(unmapped_findings(after, config.legacy_unmapped_alias))
     print("\n".join(blind_spot_lines(run, blind_spots, open_after)))
-    return 0, summary(REVIEWED, run=run, blind_spots=blind_spots, open_unmapped=open_after, reason=reason)
+    return 0, summary(REVIEWED, run=run, blind_spots=blind_spots, open_unmapped=open_after, reason=plan.reason)
 
 
 def cmd_wrapup(args: argparse.Namespace, config: Config) -> int:
@@ -699,6 +710,8 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--template", action="store_true", help="copy the bundled template to CODING-STYLE.md (never overwrites)")
     init.add_argument("--no-hooks", action="store_true", help="do not touch .git/hooks")
     init.add_argument("--no-claude-md", action="store_true", help="do not touch CLAUDE.md")
+    init.add_argument("--no-wrapup-auto", action="store_true",
+                      help='leave the automatic wrap-up review off without asking (writes "wrapup_auto": false)')
     init.set_defaults(func=cmd_init, ledger=None, config=None)
 
     gate = sub.add_parser("gate", help="feed a lint or style gate's results into the ledger")
@@ -710,6 +723,15 @@ def build_parser() -> argparse.ArgumentParser:
     passed = gate_sub.add_parser("pass", parents=[common, writes], help="record that the gate passed over these files")
     passed.add_argument("--files", nargs="+", required=True, metavar="PATH", help="the files the gate checked")
     passed.set_defaults(func=cmd_gate_pass)
+
+    auto = sub.add_parser("auto", help="the hooks of the automatic wrap-up, run by git and by Claude Code, not by hand")
+    auto_sub = auto.add_subparsers(dest="auto_command", required=True)
+    auto_note = auto_sub.add_parser("note", parents=[repo_only],
+                                    help="record the commit just made in a Claude Code session, for the wrap-up at the end of the turn")
+    auto_note.set_defaults(func=cmd_auto_note, standalone=True)  # it reads the config itself: a broken one must not print or fail
+    auto_stop = auto_sub.add_parser("stop", help="the plugin's Stop hook: judge the commits noted in this session (read from stdin), "
+                                                 "and when the work is due ask Claude for the wrap-up")
+    auto_stop.set_defaults(func=cmd_auto_stop, standalone=True)  # each noted worktree has a config of its own, which it loads itself
 
     vendor = sub.add_parser("vendor", parents=[writes], help="copy the tool into a repo, or check a vendored copy")
     vendor.add_argument("--into", required=True, help="directory to hold the copy")

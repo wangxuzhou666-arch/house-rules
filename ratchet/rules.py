@@ -15,18 +15,23 @@ A family is the part of a clause id before the dot (`P0E.1` -> `P0E`) and matche
 
 Rules files are layered in config order (global first, project last). A later file may add clauses and table rows
 but never redefine either: that is an error.
+
+A layer outside the repo is shared with other repos: it is read here and never written. One that is not on this machine
+refuses (SharedLayerMissing), because a rule set without it is incomplete; `skip_missing` is for a check that judges nothing.
 """
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import sys
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
 from typing import Iterator
 
-from .config import Config
-from .errors import RatchetError
+from .config import Config, is_outer, rules_name
+from .errors import RatchetError, SharedLayerMissing
 from .ledger import SEVERITIES, UNMAPPED
 from .sources import DiskReader, FileReader
 
@@ -61,6 +66,7 @@ class Clause:
 class RulesSource:
     path: Path
     sha12: str  # first 12 hex of the sha256 of the file bytes
+    text: str
 
 
 def family_of(clause_id: str) -> str:
@@ -205,6 +211,7 @@ class Rules:
     scenarios: dict[str, str]
     id_by_kebab: dict[str, str]
     sources: tuple[RulesSource, ...]
+    missing: tuple[str, ...] = ()  # the shared layers this machine lacks, named as the config names them (`skip_missing` only)
 
     def is_known_clause(self, rule_id: str) -> bool:
         return rule_id in self.clauses
@@ -271,26 +278,46 @@ def category_of(rule_id: str) -> str:
     return family_of(rule_id)
 
 
-def _read_rules_file(path: Path, reader: FileReader) -> tuple[str, str]:
-    """(text, sha12 of the bytes)."""
+def _read_rules_file(config: Config, path: Path, reader: FileReader) -> RulesSource:
+    """The rules file at `path`, as a layer. One that is not there is an error: 'not found' in the view `reader` gives for a
+    file of the repo, SharedLayerMissing for a layer outside it."""
     raw_bytes = reader.read(path)
     if raw_bytes is None:
-        raise RatchetError(f"cannot read rules file {path}: not found in {reader.label}{reader.missing_hint}")
+        if is_outer(config, path):
+            raise SharedLayerMissing(rules_name(config, path), os.path.normpath(path))  # `repo/../shared/x.md` is said as the place it is
+        label, hint = reader.missing_in(path)
+        raise RatchetError(f"cannot read rules file {path}: not found in {label}{hint}")
     try:
         text = raw_bytes.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise RatchetError(f"rules file {path} is not valid UTF-8: {exc}") from exc
-    return text, hashlib.sha256(raw_bytes).hexdigest()[:12]
+    return RulesSource(path, hashlib.sha256(raw_bytes).hexdigest()[:12], text)
 
 
-def load_rules(config: Config, reader: FileReader = DiskReader()) -> Rules:
+def shared_layers(config: Config, reader: FileReader = DiskReader()) -> list[RulesSource]:
+    """The layers outside the repo as they are on disk now, in config order; one this machine lacks raises SharedLayerMissing."""
+    return [_read_rules_file(config, path, reader) for path in config.rules_files if is_outer(config, path)]
+
+
+def load_rules(config: Config, reader: FileReader = DiskReader(), *, skip_missing: bool = False) -> Rules:
+    """The rule set of every layer in `rules_files`. A shared layer this machine lacks refuses (SharedLayerMissing), so nothing
+    is judged or written against an incomplete rule set; with `skip_missing` it is said on stderr and left out, and
+    `Rules.missing` names it. Left out, the references in the config to its clauses cannot be checked either."""
     clauses: dict[str, Clause] = {}
     origin: dict[str, str] = {}
     families: dict[str, tuple[str, str]] = {}
     sources: list[RulesSource] = []
+    missing: list[str] = []
     for path in config.rules_files:
-        text, sha12 = _read_rules_file(path, reader)
-        parsed = parse_rules_text(text, str(path), config.clause_id_pattern)
+        try:
+            source = _read_rules_file(config, path, reader)
+        except SharedLayerMissing as exc:
+            if not skip_missing:
+                raise
+            print(f"warning: {exc.what}; skipped", file=sys.stderr)
+            missing.append(exc.name)
+            continue
+        parsed = parse_rules_text(source.text, str(path), config.clause_id_pattern)
         if not parsed:
             raise RatchetError(f"{path}: no clause definitions found with clause_id_pattern {config.clause_id_pattern!r}")
         for clause_id, clause in parsed.items():
@@ -298,9 +325,9 @@ def load_rules(config: Config, reader: FileReader = DiskReader()) -> Rules:
                 raise RatchetError(f"{path}:{clause.line}: clause {clause_id} is already defined in {origin[clause_id]}")
             origin[clause_id] = f"{path}:{clause.line}"
             clauses[clause_id] = clause
-        for family, (severity, where) in parse_severity_table(text, str(path)).items():
+        for family, (severity, where) in parse_severity_table(source.text, str(path)).items():
             _set_family(families, family, severity, where)
-        sources.append(RulesSource(path, sha12))
+        sources.append(source)
 
     id_by_kebab: dict[str, str] = {}
     for clause_id in clauses:
@@ -310,8 +337,10 @@ def load_rules(config: Config, reader: FileReader = DiskReader()) -> Rules:
         id_by_kebab[key] = clause_id
 
     family_severity = {family: severity for family, (severity, _) in families.items()}
-    rules = Rules(clauses, family_severity, dict(config.tool_rule_map), dict(config.scenarios), id_by_kebab, tuple(sources))
-    _check_config_references(rules)
+    rules = Rules(clauses, family_severity, dict(config.tool_rule_map), dict(config.scenarios), id_by_kebab, tuple(sources),
+                  tuple(missing))
+    if not missing:
+        _check_config_references(rules)
     return rules
 
 

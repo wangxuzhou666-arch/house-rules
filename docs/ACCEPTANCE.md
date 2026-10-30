@@ -59,7 +59,10 @@ python3 scripts/check_acceptance.py --output-dir /absolute/new/scratch-directory
 The directory must be new. It retains `commands.json`, `result.json`, the copied
 distribution and fixture repos. Use a local scratch location; all input code is
 synthetic. It creates commits only in those fixture repositories, never in the
-source checkout, and does not push or call a model.
+source checkout, and does not push or call a model. The commands it runs get no
+`GIT_*` or `CLAUDE*` variable and a `RATCHET_STATE_DIR` inside the output
+directory, so running it from a Claude Code session leaves no commit note in the
+real state directory ([The commit note](ONBOARDING.md#the-commit-note)).
 
 A separate live check loaded the copied plugin through `--plugin-dir` and invoked
 `/review-ratchet:review high` in the clean custom-style repository. It reached the

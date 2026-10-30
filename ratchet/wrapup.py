@@ -7,7 +7,7 @@ from __future__ import annotations
 import os
 import textwrap
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .config import Config
@@ -15,8 +15,9 @@ from .digest import display_path
 from .errors import RatchetError, RoundKeyUnavailable
 from .git import commit_sha, current_branch, merge_base_with_head, run_git
 from .ledger import SEVERITIES, UNMAPPED, Event, effective_rule_id, fold
+from .onboard import ignore_entries
 from .proposals import CHANGELOG
-from .review import NO_COMMIT, default_branch
+from .review import NO_COMMIT, REFUSE_ROUND_CAP, Refusal, default_branch, review_refusal
 from .state_tree import numstat_since, tree_exists
 
 # Why a base was chosen: the first rule in docs/WRAPUP.md that held.
@@ -185,15 +186,15 @@ def count_changes(worktree: Path, base: Base, state_paths: Sequence[str]) -> Cha
 
 
 def rule_change_entries(config: Config) -> list[str]:
-    """The files a rule change writes, as paths from the repo root: the rules files, the digest compiled from them, and the changelog.
+    """The files a rule change writes, as paths from the worktree's top: the rules files, the digest compiled from them, and the changelog.
 
     Not work for the next review to read: the digest is generated, and the changelog restates the clause the rules file
     now holds. Inject targets are not here: they are the user's own files that carry a generated block. The changelog is the
-    one at the repo root that `apply-proposals` writes, not a file of that name elsewhere. A file outside the repo gets a
+    one at the worktree's top that `apply-proposals` writes, not a file of that name elsewhere. A file outside the repo gets a
     path that starts with `..`, which no git path does, so it never matches.
     """
-    written = [*config.rules_files, config.digest_path, config.root / CHANGELOG]
-    return [display_path(path, config.root) for path in written]
+    written = [*config.rules_files, config.digest_path, config.worktree / CHANGELOG]
+    return [display_path(path, config.worktree) for path in written]
 
 
 def _is_state(path: str, state_paths: Sequence[str]) -> bool:
@@ -259,6 +260,57 @@ def thresholds_reached(changes: Changes, thresholds: Thresholds) -> list[str]:
 def skip_reason(changes: Changes, thresholds: Thresholds) -> str:
     return (f"changed lines {changes.lines} < wrapup_min_changed_lines {thresholds.min_changed_lines} "
             f"and changed files {changes.files} < wrapup_min_files {thresholds.min_files}")
+
+
+def config_thresholds(config: Config) -> Thresholds:
+    return Thresholds(config.wrapup_min_changed_lines, config.wrapup_min_files)
+
+
+def wrapup_cap_message(message: str) -> str:
+    """A full round cap, said to someone running a wrap-up: the way past it is `ratchet review`, not the option its message names."""
+    return f"{message} ratchet wrapup has no --over-cap: `ratchet review --over-cap` runs one more round, recorded"
+
+
+def foreseen_refusal(config: Config, events: list[Event], *, from_file: bool) -> Refusal | None:
+    """Why the review this wrap-up would run is refused, worded as the real run words it. A wrap-up reviews the current diff
+    (no --target), is never a replay (it passes no --run) and has no --over-cap."""
+    refusal = review_refusal(config, events, target=None, from_file=from_file, over_cap_allowed=False, replayed=False)
+    if refusal is not None and refusal.kind == REFUSE_ROUND_CAP:
+        return replace(refusal, message=wrapup_cap_message(refusal.message))
+    return refusal
+
+
+@dataclass(frozen=True)
+class WrapupPlan:
+    """What a wrap-up of one worktree finds out before it reviews anything: the measurement, and whether a review would run."""
+
+    thresholds: Thresholds
+    base: Base
+    changes: Changes
+    open_unmapped: int  # the open findings no rule covers, before any review
+    due: bool  # the work reached a threshold, so a review would run
+    reason: str  # the thresholds reached, in words, when due; else why the work is too little
+    would_refuse: Refusal | None  # why that review would be refused; None when it would start, when none is due, or when nobody asked
+
+
+def plan_wrapup(config: Config, events: list[Event], *, explicit_base: str | None = None, from_file: bool = False,
+                foresee_refusal: bool = False) -> WrapupPlan:
+    """Measure the work in `config.worktree` and decide whether a wrap-up would review it. Reads git and the ledger's `events` (and
+    with `foresee_refusal` the rules files and the PATH); writes nothing and runs no review.
+
+    `explicit_base` is `--base`. `foresee_refusal` is for a caller that does not run the review at once (`--dry-run`, the Stop
+    hook): a real run meets the refusal in the review itself, so it does not look twice.
+    """
+    thresholds = config_thresholds(config)
+    worktree = config.worktree  # the tree a review would read, which is not config.root in a linked worktree
+    base = choose_base(worktree, events, explicit_base, config.default_branch)
+    changes = count_changes(worktree, base, [*ignore_entries(config), *rule_change_entries(config)])
+    open_unmapped = len(unmapped_findings(events, config.legacy_unmapped_alias))
+    hits = thresholds_reached(changes, thresholds)
+    if not hits:
+        return WrapupPlan(thresholds, base, changes, open_unmapped, due=False, reason=skip_reason(changes, thresholds), would_refuse=None)
+    refusal = foreseen_refusal(config, events, from_file=from_file) if foresee_refusal else None
+    return WrapupPlan(thresholds, base, changes, open_unmapped, due=True, reason="; ".join(hits), would_refuse=refusal)
 
 
 # ---- blind spots ----------------------------------------------------------------------------------------------
@@ -359,8 +411,12 @@ def review_run_events(events: list[Event]) -> list[Event]:
 # ---- output ---------------------------------------------------------------------------------------------------
 
 def report(status: str, *, base: Base | None, changes: Changes | None, thresholds: Thresholds, open_unmapped: int, reason: str,
-           run: str | None = None, blind_spots: BlindSpots = NO_BLIND_SPOTS) -> dict:
-    """The `--json` object. base and the counts are null when nothing was measured (`--report-only`)."""
+           run: str | None = None, blind_spots: BlindSpots = NO_BLIND_SPOTS, would_refuse: dict | None = None) -> dict:
+    """The `--json` object. base and the counts are null when nothing was measured (`--report-only`).
+
+    `would_refuse` is `{kind, round_key, message}` when a dry run found that the review it would run is refused (a full round
+    cap, say: that records no review_run, so the next wrap-up would measure from the same base and be refused again); else null.
+    """
     return {
         "status": status,
         "base": None if base is None else base.sha,
@@ -374,6 +430,7 @@ def report(status: str, *, base: Base | None, changes: Changes | None, threshold
         "repeat_of": {finding_id: original["id"] for finding_id, original in blind_spots.repeat_of.items()},
         "open_unmapped": open_unmapped,
         "reason": reason,
+        "would_refuse": would_refuse,
     }
 
 

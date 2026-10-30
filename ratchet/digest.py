@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config import INJECT_SECTIONS, Config
+from .config import INJECT_SECTIONS, Config, rules_name
 from .errors import RatchetError
 from .rules import Clause, Rules
 from .sources import DiskReader, FileReader
@@ -119,8 +119,12 @@ def display_path(path: Path, root: Path) -> str:
     return Path(os.path.relpath(path, root)).as_posix()
 
 
-def source_stamp(rules: Rules, root: Path) -> str:
-    return ", ".join(f"{display_path(source.path, root)}@{source.sha12}" for source in rules.sources)
+def source_stamp(rules: Rules, config: Config) -> str:
+    """The rules files and their hashes, named so that every worktree writes the same digest from the same rules: a file of
+    the repo relative to the worktree, a file outside it (a rules file shared in `../`) relative to the main worktree, since
+    its place relative to a linked worktree depends on where that worktree lives. A name the config starts with `~` stays
+    as written: relative to the repo it would differ on every machine that keeps the repo somewhere else."""
+    return ", ".join(f"{rules_name(config, source.path)}@{source.sha12}" for source in rules.sources)
 
 
 def render_digest(stamp: str, body: str) -> str:
@@ -188,14 +192,15 @@ def plan_outputs(config: Config, rules: Rules, reader: FileReader = DiskReader()
     Raises before any file is touched if a target is unusable.
     """
     sections = render_sections(rules, config.digest_max_chars)
-    stamp = source_stamp(rules, config.root)
+    stamp = source_stamp(rules, config)
     digest_old = _read_existing(config.digest_path, reader)
     outputs = [Output(config.digest_path, "digest", digest_old, render_digest(stamp, join_sections(sections, INJECT_SECTIONS)))]
     for target in config.inject_targets:
         old = _read_existing(target.path, reader)
-        name = display_path(target.path, config.root)
+        name = display_path(target.path, config.worktree)
         if old is None:
-            raise RatchetError(f"inject target not found in {reader.label}: {target.path}{reader.missing_hint}")
+            label, hint = reader.missing_in(target.path)
+            raise RatchetError(f"inject target not found in {label}: {target.path}{hint}")
         block = render_block(stamp, join_sections(sections, target.sections))
         try:
             injected = inject_block(old, block, name)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 
 from .errors import RatchetError
@@ -61,6 +62,22 @@ def read_source(root: Path, name: str, line: int | None, end_line: int | None = 
         result["reason"] = str(exc)
         return result
     return _source_from_bytes(result, data, line, end_line)
+
+
+def read_outer_source(path: Path, name: str) -> dict:
+    """The whole text of a file outside the repo, read where the config points: a rules layer shared with other repos, `name`
+    being what the config calls it. Nothing writes it. `read_source` refuses `..` and symlinks because a model may supply its
+    names; this path is the owner's own config, so it is read as `load_rules` reads it, with the same text checks on the bytes.
+    """
+    path = Path(os.path.normpath(path))  # `repo/../shared/x.md` as the config reaches it; the evidence names the place itself
+    result = {**_unavailable(name, None, "current_workspace"), "absolute_path": str(path)}
+    try:
+        with path.open("rb") as handle:
+            data = handle.read(MAX_SOURCE_BYTES + 1)
+    except OSError as exc:
+        result["reason"] = str(exc)
+        return result
+    return _source_from_bytes(result, data, None, None)
 
 
 def read_committed_source(root: Path, commit: str, name: str) -> dict:

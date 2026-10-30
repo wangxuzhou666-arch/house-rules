@@ -207,7 +207,7 @@ class ProposalsTest(ProposalFixture):
         self.assertTrue((self.repo / JOURNAL).exists())
         with self.assertRaisesRegex(RatchetError, "interrupted"):
             self.apply(batch)
-        self.assertGreater(recover(self.repo), 0)
+        self.assertGreater(recover(self.repo, self.repo), 0)
         self.assertEqual((self.repo / "rules.md").read_text(), RULES)
         self.apply(batch)
         self.cli_ok("compile", "--check")
@@ -217,7 +217,7 @@ class ProposalsTest(ProposalFixture):
         (self.repo / JOURNAL).write_text(encoded({"v": 1, "changes": {"rules.md": [RULES, "partial"]}}))
         (self.repo / "rules.md").write_text("later edit")
         with self.assertRaisesRegex(RatchetError, "later edit"):
-            recover(self.repo)
+            recover(self.repo, self.repo)
 
     def test_html_treats_findings_as_text_and_has_no_default_approval(self):
         batch = self.batch()
@@ -462,7 +462,7 @@ class ChangelogTest(ProposalFixture):
             with self.assertRaisesRegex(RatchetError, "interrupted"):
                 self.apply_on(batch)
         self.assertNotEqual(self.files()[CHANGELOG], PLAIN_LOG)
-        recover(self.repo)
+        recover(self.repo, self.repo)
         self.assertEqual(self.files(), before)
 
     def test_the_committed_backfill_is_in_the_format_new_entries_are_appended_to(self):

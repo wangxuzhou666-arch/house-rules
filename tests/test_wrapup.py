@@ -1,4 +1,5 @@
 """`ratchet wrapup`: the base, what counts as a change, the thresholds, the review it runs and what it reports."""
+import dataclasses
 import json
 import os
 import sys
@@ -10,11 +11,15 @@ from unittest import mock
 import support  # noqa: F401  (puts the repo root on sys.path)
 from support import STYLE_RULES, RepoCase, git, review_finding, review_item, review_round
 
+from ratchet.config import load_config
 from ratchet.git import run_git
-from ratchet.review import round_key
+from ratchet.ledger import read_events
+from ratchet.review import REFUSE_CLAUDE, REFUSE_ROUND_CAP, round_key
 from ratchet.review_evidence import snippet_around
 from ratchet.state_tree import MAX_UNTRACKED_BYTES, OVERSIZE_STAND_IN, numstat_since, state_tree, tree_exists
-from ratchet.wrapup import code_window, round_key_branch, run_blind_spots
+from ratchet.wrapup import (
+    BASE_FLAG, BASE_MERGE_BASE, Changes, Thresholds, WrapupPlan, code_window, plan_wrapup, round_key_branch, run_blind_spots,
+)
 
 
 def numbered(count: int, prefix: str = "line") -> str:
@@ -591,7 +596,7 @@ class RoundCapTest(WrapupCase):
 
 class JsonAndDryRunTest(WrapupCase):
     KEYS = {"status", "base", "base_reason", "changed_lines", "changed_files", "thresholds", "run", "new_unmapped",
-            "repeated_unmapped", "repeat_of", "open_unmapped", "reason"}
+            "repeated_unmapped", "repeat_of", "open_unmapped", "reason", "would_refuse"}
 
     def setUp(self) -> None:
         super().setUp()
@@ -653,6 +658,85 @@ class JsonAndDryRunTest(WrapupCase):
         self.wrap("--from-file", str(saved), "--ledger", str(elsewhere))
         self.assertTrue(elsewhere.exists())
         self.assertFalse(self.ledger.exists())
+
+
+class PlanWrapupTest(WrapupCase):
+    """`plan_wrapup`: the measurement and the decision of a wrap-up, which `wrapup --dry-run` reports and the Stop hook acts on."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.base = self.start()
+
+    def plan(self, **options: object) -> WrapupPlan:
+        config = load_config(self.repo, None, None, self.repo)
+        return plan_wrapup(config, read_events(config.ledger_path), **options)
+
+    def test_too_little_work_is_not_due_and_says_why(self) -> None:
+        self.put("small.py", numbered(10))
+        plan = self.plan()
+        self.assertFalse(plan.due)
+        self.assertEqual((plan.changes, plan.thresholds, plan.open_unmapped, plan.would_refuse), (Changes(10, 1), Thresholds(200, 5), 0, None))
+        self.assertEqual(plan.reason, "changed lines 10 < wrapup_min_changed_lines 200 and changed files 1 < wrapup_min_files 5")
+        self.assertEqual((plan.base.sha, plan.base.reason), (self.base, BASE_MERGE_BASE))
+
+    def test_enough_lines_make_it_due_for_that_reason(self) -> None:
+        self.put("big.py", numbered(250))
+        plan = self.plan()
+        self.assertEqual((plan.due, plan.changes, plan.reason), (True, Changes(250, 1), "changed lines 250 >= wrapup_min_changed_lines 200"))
+
+    def test_enough_files_make_it_due_for_that_reason(self) -> None:
+        for number in range(5):
+            self.put(f"f{number}.py", numbered(1))
+        plan = self.plan()
+        self.assertEqual((plan.due, plan.changes, plan.reason), (True, Changes(5, 5), "changed files 5 >= wrapup_min_files 5"))
+
+    def test_both_reasons_are_given_when_both_hold(self) -> None:
+        for number in range(5):
+            self.put(f"f{number}.py", numbered(60))
+        self.assertEqual(self.plan().reason, "changed lines 300 >= wrapup_min_changed_lines 200; changed files 5 >= wrapup_min_files 5")
+
+    def test_the_thresholds_are_the_configs(self) -> None:
+        self.write_config(rules_files=["rules.md"], wrapup_min_changed_lines=100, wrapup_min_files=2)
+        self.assertEqual(self.plan().thresholds, Thresholds(100, 2))
+
+    def test_an_explicit_base_is_where_the_measurement_starts(self) -> None:
+        self.commit_file("older.py", 250)  # on main, committed work is behind the fork point
+        self.assertFalse(self.plan().due)
+        plan = self.plan(explicit_base=self.base)
+        self.assertEqual((plan.due, plan.changes, plan.base.reason), (True, Changes(250, 1), BASE_FLAG))
+
+    def test_the_open_blind_spots_are_counted(self) -> None:
+        self.append_raw(review_finding("R1-001", rule_id="unmapped"), review_finding("R1-002", rule_id="R.1"))
+        self.assertEqual(self.plan().open_unmapped, 1)
+
+    def test_a_refusal_is_looked_for_only_when_asked_for(self) -> None:
+        self.put("big.py", numbered(250))
+        key = round_key(self.repo, None, None)
+        self.write_config(rules_files=["rules.md"], max_review_rounds=1)
+        self.append_raw(review_round(key, run="past1"))
+        self.assertIsNone(self.plan().would_refuse)
+        refusal = self.plan(foresee_refusal=True).would_refuse
+        self.assertEqual((refusal.kind, refusal.round_key), (REFUSE_ROUND_CAP, key))
+        self.assertTrue(refusal.message.endswith("ratchet wrapup has no --over-cap: `ratchet review --over-cap` runs one more round, recorded"))
+
+    def test_a_refusal_is_looked_for_only_when_a_review_is_due(self) -> None:
+        with mock.patch("ratchet.wrapup.review_refusal", side_effect=AssertionError("a review nobody would run was looked at")):
+            plan = self.plan(foresee_refusal=True)
+        self.assertEqual((plan.due, plan.would_refuse), (False, None))
+
+    def test_a_saved_review_needs_no_claude_to_start(self) -> None:
+        self.put("big.py", numbered(250))  # RATCHET_CLAUDE_CMD names nothing that exists here
+        self.assertEqual(self.plan(foresee_refusal=True).would_refuse.kind, REFUSE_CLAUDE)
+        self.assertIsNone(self.plan(foresee_refusal=True, from_file=True).would_refuse)
+
+    def test_it_is_what_the_dry_run_reports(self) -> None:
+        self.put("big.py", numbered(250))
+        dry, plan = self.measure(), self.plan(foresee_refusal=True)
+        self.assertEqual((dry["changed_lines"], dry["changed_files"], dry["base"], dry["base_reason"], dry["reason"], dry["open_unmapped"]),
+                         (plan.changes.lines, plan.changes.files, plan.base.sha, plan.base.reason, plan.reason, plan.open_unmapped))
+        self.assertEqual(dry["thresholds"], {"min_changed_lines": plan.thresholds.min_changed_lines, "min_files": plan.thresholds.min_files})
+        self.assertEqual(dry["would_refuse"], dataclasses.asdict(plan.would_refuse))
+        self.assertEqual(dry["would_refuse"]["kind"], REFUSE_CLAUDE)
 
 
 class ReportOnlyTest(WrapupCase):

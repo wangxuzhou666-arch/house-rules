@@ -7,20 +7,20 @@ from __future__ import annotations
 
 from collections import Counter
 from contextlib import nullcontext
+import os
 from pathlib import Path
 import re
 
-from .config import Config
+from .config import Config, is_outer, rules_name
 from .digest import plan_outputs
 from .errors import RatchetError
 from .ledger import effective_rule_id, fold, now_iso
 from .proposal_store import (
-    encoded, ensure_idle, fingerprint, mutation_lock, read_json, read_local, replace_local, transact,
+    STATE, base_of, encoded, ensure_idle, fingerprint, mutation_lock, read_json, read_local, replace_local, transact,
 )
-from .rules import Clause, family_of, load_rules, parse_rules_text
+from .rules import Clause, RulesSource, family_of, load_rules, parse_rules_text, shared_layers
 from .sources import DiskReader
 
-STATE = ".ratchet/proposals"
 CHANGELOG = "CODING-STYLE.changelog.md"
 CHANGELOG_TITLE = "# Coding style changes\n"
 VERSION = f"{STATE}/version.json"
@@ -49,12 +49,24 @@ class ProposedReader(DiskReader):
 
 
 def local_name(config: Config, path: Path) -> str:
+    """The name of a tracked file, from the top of the worktree being worked in (`config.rules_files` are its own copies)."""
     try:
-        name = path.relative_to(config.root).as_posix()
+        name = path.relative_to(config.worktree).as_posix()
     except ValueError as exc:
         raise RatchetError("proposal mutation requires repo-local rules and consumers; use a local rules copy") from exc
-    read_local(config.root, name)
+    read_local(config.worktree, name)
     return name
+
+
+def _read(config: Config, name: str) -> str | None:
+    """`name` as the worktree being worked in sees it: ratchet's own state from the main worktree, a tracked file from this one."""
+    return read_local(base_of(config.root, config.worktree, name), name)
+
+
+def _writable_rules(config: Config) -> list[Path]:
+    """The rules files this repo owns: the ones inside the worktree being worked in. A layer outside it is shared with other
+    repos, so every check reads it and no proposal writes it; a change to it is proposed in the repo that owns it."""
+    return [path for path in config.rules_files if not is_outer(config, path)]
 
 
 def statistics(config: Config, events: list[dict]) -> dict:
@@ -77,23 +89,26 @@ def _text(value: object, name: str) -> str:
 
 
 def _snapshot(config: Config) -> dict[str, str | None]:
-    paths = [*config.rules_files, config.digest_path, *(t.path for t in config.inject_targets),
-             config.root / CHANGELOG, config.root / VERSION]
-    names = [local_name(config, p) for p in paths]
+    paths = [*_writable_rules(config), config.digest_path, *(t.path for t in config.inject_targets), config.worktree / CHANGELOG]
+    names = [*(local_name(config, p) for p in paths), VERSION]  # the version file is shared state, the rest are this worktree's files
     if len(names) != len(set(names)):
         raise RatchetError("rules, digest, consumers, changelog and version paths must be distinct")
     if any(n.startswith(STATE + "/") for n in names[:-1]):
         raise RatchetError("rule and output paths cannot overlap proposal storage")
-    return {name: read_local(config.root, name) for name in names}
+    return {name: _read(config, name) for name in names}
 
 
-def _configuration(config: Config) -> dict:
-    return {"rules": [local_name(config, p) for p in config.rules_files],
+def _configuration(config: Config, shared: list[RulesSource]) -> dict:
+    """What a batch is made under. A shared layer is no part of the baseline (nothing here writes it), so its name and hash are
+    recorded instead: the batch goes stale when the layer changes. Left out when there is none, as batches always were."""
+    layers = [[rules_name(config, layer.path), layer.sha12] for layer in shared]
+    return {"rules": [local_name(config, p) for p in _writable_rules(config)],
             "digest": local_name(config, config.digest_path),
             "inject": [[local_name(config, t.path), list(t.sections)] for t in config.inject_targets],
             "pattern": config.clause_id_pattern, "chars": config.digest_max_chars, "bytes": config.digest_max_bytes,
             "tool_rule_map": config.tool_rule_map, "scenarios": config.scenarios,
-            "legacy_unmapped_alias": sorted(config.legacy_unmapped_alias)}
+            "legacy_unmapped_alias": sorted(config.legacy_unmapped_alias),
+            **({"shared": layers} if layers else {})}
 
 
 def clause_block(text: str, rule_id: str, config: Config) -> str:
@@ -111,7 +126,7 @@ def clause_block(text: str, rule_id: str, config: Config) -> str:
     return "".join(lines[start:end]).rstrip("\r\n")
 
 
-def _draft(config: Config, raw: dict, index: int, baseline: dict, state: dict, used: set) -> dict:
+def _draft(config: Config, raw: dict, index: int, baseline: dict, state: dict, used: set, shared: list[RulesSource]) -> dict:
     fields = {"action", "rule_id", "file", "after", "rationale", "evidence_ids"}
     if not isinstance(raw, dict) or set(raw) != fields:
         raise RatchetError(f"draft {index} needs exactly {sorted(fields)}")
@@ -119,8 +134,16 @@ def _draft(config: Config, raw: dict, index: int, baseline: dict, state: dict, u
     if action not in ("add", "rewrite", "retire") or not isinstance(rule_id, str) or not re.fullmatch(config.clause_id_pattern, rule_id):
         raise RatchetError(f"draft {index}: invalid action or clause ID")
     name = _text(raw["file"], "file")
-    if name not in [local_name(config, p) for p in config.rules_files]:
+    writable = [local_name(config, p) for p in _writable_rules(config)]
+    if any(name in (rules_name(config, layer.path), os.path.normpath(layer.path)) for layer in shared):  # by its name or by where it is
+        raise RatchetError(f"draft {index}: {name} lies outside this repository, so it is read-only here; propose the change in "
+                           f"the repository that owns that file, or put it in one of this repository's own rules files: {', '.join(writable)}")
+    if name not in writable:
         raise RatchetError(f"draft {index}: target must be a configured rules file")
+    owner = None if action == "add" else _shared_owner(config, shared, rule_id)
+    if owner is not None:
+        raise RatchetError(f"draft {index}: {rule_id} is defined in {owner}, outside this repository, so it is read-only here; "
+                           "propose the change in the repository that owns that file")
     evidence = raw["evidence_ids"]
     if not isinstance(evidence, list) or not evidence or not all(isinstance(e, str) and e in state for e in evidence):
         raise RatchetError(f"draft {index}: evidence_ids must reference existing findings")
@@ -135,10 +158,17 @@ def _draft(config: Config, raw: dict, index: int, baseline: dict, state: dict, u
             "evidence_ids": sorted(set(evidence))}
 
 
-def _used_ids(config: Config, baseline: dict) -> set[str]:
-    used = set(load_rules(config).clauses)
-    for name in [local_name(config, p) for p in config.rules_files]:
-        used.update(re.findall(r"<!-- ratchet-retired: (\S+) -->", baseline[name]))
+def _shared_owner(config: Config, shared: list[RulesSource], rule_id: str) -> str | None:
+    """The shared layer that defines `rule_id`, by the name the config gives it; None when none of them does."""
+    return next((rules_name(config, layer.path) for layer in shared
+                 if rule_id in parse_rules_text(layer.text, str(layer.path), config.clause_id_pattern)), None)
+
+
+def _used_ids(config: Config, baseline: dict, shared: list[RulesSource]) -> set[str]:
+    used = set(load_rules(config).clauses)  # every layer, the shared ones too: compile rejects a clause defined twice
+    texts = [*(baseline[local_name(config, p)] for p in _writable_rules(config)), *(layer.text for layer in shared)]
+    for text in texts:  # an ID a shared layer retired stays reserved here as well
+        used.update(re.findall(r"<!-- ratchet-retired: (\S+) -->", text))
     if baseline[VERSION]:
         version = read_json(config.root, VERSION)
         used.update(version["used_ids"])
@@ -247,11 +277,11 @@ def _replace_clause(config: Config, text: str, proposal: dict, after: str) -> st
 
 
 def _outputs(config: Config, baseline: dict, proposals: list[dict]) -> dict[str, str]:
-    changed = {name: baseline[name] for name in [local_name(config, p) for p in config.rules_files]}
+    changed = {name: baseline[name] for name in [local_name(config, p) for p in _writable_rules(config)]}
     for proposal in proposals:
         changed[proposal["file"]] = _replace_clause(config, changed[proposal["file"]], proposal, proposal["after"])
     before = load_rules(config)
-    reader = ProposedReader({config.root / name: text for name, text in changed.items()})
+    reader = ProposedReader({config.worktree / name: text for name, text in changed.items()})
     after = load_rules(config, reader)
     if before.family_severity != after.family_severity:
         raise RatchetError("a clause proposal cannot change a family severity table; use an explicit clause tag")
@@ -271,17 +301,21 @@ def create_batch(config: Config, events: list[dict], drafts: list, *, dry_run: b
                  native: dict | None = None) -> dict:
     if not config.rules_files or not isinstance(drafts, list) or (not drafts and native is None):
         raise RatchetError("distill --drafts requires a nonempty draft list and configured rules_files")
-    ensure_idle(config.root)
+    if not _writable_rules(config):
+        raise RatchetError("every file in rules_files lies outside this repository, so there is none to write a proposal into: "
+                           "list a rules file of this repository's own after them (a project layer), then propose again")
+    ensure_idle(config.root, config.worktree)
     baseline, state = _snapshot(config), fold(events)
-    used = _used_ids(config, baseline)
-    proposals = [_draft(config, d, i, baseline, state, used) for i, d in enumerate(drafts, 1)]
+    shared = shared_layers(config)  # a shared layer this machine lacks refuses here, before any draft is judged against the rest
+    used = _used_ids(config, baseline, shared)
+    proposals = [_draft(config, d, i, baseline, state, used, shared) for i, d in enumerate(drafts, 1)]
     if len({p["rule_id"] for p in proposals}) != len(proposals):
         raise RatchetError("one proposal per clause per batch")
     if proposals:
         _outputs(config, baseline, proposals)
     evidence_ids = {e for p in proposals for e in p["evidence_ids"]}
     evidence = {key: {"finding": state[key].finding, "outcome": state[key].outcome} for key in sorted(evidence_ids)}
-    batch = {"v": 1, "repo": str(config.root), "config": _configuration(config), "baseline": baseline,
+    batch = {"v": 1, "repo": str(config.root), "config": _configuration(config, shared), "baseline": baseline,
              "proposals": proposals, "evidence": evidence, "statistics": statistics(config, events), "used_ids": sorted(used)}
     if native is not None:
         batch["native"] = native
@@ -289,7 +323,7 @@ def create_batch(config: Config, events: list[dict], drafts: list, *, dry_run: b
     if not dry_run:
         from .proposal_page import build_page
         with mutation_lock(config.root):
-            ensure_idle(config.root)
+            ensure_idle(config.root, config.worktree)
             replace_local(config.root, f"{STATE}/{batch['id']}/batch.json", encoded(batch))
             if native is None:
                 replace_local(config.root, f"{STATE}/{batch['id']}/review.html", build_page(batch))
@@ -437,22 +471,34 @@ def _revision_files(config: Config, batch: dict, payload: dict, accepted: list[d
             CHANGELOG: log.rstrip() + "\n\n" + entry}
 
 
+def _require_applied_here(config: Config, receipt: dict, then: str) -> None:
+    """A batch is applied in one worktree. The receipt is shared, but the bytes in its `changes` are that worktree's: undoing
+    them anywhere else would write one worktree's files into another and leave the receipt saying the first is undone.
+
+    A receipt from before worktrees were told apart was written in the main worktree, whichever one ran the command.
+    """
+    applied_in = receipt.get("worktree", str(config.root))
+    if applied_in != str(config.worktree):
+        raise RatchetError(f"batch was applied in {applied_in}, not in this worktree ({config.worktree}); {then}")
+
+
 def apply_batch(config: Config, events: list[dict], payload: dict, *, dry_run: bool = False) -> dict:
     batch_id = payload.get("batch_id", "") if isinstance(payload, dict) else ""
     batch = _load_batch(config, batch_id)
     accepted, decisions = _decisions(batch, payload)
     receipt_name = f"{STATE}/{batch_id}/receipt.json"
     with nullcontext() if dry_run else mutation_lock(config.root):
-        ensure_idle(config.root)
+        ensure_idle(config.root, config.worktree)
         existing = read_local(config.root, receipt_name)
         if existing is not None:
             receipt = read_json(config.root, receipt_name)
             if receipt["decision_hash"] != fingerprint(payload) or receipt["status"] != "applied":
                 raise RatchetError("batch already decided or rolled back; create a new batch")
-            if any(read_local(config.root, n) != pair[1] for n, pair in receipt["changes"].items()):
+            _require_applied_here(config, receipt, "the change is in that worktree's files: commit it there and merge that commit here")
+            if any(_read(config, n) != pair[1] for n, pair in receipt["changes"].items()):
                 raise RatchetError("batch was applied but outputs have since changed")
             return {"status": "already_applied", "batch_id": batch_id, "changed": []}
-        if _configuration(config) != batch["config"] or _snapshot(config) != batch["baseline"]:
+        if _configuration(config, shared_layers(config)) != batch["config"] or _snapshot(config) != batch["baseline"]:
             raise RatchetError("rules, consumers or configuration changed; create a fresh proposal batch")
         state = fold(events)
         current = {key: {"finding": state[key].finding, "outcome": state[key].outcome}
@@ -467,14 +513,14 @@ def apply_batch(config: Config, events: list[dict], payload: dict, *, dry_run: b
         if accepted:
             after.update(_revision_files(config, batch, payload, accepted, applied_at))
         changes = {n: (batch["baseline"][n], text) for n, text in after.items()}
-        receipt = {"v": 1, "status": "applied", "batch_id": batch_id, "ts": applied_at,
+        receipt = {"v": 1, "status": "applied", "batch_id": batch_id, "ts": applied_at, "worktree": str(config.worktree),
                    "confirmed_by": payload["confirmed_by"], "decision_hash": fingerprint(payload),
                    "decisions": decisions, "changes": changes}
         if "native" in batch:
             receipt["answers"] = payload["answers"]
             receipt["context_id"] = batch["native"]["context"]["context_id"]
         if not dry_run:
-            transact(config.root, {**changes, receipt_name: (None, encoded(receipt))})
+            transact(config.root, config.worktree, {**changes, receipt_name: (None, encoded(receipt))})
         return {"status": "preview" if dry_run else "applied", "batch_id": batch_id,
                 "changed": list(changes), "accepted": len(accepted), "rejected": len(decisions) - len(accepted),
                 "changes": changes}
@@ -484,17 +530,18 @@ def rollback_batch(config: Config, batch_id: str, *, dry_run: bool = False) -> l
     _load_batch(config, batch_id)
     receipt_name = f"{STATE}/{batch_id}/receipt.json"
     with nullcontext() if dry_run else mutation_lock(config.root):
-        ensure_idle(config.root)
+        ensure_idle(config.root, config.worktree)
         receipt = read_json(config.root, receipt_name)
         if receipt["status"] != "applied":
             raise RatchetError("batch is not currently applied")
+        _require_applied_here(config, receipt, f"run rollback-proposals --batch {batch_id} there")
         changes = receipt["changes"]
         for name, (_, after) in changes.items():
-            if read_local(config.root, name) != after:
+            if _read(config, name) != after:
                 raise RatchetError(f"rollback would overwrite a later edit: {name}")
         if not dry_run:
             old = read_local(config.root, receipt_name)
             receipt = {**receipt, "status": "rolled_back", "rolled_back_at": now_iso()}
             reverse = {name: (after, before) for name, (before, after) in changes.items()}
-            transact(config.root, {**reverse, receipt_name: (old, encoded(receipt))})
+            transact(config.root, config.worktree, {**reverse, receipt_name: (old, encoded(receipt))})
         return list(changes)

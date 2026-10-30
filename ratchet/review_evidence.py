@@ -4,13 +4,13 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from .config import Config
+from .config import Config, is_outer, rules_name
 from .errors import RatchetError
 from .git import commit_sha, run_git
 from .ingest import Locator
 from .ledger import now_iso
 from .proposal_store import encoded, fingerprint, read_json, read_local, replace_local
-from .source_evidence import read_committed_source, read_source
+from .source_evidence import read_committed_source, read_outer_source, read_source
 
 MAX_FILES = 100
 MAX_TEXT_BYTES = 2 * 1024 * 1024
@@ -29,8 +29,8 @@ def is_local_state(config: Config, name: str) -> bool:
 def capture(config: Config, tree: Path, target: str | None) -> dict:
     """The evidence for a review about to start in `tree`, the worktree being reviewed: not always `config.root`, the main one.
 
-    The rules files are the exception. They are named by the config, which lives in the main worktree, and that is where
-    ratchet reads them from to label the findings.
+    The rules files are tracked files like the code, so they are the ones of `tree` too (`config.rules_files` are its own).
+    A layer outside the repo, shared with other repos, is the one file the config points to, whichever tree is reviewed.
     """
     head = commit_sha(tree, "HEAD")
     tracked = ["diff", "--name-only", "-z", "HEAD"] if head else ["ls-files", "-z"]
@@ -48,7 +48,8 @@ def capture(config: Config, tree: Path, target: str | None) -> dict:
         else:
             used += size
         files[name] = source
-    rules = [read_source(config.root, str(path), None) for path in config.rules_files]
+    rules = [read_outer_source(path, rules_name(config, path)) if is_outer(config, path) else read_source(tree, str(path), None)
+             for path in config.rules_files]
     return {"v": 1, "captured_at": now_iso(), "head": head, "target": target,
             "basis": LOCAL_BASIS if target is None else f"{LOCAL_BASIS}_target_unverified",
             "files": files, "rules": rules, "omitted_files": names[MAX_FILES:]}
@@ -168,7 +169,7 @@ def source_for(config: Config, finding: dict) -> dict:
     raw = read_local(config.root, f".ratchet/reviews/{finding['run_id']}.txt")
     if raw is None or hashlib.sha256(raw.encode()).hexdigest() != record["raw_sha256"]:
         raise RatchetError("raw review no longer matches its saved evidence")
-    name_in_snapshot = snapshot_name(config.root, finding["file"])
+    name_in_snapshot = snapshot_name(config.worktree, finding["file"])
     if name_in_snapshot is None:
         return {"status": "unavailable", "reason": "Reported source is outside the local snapshot."}
     source = record["files"].get(name_in_snapshot)

@@ -1,4 +1,9 @@
-"""Repo-local proposal state and recoverable file updates. No shell commands are accepted here."""
+"""Repo-local proposal state and recoverable file updates. No shell commands are accepted here.
+
+Two kinds of file are named here, by their path from the top of a worktree. Ratchet's own state (everything under STATE) is
+shared by every worktree of the repo and lives in the main one, `root`. The tracked files a rule change edits (the rules,
+the digest, the inject targets, the changelog) belong to the worktree being worked in, `tree`: `base_of` tells them apart.
+"""
 from __future__ import annotations
 
 import contextlib
@@ -9,6 +14,15 @@ from pathlib import Path
 import tempfile
 
 from .errors import RatchetError
+
+
+STATE = ".ratchet/proposals"
+JOURNAL = f"{STATE}/transaction.json"
+
+
+def base_of(root: Path, tree: Path, name: str) -> Path:
+    """The worktree `name` is in: the main one for ratchet's own state, the one being worked in for a tracked file."""
+    return root if name.startswith(f"{STATE}/") else tree
 
 
 def encoded(value: object) -> str:
@@ -96,7 +110,7 @@ def mutation_lock(root: Path):
         import fcntl
     except ImportError as exc:
         raise RatchetError("proposal writes currently require Unix file locks") from exc
-    path = local_path(root, ".ratchet/proposals/write.lock")
+    path = local_path(root, f"{STATE}/write.lock")
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as handle:
         try:
@@ -109,36 +123,45 @@ def mutation_lock(root: Path):
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
-JOURNAL = ".ratchet/proposals/transaction.json"
+def journal_tree(root: Path, journal: dict) -> str:
+    """The worktree an interrupted transaction was writing tracked files in. A journal from before worktrees were told
+    apart has no `tree`: it was written in the main worktree."""
+    return journal.get("tree", str(root))
 
 
-def ensure_idle(root: Path) -> None:
-    if read_local(root, JOURNAL) is not None:
+def ensure_idle(root: Path, tree: Path) -> None:
+    if read_local(root, JOURNAL) is None:
+        return
+    owner = journal_tree(root, read_json(root, JOURNAL))
+    if owner == str(tree):
         raise RatchetError("interrupted proposal transaction; run ratchet recover-proposals first")
+    raise RatchetError(f"interrupted proposal transaction in {owner}; run ratchet recover-proposals there first")
 
 
-def transact(root: Path, changes: dict[str, tuple[str | None, str | None]]) -> None:
+def transact(root: Path, tree: Path, changes: dict[str, tuple[str | None, str | None]]) -> None:
     """Validate all baselines, journal before writing, recover explicitly after any partial failure.
 
     Multi-file visibility is not atomic. The journal makes interruption detectable and allows
-    restoring the previous version without overwriting edits made after the interruption.
+    restoring the previous version without overwriting edits made after the interruption. It names `tree`, because
+    the tracked files it restores are that worktree's, and only a recovery run there can put them back.
     """
-    ensure_idle(root)
+    ensure_idle(root, tree)
     for name, (before, _) in changes.items():
-        if read_local(root, name) != before:
+        if read_local(base_of(root, tree, name), name) != before:
             raise RatchetError(f"file changed during proposal planning: {name}")
-    replace_local(root, JOURNAL, encoded({"v": 1, "changes": changes}))
+    replace_local(root, JOURNAL, encoded({"v": 1, "tree": str(tree), "changes": changes}))
     try:
         for name, (before, after) in changes.items():
-            if read_local(root, name) != before:
+            base = base_of(root, tree, name)
+            if read_local(base, name) != before:
                 raise RatchetError(f"concurrent edit detected: {name}")
-            replace_local(root, name, after)
+            replace_local(base, name, after)
     except (OSError, RatchetError) as exc:
         raise RatchetError("proposal write interrupted; run recover-proposals before continuing") from exc
     replace_local(root, JOURNAL, None)
 
 
-def recover(root: Path) -> int:
+def recover(root: Path, tree: Path) -> int:
     with mutation_lock(root):
         if read_local(root, JOURNAL) is None:
             return 0
@@ -146,12 +169,16 @@ def recover(root: Path) -> int:
         changes = journal.get("changes")
         if journal.get("v") != 1 or not isinstance(changes, dict):
             raise RatchetError("invalid proposal recovery journal")
+        owner = journal_tree(root, journal)
+        if owner != str(tree):
+            raise RatchetError(f"the interrupted proposal transaction was writing files in {owner}; "
+                               "run ratchet recover-proposals there")
         for name, pair in changes.items():
             if not isinstance(pair, list) or len(pair) != 2 or not all(v is None or isinstance(v, str) for v in pair):
                 raise RatchetError("invalid proposal recovery entry")
-            if name == JOURNAL or read_local(root, name) not in pair:
+            if name == JOURNAL or read_local(base_of(root, tree, name), name) not in pair:
                 raise RatchetError(f"recovery would overwrite a later edit: {name}")
         for name, (before, _) in changes.items():
-            replace_local(root, name, before)
+            replace_local(base_of(root, tree, name), name, before)
         replace_local(root, JOURNAL, None)
         return len(changes)

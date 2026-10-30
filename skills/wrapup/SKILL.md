@@ -1,13 +1,15 @@
 ---
 name: wrapup
-description: Wrap up a stretch of work with review-ratchet: count what changed since the last review, run one code review only when enough did, and ask at most one question about any new blind spots (findings no rule covers). Use when the user says wrap up, close out, finish up, 收口 or 收尾, when /ship or another workflow reaches its closing step, or after /review-ratchet:review has run.
-argument-hint: "[--level low|medium|high|xhigh|max] [--base REF]"
+description: Wrap up a stretch of work with review-ratchet: count what changed since the last review, run one code review only when enough did, and ask at most one question about any new blind spots (findings no rule covers). Use when the user says wrap up, close out, finish up, 收口 or 收尾, when /ship or another workflow reaches its closing step, after /review-ratchet:review has run, or when a review-ratchet Stop hook message asks for the automatic wrap-up (`auto <worktree>`).
+argument-hint: "[auto <worktree>] [--level low|medium|high|xhigh|max] [--base REF]"
 allowed-tools: Read, Write, Bash(ratchet *), AskUserQuestion, Skill
 ---
 
 # Wrap up with review-ratchet
 
 `ratchet` is the plugin's `bin/ratchet`. If the shell cannot find it, use `${CLAUDE_PLUGIN_ROOT}/bin/ratchet`. Arguments given to this skill: `$ARGUMENTS`. A wrap-up costs at most one review and one question.
+
+**Automatic mode** (`$ARGUMENTS` starts with `auto <worktree>`): the Stop hook asked for this wrap-up and nobody typed it. In step 1 run `ratchet wrapup --repo <worktree> --json` with the Bash tool's `run_in_background` set, as a review takes minutes and a foreground call is cut off at its timeout. Wait for the completion notice (do not poll or sleep) and read the output file it names; the JSON object is the last thing in it. Everything below applies, except that `skipped`, `capped` and an error get one sentence and no question, and `/review-ratchet:setup` is not offered.
 
 1. Run `ratchet wrapup --json`, adding the `--level` and `--base` flags found in `$ARGUMENTS`, if any. Stdout is one JSON object; the human report (the measurement and, if it ran, the review's own output) is on stderr: relay it as printed. If the repo has no rules yet, offer `/review-ratchet:setup` first.
    - **Exit code 1** (an error: `claude` failed, its output held no JSON, HEAD is detached, a `--base` that is not a commit, ...): stdout is empty, so there is no `status` to read. Tell the user the error from stderr exactly as printed, then stop: no retry, no question, nothing recorded.

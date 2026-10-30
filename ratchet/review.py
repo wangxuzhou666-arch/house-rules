@@ -6,17 +6,23 @@ import re
 import shlex
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
-from .errors import RatchetError, RoundKeyUnavailable
+from .config import Config
+from .errors import RatchetError, RoundCapReached, RoundKeyUnavailable
 from .fsutil import read_text, write_text
 from .git import commit_sha, current_branch, merge_base_with_head, origin_head_branch
-from .ledger import REVIEW_SOURCES, Event, FindingState
+from .ledger import REVIEW_SOURCES, Event, FindingState, open_findings
+from .rules import load_rules
 
 LEVELS = ("low", "medium", "high", "xhigh", "max")
 DEFAULT_LEVEL = "high"
 # Tests (and users with a wrapper) point this at another executable; the value is split like a shell command line.
 CLAUDE_CMD_ENV = "RATCHET_CLAUDE_CMD"
+# Set to "1" for the `claude -p` that `run_claude` starts. A headless session loads user and plugin hooks too, so a hook that
+# runs inside this review can see it is ratchet's own and must not start another one.
+REVIEW_CHILD_ENV = "RATCHET_REVIEW_CHILD"
 REVIEWS_SUBDIR = Path(".ratchet") / "reviews"
 TIMEOUT_SECONDS = 1800  # a max-level review is minutes; half an hour means it is stuck
 VERSION_TIMEOUT_SECONDS = 10  # `claude --version` answers at once; ten seconds means the command is stuck
@@ -197,10 +203,63 @@ def require_claude(argv: list[str]) -> None:
                            "and pass its saved output with --from-file FILE")
 
 
-def _run_command(argv: list[str], cwd: Path, timeout: float) -> str:
-    """The command's stdout. stdin is closed so a headless `claude -p` never waits for input."""
+# Why a review would not start (the `kind` of a Refusal), in the order they are checked.
+REFUSE_RULES, REFUSE_ROUND_KEY, REFUSE_ROUND_CAP, REFUSE_CLAUDE = "rules", "round_key", "round_cap", "claude"
+
+
+@dataclass(frozen=True)
+class Refusal:
+    """A review that would not start, found before anything is captured, asked or billed."""
+    kind: str  # a REFUSE_* word
+    round_key: str | None  # the change the round would be counted on; None when the rules or the key itself failed first
+    message: str
+
+    def error(self) -> RatchetError:
+        """What `ratchet review` raises for it: exit code 3 for a full round cap, 1 for the rest."""
+        return (RoundCapReached if self.kind == REFUSE_ROUND_CAP else RatchetError)(self.message)
+
+
+def round_cap_message(key: str, used: int, max_rounds: int, open_count: int) -> str:
+    return (f"round cap reached for {key}: {used}/{max_rounds} rounds used; {open_count} findings "
+            "still open (ratchet count). Fix blockers, let the rest go to distill, or rerun with --over-cap (recorded).")
+
+
+def review_refusal(config: Config, events: list[Event], *, target: str | None, from_file: bool, over_cap_allowed: bool,
+                   replayed: bool) -> Refusal | None:
+    """Why `ratchet review` would refuse to start, else None. Reads the rules files, git and the PATH; writes nothing.
+
+    The checks `cmd_review` makes before it calls claude, in its order: the rules load, the change gets a round key, the round
+    cap leaves room (a replay and --over-cap are exempt), the claude command exists (a --from-file review runs none). A wrap-up
+    asks ahead of time because a refused round records no review_run, so the wrap-up's base never moves and the next one
+    would be refused the same way.
+
+    `target` has passed `check_target`. `events` are the ledger's; the change under review is the one in `config.worktree`.
+    """
     try:
-        proc = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        load_rules(config)
+    except RatchetError as exc:
+        return Refusal(REFUSE_RULES, None, str(exc))
+    try:
+        key = round_key(config.worktree, target, config.default_branch)
+    except RatchetError as exc:  # no branch to count on (RoundKeyUnavailable), or a default_branch that is not a branch
+        return Refusal(REFUSE_ROUND_KEY, None, str(exc))
+    used = review_rounds_used(events, key)
+    if used + 1 > config.max_review_rounds and not over_cap_allowed and not replayed:
+        return Refusal(REFUSE_ROUND_CAP, key, round_cap_message(key, used, config.max_review_rounds, len(open_findings(events))))
+    if from_file:
+        return None
+    argv = claude_command(DEFAULT_LEVEL, target)  # the level is no part of argv[0], which is all `require_claude` looks at
+    try:
+        require_claude(argv)
+    except RatchetError as exc:
+        return Refusal(REFUSE_CLAUDE, key, str(exc))
+    return None
+
+
+def _run_command(argv: list[str], cwd: Path, timeout: float, env: dict[str, str] | None = None) -> str:
+    """The command's stdout. stdin is closed so a headless `claude -p` never waits for input. `env` None: the caller's own."""
+    try:
+        proc = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
                               stdin=subprocess.DEVNULL, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         raise RatchetError(f"`{shlex.join(argv)}` did not finish within {timeout}s") from exc
@@ -213,7 +272,7 @@ def _run_command(argv: list[str], cwd: Path, timeout: float) -> str:
 
 
 def run_claude(argv: list[str], cwd: Path) -> str:
-    return _run_command(argv, cwd, TIMEOUT_SECONDS)
+    return _run_command(argv, cwd, TIMEOUT_SECONDS, {**os.environ, REVIEW_CHILD_ENV: "1"})
 
 
 def critic_version(cwd: Path) -> str:

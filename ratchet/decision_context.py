@@ -9,14 +9,14 @@ import argparse
 import json
 from pathlib import Path
 
-from .config import Config
+from .config import Config, is_outer, rules_name
 from .errors import RatchetError
 from .ledger import fold, read_events
 from .proposal_store import encoded, fingerprint
 from .proposals import clause_block, create_batch
-from .rules import load_rules, parse_rules_text
+from .rules import load_rules, parse_rules_text, shared_layers
 
-from .source_evidence import read_source as _read_source
+from .source_evidence import read_outer_source, read_source as _read_source
 from .review_evidence import source_for
 
 ACTIONS = ("covered", "keep", "add", "rewrite", "merge", "retire")
@@ -32,9 +32,13 @@ def build_context(config: Config, events: list[dict], ids: list[str] | None = No
     for key, (start, end) in locations.items():
         if key not in selected or type(start) is not int or type(end) is not int or not 1 <= start <= end < start + 80:
             raise RatchetError("a location must name a selected finding and 1–80 positive source lines")
+    shared_layers(config)  # a shared layer this machine lacks refuses here, in words, before any rule is read as a source
     rules = []
     for path in config.rules_files:
-        source = _read_source(config.root, str(path), None)
+        if is_outer(config, path):
+            source = read_outer_source(path, rules_name(config, path))  # shared with other repos: read where the config points, never written
+        else:
+            source = _read_source(config.worktree, str(path), None)  # the rules as this worktree holds them
         if source["status"] != "available":
             raise RatchetError(f"cannot prepare rules context: {source['reason']}")
         rules.append(source)
@@ -43,7 +47,7 @@ def build_context(config: Config, events: list[dict], ids: list[str] | None = No
         item = state[key]
         finding = item.finding
         start, end = locations.get(key, (finding["line"], None))
-        source = _read_source(config.root, finding["file"], start, end)
+        source = _read_source(config.worktree, finding["file"], start, end)  # the code as this worktree holds it now
         # The ledger stores import-time HEAD, not a snapshot of an uncommitted diff.
         reviewed = source_for(config, finding)
         source.update(recorded_sha=finding["sha"], review_snapshot=reviewed["status"], reported_line=finding["line"],

@@ -1,6 +1,6 @@
 # Ledger reference
 
-The ledger is a JSON-lines file, one event per line, append-only. Default location: `.style-findings.jsonl` in the root of the repo's main worktree (so every linked worktree shares one ledger). The machine-readable definition is [`schemas/finding.v1.schema.json`](../schemas/finding.v1.schema.json); the tool validates every event against the same rules before it writes and when it reads, and refuses a ledger with a bad line rather than reading part of it.
+The ledger is a JSON-lines file, one event per line, append-only. Default location: `.style-findings.jsonl` in the root of the repo's main worktree (so every linked worktree shares one ledger). The skips file and `.ratchet/` are shared the same way, while the files git tracks are each worktree's own ([Linked worktrees](ONBOARDING.md#linked-worktrees)). The machine-readable definition is [`schemas/finding.v1.schema.json`](../schemas/finding.v1.schema.json); the tool validates every event against the same rules before it writes and when it reads, and refuses a ledger with a bad line rather than reading part of it.
 
 ## Events
 
@@ -17,7 +17,7 @@ Four kinds share the file. The current state of a finding is the **fold of its e
 | `repo` | repo slug, `[a-z0-9-]+` |
 | `source` | `gate` (an automated check), `l1` or `l2` (two tiers of review; the tool treats them identically) |
 | `ts` | when the event was **written**, local time, `YYYY-MM-DDTHH:MM:SS`, no timezone |
-| `sha` | short HEAD at write time, or `none` on an unborn branch. `ratchet review` reads it in the worktree it reviews (`--repo`, else the current directory), so from a linked worktree it is that worktree's HEAD; `add`, `ingest-code-review` and `gate` read the main worktree's HEAD |
+| `sha` | short HEAD at write time, or `none` on an unborn branch. It is the HEAD of the worktree the command runs in (`--repo`, else the current directory): `ratchet review`, `add`, `ingest-code-review`, `gate` and the Python API all read it there, so from a linked worktree it is that worktree's HEAD |
 | `file`, `line` | `line` is an integer >= 1 |
 | `rule_code` | what the detector or reviewer called it (tool code, or the category text the model gave) |
 | `rule_id` | see [Rule ids](#rule-ids) |
@@ -52,7 +52,7 @@ A review run by `ratchet review` also records which critic ran it and on what. T
 | `reviewer` | `claude-code` when `ratchet review` ran the review; `null` for `--from-file`, whose reviewer is not known (`source` stays `file`) |
 | `reviewer_version` | the stripped stdout of `claude --version` (for example `2.1.45 (Claude Code)`), asked once per review before it starts; `null` for `--from-file`, and when the version could not be read |
 | `level` | the review level, `low` to `max`; `null` for `--from-file` |
-| `head` | the full sha of the commit HEAD pointed at before the reviewer started (for `--from-file`: when the file was read), or `none` on a branch with no commit. Uncommitted changes are not part of it. For a review `ratchet review` ran it is the `head` of that run's saved evidence, so the two always agree. `review` reviews the worktree it is run in (`--repo`, else the current directory), so from a linked worktree this is that worktree's HEAD, and its branch and fork point name the round key; the ledger, `.ratchet/` and the config stay in the main worktree |
+| `head` | the full sha of the commit HEAD pointed at before the reviewer started (for `--from-file`: when the file was read), or `none` on a branch with no commit. Uncommitted changes are not part of it. For a review `ratchet review` ran it is the `head` of that run's saved evidence, so the two always agree. `review` reviews the worktree it is run in (`--repo`, else the current directory), so from a linked worktree this is that worktree's HEAD, and its branch and fork point name the round key; the ledger, `.ratchet/`, the config and the skips file stay in the main worktree, while the rules files and the code under review are that worktree's own |
 | `version_changed` | written only when `true`: `reviewer_version` differs from the latest earlier `review_run` that has one, so this is the first review on the new version |
 | `tree` | optional (absent on older events, and when taking it failed, which the review says on stderr): the 40-hex id of a git tree holding the worktree as the review found it when it started (`--from-file`: when the file was read): tracked files as on disk, uncommitted work included, and untracked files git does not ignore (one over 1 MiB is a stand-in, see [WRAPUP.md](WRAPUP.md)). `ratchet wrapup` diffs it against the tree of now, so reviewed work is not counted again once committed. It takes the newest `review_run` of the branch it runs on, the branch being what `round_key` (`<branch>@<fork point>`) names: the tree holds the uncommitted work of the worktree it was taken in, and a `target:` key names no branch ([WRAPUP.md](WRAPUP.md#the-base)). Nothing refers to the tree, so `git gc` may remove it; a reader treats a missing object as absent. Not written for `--dry-run`, a replay, or a `--target` review (its `target:` key names no branch, so no wrap-up measures from it) |
 
@@ -60,7 +60,7 @@ A review run by `ratchet review` also records which critic ran it and on what. T
 
 A change gets at most `max_review_rounds` (default 3) reviews: review, fix, re-review. Fixes can create new findings, so each extra pass adds cost and fixes to re-check (whether later passes are worth less has not been measured; see [METHOD.md](METHOD.md#fixes-can-create-new-findings)), and the third round is the last one in which blockers are fixed; whatever else is still open stays in the ledger for the periodic distill step.
 
-`ratchet review` names the change with a **round key**, counts the `review_run` events carrying it, and numbers this review 1 + that. Past the cap it refuses **before** running `claude` (so a refused round costs nothing), prints how many findings are still open, and exits with code **3**; `--over-cap` runs it anyway and records `over_cap: true`. A `--from-file` review is a round like any other. `--dry-run` shows the key and the round and writes nothing (past the cap it says the real run would be refused). Re-ingesting a run id that is already recorded with `--from-file` is a replay, not a round: the cap never refuses it, it adds no `review_run` event, and it prints `review: replay of run <id> (already recorded; not another round)` instead of the round line. Only `--from-file` can replay: `--run <recorded id>` without it would be a fresh, billed `claude` run, so it is refused up front, before the cap and before `claude` runs. `ratchet count` ends with `review rounds on <key>: <used>/<max>`.
+`ratchet review` names the change with a **round key**, counts the `review_run` events carrying it, and numbers this review 1 + that. Past the cap it refuses **before** running `claude` (so a refused round costs nothing), prints how many findings are still open, and exits with code **3**; `--over-cap` runs it anyway and records `over_cap: true`. A `--from-file` review is a round like any other. `--dry-run` shows the key and the round and writes nothing (it says when the real run would be refused: past the cap, or with no `claude` on the PATH, which a `--from-file` review does not need). Re-ingesting a run id that is already recorded with `--from-file` is a replay, not a round: the cap never refuses it, it adds no `review_run` event, and it prints `review: replay of run <id> (already recorded; not another round)` instead of the round line. Only `--from-file` can replay: `--run <recorded id>` without it would be a fresh, billed `claude` run, so it is refused up front, before the cap and before `claude` runs. `ratchet count` ends with `review rounds on <key>: <used>/<max>`.
 
 The round key is:
 
@@ -70,7 +70,7 @@ The round key is:
 
 Two consequences, both intended. On the default branch itself the fork point is HEAD, so each new commit there starts a new key and gets its own rounds. Merging the default branch into a feature branch moves its fork point, so the count starts over. On a detached HEAD there is no branch: `review` fails and asks for `--target` (and `count` ends with `review rounds: n/a (detached HEAD)`).
 
-**A linked worktree has its own key.** The key is read in the worktree being reviewed (`--repo`, else the current directory), not in the main one. A linked worktree is on its own branch, so it has its own fork point and its own rounds, counted apart from the main worktree's in the one shared ledger; the ledger, `.ratchet/` and the config stay in the main worktree. A `--from-file` review is keyed by the worktree it is run in as well, and `ratchet count` ends with the rounds of the worktree it is run in: the key a review there would get.
+**A linked worktree has its own key.** The key is read in the worktree being reviewed (`--repo`, else the current directory), not in the main one. A linked worktree is on its own branch, so it has its own fork point and its own rounds, counted apart from the main worktree's in the one shared ledger; the ledger, `.ratchet/`, the config and the skips file stay in the main worktree, while the rules files and the code under review are that worktree's own. A `--from-file` review is keyed by the worktree it is run in as well, and `ratchet count` ends with the rounds of the worktree it is run in: the key a review there would get.
 
 ## Critic version
 
@@ -121,17 +121,17 @@ The id notation is the config key `clause_id_pattern`, a regex for one id. Defau
 
 ## Config: `.ratchet.json`
 
-At the repo root (main worktree), or any file passed with `--config`. Every key is optional; unknown keys are an error. Relative paths resolve against the repo root.
+At the repo root (main worktree), or any file passed with `--config`. Every key is optional; unknown keys are an error. Relative paths resolve against the repo root. In a linked worktree the files git tracks (`rules_files`, `digest`, `inject_targets`) resolve against that worktree instead; a path that leads outside the repo (a shared `../rules.md`, an absolute path, a path under `~`, which stands for the home directory of whoever runs the tool) is one file for every worktree and is looked up from the main worktree. A rules file outside the repo is an outer layer: ratchet reads it and never writes it, and the commands that need the whole rule set stop when it is not on the machine ([COMPILE.md](COMPILE.md#outer-layers)). `ledger` and `skips_file` always resolve against the main worktree, and a `.ratchet.json` in a linked worktree is ignored.
 
 | key | default | meaning |
 |---|---|---|
 | `repo_slug` | origin remote basename, else the repo directory name | `[a-z0-9-]+`; goes into finding ids |
 | `ledger` | `.style-findings.jsonl` | ledger path; `--ledger` overrides it |
-| `rules_files` | `[]` | markdown files holding clause definitions |
+| `rules_files` | `[]` | markdown files holding clause definitions (a linked worktree reads its own copies). A file outside the repo is a read-only outer layer that has to be on the machine, see [COMPILE.md](COMPILE.md#outer-layers) |
 | `clause_id_pattern` | `[A-Z][A-Z0-9]*\.[0-9]+` | regex for one clause id |
 | `tool_rule_map` | `{}` | `{"ruff:F811": "P2.3"}`: a reported tool id is recorded as that clause (`rule_code` keeps the tool id, `rule_id_source` is `tool`). Values must be defined clauses |
 | `scenarios` | `{}` | `{rule_id: text}`: the `failure_scenario` used when a reported finding has none |
-| `skips_file` | none | JSON-lines file of gate skips, see below. Unset means no skip exclusion |
+| `skips_file` | none | JSON-lines file of gate skips, see below. Unset means no skip exclusion. Read from the main worktree, like the ledger |
 | `label_page_threshold` | `20` | `infer` suggests a label page, and `label-page --auto` generates one, when more findings than this are open |
 | `legacy_unmapped_alias` | `[]` | see [Legacy ledgers](#legacy-ledgers) |
 | `digest`, `digest_max_chars`, `digest_max_bytes`, `inject_targets` | see [COMPILE.md](COMPILE.md#config-keys) | settings for `compile` |
@@ -139,6 +139,7 @@ At the repo root (main worktree), or any file passed with `--config`. Every key 
 | `default_branch` | origin's HEAD branch, else `main`, else `master` | the branch a change's fork point is measured from (a local branch name; a remote-only one is found as `origin/<name>`) |
 | `wrapup_min_changed_lines` | `200` | integer >= 1: `ratchet wrapup` reviews when at least this many lines changed since the last review. Reaching this or `wrapup_min_files` is enough, see [WRAPUP.md](WRAPUP.md#thresholds) |
 | `wrapup_min_files` | `5` | integer >= 1: `ratchet wrapup` reviews when at least this many files changed since the last review. Reaching this or `wrapup_min_changed_lines` is enough |
+| `wrapup_auto` | `false` | `true` or `false` and nothing else (`config 'wrapup_auto' must be true or false`): turns on the automatic wrap-up review after commits made in a Claude Code session. Each automatic run costs one `/code-review`. `ratchet init` asks and writes it ([ONBOARDING.md](ONBOARDING.md#the-wrapup_auto-key)). What it turns on, from the commit to the question: [WRAPUP.md](WRAPUP.md#automatic-wrap-up) |
 | `bin` | none | path to the `ratchet` executable, relative to the repo root (for example `third_party/ratchet/bin/ratchet` for a [vendored copy](VENDORING.md)). Only the portable git hooks read it, when `$RATCHET_BIN` is unset ([ONBOARDING.md](ONBOARDING.md#portable-and-pinned-blocks)); the commands themselves ignore it beyond requiring a non-empty string |
 
 ## Commands
@@ -167,7 +168,7 @@ Fixes-Finding: R12-3
 Fixes-Finding: R12-4, R12-7
 ```
 
-The value is a `display_id` or a full finding id; several trailers, and comma- or space-separated lists, are fine. Trailers are read with git's own trailer parser (`git log --format=%(trailers:key=Fixes-Finding)`), so they only count in the message's last paragraph and the key is case-insensitive. By default `HEAD`'s history is scanned; `--all` scans every ref.
+The value is a `display_id` or a full finding id; several trailers, and comma- or space-separated lists, are fine. Trailers are read with git's own trailer parser (`git log --format=%(trailers:key=Fixes-Finding)`), so they only count in the message's last paragraph and the key is case-insensitive. By default the history of `HEAD` is scanned, the HEAD of the worktree `infer` runs in (so the post-commit hook sees the commit that was just made there); `--all` scans every ref, the branches of every worktree included.
 
 - **No time comparison.** The trailer is the author's stated intent, and a fix may be committed before the finding is written to the ledger.
 - **Subjects are never parsed.** Text like `feat(parser): ... (S1)` closes nothing.
@@ -178,7 +179,7 @@ The value is a `display_id` or a full finding id; several trailers, and comma- o
 
 An open `gate` finding is closed (`auto:gate_pass`) by the first `gate_pass` event **after it in the file** whose `files` lists the finding's file. Findings listed in the skips file are excluded: a gate that only inspects changed lines lets a skipped violation stay in the file, so a later unrelated edit passing the gate says nothing about it. l1/l2 findings are never closed this way.
 
-The skips file (`skips_file`) is JSON lines; each row may carry `finding_ids` (a list of ids that were skipped past the gate) and `reason_kind`. A file that does not exist yet means no skips. Findings in a row with `reason_kind: "false_positive"` are only pre-selected on the label page, never labeled automatically.
+The skips file (`skips_file`) is JSON lines; each row may carry `finding_ids` (a list of ids that were skipped past the gate) and `reason_kind`. A file that does not exist yet means no skips. Findings in a row with `reason_kind: "false_positive"` are only pre-selected on the label page, never labeled automatically. The skips file is shared state like the ledger whose ids it lists: every worktree reads the one in the main worktree. ratchet only reads it; a gate that appends to it should write that copy, not one in its own worktree.
 
 ### Labels
 
@@ -186,7 +187,7 @@ The skips file (`skips_file`) is JSON lines; each row may carry `finding_ids` (a
 
 ## Dry run
 
-`add`, `ingest-code-review`, `infer`, `label`, `label-page`, `apply-labels`, `wrapup` and `compile` accept `--dry-run`: all validation and inference still runs and nothing is written. The ledger commands print the events that would be appended as JSON lines; `compile` prints a diff; `wrapup` prints what it measured and what it would do, and runs no review ([WRAPUP.md](WRAPUP.md)).
+`add`, `ingest-code-review`, `infer`, `label`, `label-page`, `apply-labels`, `wrapup` and `compile` accept `--dry-run`: all validation and inference still runs and nothing is written. The ledger commands print the events that would be appended as JSON lines; `compile` prints a diff; `wrapup` prints what it measured and what it would do, and runs no review; when a review is due it also says whether a real run would be refused ([WRAPUP.md](WRAPUP.md#dry-run)).
 
 ## Legacy ledgers
 
