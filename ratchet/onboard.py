@@ -25,7 +25,6 @@ from .fsutil import is_executable, read_text, write_text
 from .git import default_hooks_dir, hooks_dir, hooks_path_origin, uncommitted_paths
 from .hooks import HOOK_NAMES, HookPlan, Pinned, plan_hook, probe_hook
 from .outcomes import BATCH_NAME, PAGE_NAME
-from .review import REVIEWS_SUBDIR
 from .rules import load_rules
 from .sources import DiskReader
 
@@ -35,6 +34,9 @@ EXECUTABLE_PATH = PACKAGE_ROOT / "bin" / "ratchet"
 TEMPLATE_TARGET = "CODING-STYLE.md"
 CLAUDE_MD_HEADING = "## Code style digest (review-ratchet)"
 COMMIT_MESSAGE = "chore: adopt review-ratchet"
+# Local state: saved reviews (code excerpts), proposal batches, receipts and locks. The readable record of applied rule
+# changes, CODING-STYLE.changelog.md, sits beside the rules and is deliberately not ignored.
+LOCAL_STATE_ENTRY = ".ratchet/"
 
 _RULES_CANDIDATES = (TEMPLATE_TARGET, f"docs/{TEMPLATE_TARGET}")
 STATUS_WORDS = {"add": ("added", "would add"), "update": ("updated", "would update"), "ok": ("already ok", "already ok"),
@@ -299,7 +301,7 @@ def _hooks_steps(config: Config, directory: Path | None, options: InitOptions, a
 def ignore_entries(config: Config) -> list[str]:
     runtime = [config.ledger_path, config.ledger_path.parent / PAGE_NAME, config.ledger_path.parent / BATCH_NAME]
     entries = [display_path(path, config.root) for path in runtime if path.is_relative_to(config.root)]
-    return [*dict.fromkeys(entries), f"{REVIEWS_SUBDIR.as_posix()}/"]
+    return [*dict.fromkeys(entries), LOCAL_STATE_ENTRY]
 
 
 def _gitignore_step(config: Config, options: InitOptions) -> Step:
@@ -329,7 +331,8 @@ def next_steps(command: str) -> list[str]:
     return [
         f"next 1: {command} review --level high   (review the current changes; findings land in the ledger)",
         f"next 2: {command} count --by-rule        (see what is open, by clause)",
-        f"next 3: {command} label-page             (label outcomes; a commit with a `Fixes-Finding: <id>` trailer closes a finding)",
+        f"next 3: {command} wrapup                 (close a stretch of work; /review-ratchet:wrapup in Claude Code. Then "
+        f"{command} label <id> --outcome fixed records what became of a finding; {command} label-page does many at once)",
     ]
 
 

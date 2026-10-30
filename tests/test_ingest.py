@@ -4,8 +4,10 @@ import unittest
 import support  # noqa: F401  (puts the repo root on sys.path)
 from support import RepoCase, review_item
 
+from ratchet.config import load_config
 from ratchet.errors import RatchetError
-from ratchet.ingest import escape_stray_quotes, extract_review_items, extract_review_items_lenient
+from ratchet.ingest import code_review_events, escape_stray_quotes, extract_review_items, extract_review_items_lenient
+from ratchet.rules import load_rules
 
 
 class ExtractTest(unittest.TestCase):
@@ -379,6 +381,46 @@ class IngestWithoutSeveritiesTest(RepoCase):
         self.assertEqual([(e["rule_id"], e["rule_id_source"]) for e in self.events()],
                          [("A.2", "attributed"), ("A.1", "attributed"), ("unmapped", "model")])
         self.assertIn("1 unmapped, 2 labeled from the text", out)
+
+
+class SnippetHookTest(RepoCase):
+    """`code_review_events` records a snippet only for a caller that supplies a `locate` function."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.with_sample_rules()
+        config = load_config(self.repo, None, None, self.repo)
+        self.build = lambda items, locate=None: code_review_events(
+            items, config=config, rules=load_rules(config), source="l1", run_id="R1", verdict="PLAUSIBLE", sha="none",
+            ts="2026-01-07T11:00:00", discovered_at=None, locate=locate).events
+
+    def test_without_a_locate_function_a_finding_carries_neither_snippet_nor_source(self) -> None:
+        (finding,) = self.build([review_item()])
+        self.assertNotIn("snippet", finding)
+        self.assertNotIn("snippet_source", finding)
+
+    def test_the_snippet_and_where_it_came_from_are_recorded(self) -> None:
+        (finding,) = self.build([review_item(file="src/a.py", line=10)], lambda file, line: (f"code at {file}:{line}", "review"))
+        self.assertEqual((finding["snippet"], finding["snippet_source"]), ("code at src/a.py:10", "review"))
+
+    def test_no_snippet_is_still_a_recorded_answer(self) -> None:
+        (finding,) = self.build([review_item()], lambda file, line: (None, "unavailable"))
+        self.assertEqual(finding["snippet_source"], "unavailable")
+        self.assertNotIn("snippet", finding)
+
+    def test_the_function_is_asked_once_per_finding_after_findings_on_one_line_collapse(self) -> None:
+        asked = []
+
+        def locate(file: str, line: int) -> tuple[str | None, str]:
+            asked.append((file, line))
+            return "code", "worktree"
+
+        items = [review_item(file=" src/a.py ", line=3, severity="nice"), review_item(file="src/a.py", line=3, severity="blocker"),
+                 review_item(file="src/b.py", line=4)]
+        events = self.build(items, locate)
+        self.assertEqual(asked, [("src/a.py", 3), ("src/b.py", 4)])
+        self.assertEqual([(event["file"], event["snippet_source"]) for event in events], [("src/a.py", "worktree"), ("src/b.py", "worktree")])
+        self.assertEqual(len(events[0]["also_matches"]), 1)
 
 
 if __name__ == "__main__":

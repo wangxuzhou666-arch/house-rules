@@ -7,10 +7,17 @@ from pathlib import Path
 from unittest import mock
 
 import support  # noqa: F401  (puts the repo root on sys.path)
-from support import FIXTURES, REPO_ROOT, STYLE_RULES, RepoCase, gate_finding, git, review_finding, review_item, review_round
+from support import (
+    FIXTURES, REPO_ROOT, STYLE_RULES, RepoCase, gate_finding, git, make_config, review_finding, review_item, review_round,
+)
 
 from ratchet.errors import RatchetError, RoundKeyUnavailable
-from ratchet.review import check_run_id, claude_command, default_run_id, findings_table, review_rounds_used, round_key
+from ratchet.review import (
+    check_run_id, claude_command, default_run_id, findings_table, replaced_critic_version, review_rounds_used, round_key,
+)
+from ratchet.review_evidence import MAX_SNIPPET_CHARS, TRUNCATED_MARK, snapshot_snippets, snippet_around, worktree_snippets
+from ratchet.source_evidence import MAX_SOURCE_BYTES
+from ratchet.state_tree import state_tree
 
 
 def review_text(*items: dict, preface: str = "Reviewed the diff.") -> str:
@@ -28,18 +35,32 @@ class ReviewCase(RepoCase):
         self.write_rules(STYLE_RULES)
         self.write_config(rules_files=["rules.md"])
         self.record = self.tmp / "claude-call.json"
+        self.version_record = self.tmp / "claude-version-calls.jsonl"
         # No test may reach the real `claude`: anything that does not set its own command gets one that cannot run.
         patcher = mock.patch.dict(os.environ, {"RATCHET_CLAUDE_CMD": "/nonexistent/claude"})
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def fake_claude(self, stdout: str = "", exit_code: int = 0, stderr: str = "", sleep: float = 0) -> Path:
-        """An executable that records how it was called and prints canned output."""
+    def fake_claude(self, stdout: str = "", exit_code: int = 0, stderr: str = "", sleep: float = 0,
+                    version: str = "2.1.0 (Claude Code)", version_exit_code: int = 0, version_sleep: float = 0,
+                    during_review: str = "") -> Path:
+        """An executable that records how it was called and prints canned output.
+
+        Asked for `--version` it answers with `version` and records the question apart from the review call, so a test can
+        count the questions and still read what the review itself was called with. `during_review` is Python run after the
+        review call is recorded and before it prints: what happens to the repo while claude is busy.
+        """
         script = self.tmp / "fake-claude"
         script.write_text(
             f"#!{sys.executable}\n"
-            "import json, os, sys, time\n"
+            "import json, os, subprocess, sys, time\n"
+            "if '--version' in sys.argv[1:]:\n"
+            f"    open({str(self.version_record)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
+            f"    time.sleep({version_sleep})\n"
+            f"    sys.stdout.write({version!r})\n"
+            f"    sys.exit({version_exit_code})\n"
             f"open({str(self.record)!r}, 'w').write(json.dumps({{'argv': sys.argv[1:], 'cwd': os.getcwd(), 'stdin': sys.stdin.read()}}))\n"
+            f"{during_review}\n"
             f"time.sleep({sleep})\n"
             f"sys.stdout.write({stdout!r})\n"
             f"sys.stderr.write({stderr!r})\n"
@@ -49,6 +70,12 @@ class ReviewCase(RepoCase):
 
     def call(self) -> dict:
         return json.loads(self.record.read_text(encoding="utf-8"))
+
+    def version_asks(self) -> list[list[str]]:
+        """The arguments of every `--version` question the fake has been asked, oldest first."""
+        if not self.version_record.exists():
+            return []
+        return [json.loads(line) for line in self.version_record.read_text(encoding="utf-8").splitlines()]
 
     def review(self, claude: Path | str, *argv: str) -> tuple[int, str, str]:
         with mock.patch.dict(os.environ, {"RATCHET_CLAUDE_CMD": str(claude)}):
@@ -80,8 +107,10 @@ class RunningClaudeTest(ReviewCase):
         script = self.fake_claude(review_text())
         with mock.patch("ratchet.review.subprocess.run", wraps=subprocess.run) as run:  # the module is shared: git calls land here too
             self.review(script, "--run", "R1")
-        (claude_call,) = [call for call in run.call_args_list if call.args[0][0] == str(script)]
-        self.assertIs(claude_call.kwargs["stdin"], subprocess.DEVNULL)
+        claude_calls = [call for call in run.call_args_list if call.args[0][0] == str(script)]
+        self.assertEqual([call.args[0][1:] for call in claude_calls], [["--version"], ["-p", "/code-review high"]])
+        for call in claude_calls:
+            self.assertIs(call.kwargs["stdin"], subprocess.DEVNULL, call.args[0])
 
     def test_cwd_is_the_repo_root_even_when_started_from_a_subdirectory(self) -> None:
         (self.repo / "sub").mkdir()
@@ -615,8 +644,11 @@ class RoundCapTest(ReviewCase):
         self.assertEqual([e["kind"] for e in events], ["finding", "finding", "review_run"])
         run = dict(events[-1])
         self.assertRegex(run.pop("ts"), r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d$")
+        self.assertRegex(run.pop("tree"), r"^[0-9a-f]{40}$")  # the working tree as the review found it (rules.md and .ratchet.json, uncommitted)
         self.assertEqual(run, {"v": 1, "kind": "review_run", "repo": "demo-repo", "run": "R5", "round_key": self.KEY, "round": 1,
-                               "max_rounds": 3, "over_cap": False, "finding_count": 2, "source": "claude"})
+                               "max_rounds": 3, "over_cap": False, "finding_count": 2, "source": "claude",
+                               "reviewer": "claude-code", "reviewer_version": "2.1.0 (Claude Code)", "level": "high",
+                               "head": "none"})  # no commit yet; version_changed is written only when it is true
 
     def test_a_review_that_found_nothing_is_still_a_round(self) -> None:
         self.review(self.fake_claude(review_text()))
@@ -834,6 +866,945 @@ class TableTest(unittest.TestCase):
                 self.assertEqual(lines[1][offset:offset + len(first)], first)
                 self.assertEqual(lines[2][offset:offset + len(second)], second)
         self.assertEqual(lines[2][lines[0].index("summary"):], "two words split")
+
+
+class CriticVersionTest(ReviewCase):
+    """`reviewer`, `reviewer_version`, `level` and `head` on every review_run, and the line announcing a new critic version."""
+
+    OLD, NEW = "2.1.0 (Claude Code)", "2.2.0 (Claude Code)"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.write_config(rules_files=["rules.md"], max_review_rounds=20)  # these tests review one change many times
+
+    def review_with(self, version: str, *argv: str, stdout: str | None = None) -> tuple[int, str, str]:
+        return self.review(self.fake_claude(review_text() if stdout is None else stdout, version=version), *argv)
+
+    def saved_review(self) -> Path:
+        saved = self.tmp / "saved.txt"
+        saved.write_text(review_text(), encoding="utf-8")
+        return saved
+
+    def versions(self) -> list[tuple[str | None, bool | None]]:
+        """(reviewer_version, version_changed) of each review_run; None when the key is absent."""
+        return [(event["reviewer_version"], event.get("version_changed")) for event in self.review_runs()]
+
+    def test_a_review_records_what_ran_it_at_which_level_on_which_commit(self) -> None:
+        head = self.commit("c1")
+        code, out, err = self.review(self.fake_claude(review_text(FINDING_A), version=self.OLD), "--run", "R1", "--level", "low")
+        self.assertEqual((code, err), (0, ""))
+        (run,) = self.review_runs()
+        self.assertEqual((run["source"], run["reviewer"], run["reviewer_version"], run["level"]),
+                         ("claude", "claude-code", self.OLD, "low"))
+        self.assertEqual(run["head"], head)
+        self.assertRegex(run["head"], r"^[0-9a-f]{40}$")  # the whole sha: it will be handed to git later
+        self.assertNotIn("version_changed", run)
+        self.assertNotIn("critic version", out)
+
+    def test_the_level_is_the_one_the_review_ran_at(self) -> None:
+        self.review_with(self.OLD)
+        self.review_with(self.OLD, "--level", "xhigh")
+        self.assertEqual([event["level"] for event in self.review_runs()], ["high", "xhigh"])
+
+    def test_head_is_where_the_branch_stood_before_the_reviewer_started(self) -> None:
+        before = self.commit("c1")
+
+        def commit_while_claude_is_busy(argv: list[str], cwd: Path) -> str:
+            self.commit("c2")
+            return review_text(FINDING_A)
+
+        with mock.patch("ratchet.cli.run_claude", side_effect=commit_while_claude_is_busy):
+            code, _, err = self.review(self.fake_claude(), "--run", "R1")
+        self.assertEqual(code, 0, err)
+        after = git(self.repo, "rev-parse", "HEAD")
+        self.assertNotEqual(before, after)
+        self.assertEqual(self.review_runs()[0]["head"], before)
+        self.assertEqual(self.findings()[0]["sha"], after[:8])  # a finding's sha is the HEAD at import: the other moment
+
+    def test_head_is_none_before_the_first_commit(self) -> None:
+        self.review_with(self.OLD)
+        self.assertEqual(self.review_runs()[0]["head"], "none")
+
+    def test_a_from_file_review_does_not_know_its_reviewer_asks_nobody_and_records_the_current_head(self) -> None:
+        saved = self.saved_review()
+        self.assertEqual(self.cli("review", "--from-file", str(saved), "--run", "F1")[0], 0)
+        head = self.commit("c1")
+        code, out, err = self.cli("review", "--from-file", str(saved), "--run", "F2")
+        self.assertEqual((code, err), (0, ""))
+        first, second = self.review_runs()
+        for run in (first, second):
+            self.assertEqual((run["source"], run["reviewer"], run["reviewer_version"], run["level"]), ("file", None, None, None))
+            self.assertNotIn("version_changed", run)
+        self.assertEqual((first["head"], second["head"]), ("none", head))
+        self.assertEqual(self.version_asks(), [])
+        self.assertNotIn("critic version", out)
+
+    def test_the_version_is_asked_once_per_review_of_the_command_that_runs_it(self) -> None:
+        self.review(self.fake_claude(review_text()), "--run", "R1")
+        self.assertEqual(self.version_asks(), [["--version"]])
+        self.review(f"{sys.executable} {self.fake_claude(review_text())} --extra", "--run", "R2")
+        self.assertEqual(self.version_asks(), [["--version"], ["--extra", "--version"]])
+        self.assertEqual(self.call()["argv"], ["--extra", "-p", "/code-review high"])
+
+    def test_a_version_that_cannot_be_read_is_recorded_as_null_and_said_once(self) -> None:
+        cases = [("exited with 2", {"version_exit_code": 2}), ("printed nothing", {"version": ""}),
+                 ("did not finish within 0.3s", {"version_sleep": 5})]
+        for number, (reason, kwargs) in enumerate(cases, start=1):
+            # only the case that hangs needs the short limit; a loaded machine must not turn the other two into timeouts
+            with self.subTest(reason=reason), mock.patch("ratchet.review.VERSION_TIMEOUT_SECONDS", 0.3 if "version_sleep" in kwargs else 10):
+                code, out, err = self.review(self.fake_claude(review_text(FINDING_A), **kwargs), "--run", f"V{number}")
+                self.assertEqual(code, 0, err)
+                self.assertEqual(len(err.splitlines()), 1, err)
+                self.assertIn("warning: critic version not recorded", err)
+                self.assertIn(reason, err)
+                self.assertIn("reviewer_version is null", err)
+                run = self.review_runs()[-1]
+                self.assertEqual((run["run"], run["reviewer"], run["reviewer_version"]), (f"V{number}", "claude-code", None))
+                self.assertNotIn("critic version changed", out)
+        self.assertEqual(len(self.findings()), 3)  # the reviews themselves went ahead
+
+    def test_a_new_critic_version_is_announced_on_its_first_review_and_flagged_in_the_ledger(self) -> None:
+        outs = [self.review_with(version, "--run", f"A{number}")[1]
+                for number, version in enumerate([self.OLD, self.OLD, self.NEW, self.NEW], start=1)]
+        announcement = f"critic version changed: {self.OLD} -> {self.NEW} (first review on this version)"
+        self.assertEqual([announcement in out for out in outs], [False, False, True, False])
+        self.assertEqual(outs[2].count("critic version changed"), 1)
+        self.assertEqual(self.versions(), [(self.OLD, None), (self.OLD, None), (self.NEW, True), (self.NEW, None)])
+
+    def test_the_version_is_compared_with_the_latest_earlier_review_not_the_first(self) -> None:
+        outs = [self.review_with(version, "--run", f"L{number}")[1] for number, version in enumerate("ABBA", start=1)]
+        self.assertEqual(self.versions(), [("A", None), ("B", True), ("B", None), ("A", True)])
+        self.assertIn("critic version changed: B -> A (first review on this version)", outs[3])
+
+    def test_a_review_without_a_version_is_skipped_when_looking_for_the_previous_one(self) -> None:
+        self.review_with("A", "--run", "S1")
+        self.assertEqual(self.cli("review", "--from-file", str(self.saved_review()), "--run", "S2")[0], 0)
+        self.review(self.fake_claude(review_text(), version_exit_code=1), "--run", "S3")
+        _, out, _ = self.review_with("B", "--run", "S4")
+        self.assertIn("critic version changed: A -> B (first review on this version)", out)
+        self.assertEqual(self.versions(), [("A", None), (None, None), (None, None), ("B", True)])
+
+    def test_a_review_with_no_version_in_between_is_no_change(self) -> None:
+        self.review_with("A", "--run", "N1")
+        self.review(self.fake_claude(review_text(), version_exit_code=1), "--run", "N2")
+        _, out, _ = self.review_with("A", "--run", "N3")
+        self.assertNotIn("critic version changed", out)
+        self.assertEqual(self.versions(), [("A", None), (None, None), ("A", None)])
+
+    def test_the_announcement_comes_before_the_findings_table(self) -> None:
+        self.review_with("A", "--run", "T1")
+        _, out, _ = self.review(self.fake_claude(review_text(FINDING_A), version="B"), "--run", "T2")
+        self.assertLess(out.index("critic version changed"), out.index("rule_id"))
+
+    def test_a_review_that_fails_leaves_the_announcement_for_the_next_one(self) -> None:
+        self.review_with("A", "--run", "F1")
+        code, out, _ = self.review_with("B", "--run", "F2", stdout="The model printed no JSON.\n")
+        self.assertEqual(code, 1)
+        self.assertNotIn("critic version changed", out)
+        _, out, _ = self.review_with("B", "--run", "F3")
+        self.assertIn("critic version changed: A -> B (first review on this version)", out)
+        self.assertEqual(self.versions(), [("A", None), ("B", True)])
+
+    def test_nothing_is_asked_or_announced_when_no_review_runs(self) -> None:
+        self.write_config(rules_files=["rules.md"], max_review_rounds=1)
+        self.review_with("A", "--run", "D1")
+        newer = self.fake_claude(review_text(), version="B")
+        self.assertEqual(self.review(newer, "--dry-run")[0], 0)  # a dry run past the cap previews and runs nothing
+        self.assertEqual(self.review(newer, "--run", "D2")[0], 3)  # a refused round costs nothing
+        _, out, err = self.cli("review", "--from-file", str(self.reviews_dir() / "D1.txt"), "--run", "D1")  # a replay
+        self.assertEqual(err, "")
+        self.assertNotIn("critic version", out)
+        self.assertEqual(self.version_asks(), [["--version"]])
+        self.assertEqual(self.versions(), [("A", None)])
+
+    def test_a_missing_claude_is_reported_once_and_does_not_also_warn_about_the_version(self) -> None:
+        code, _, err = self.review(self.tmp / "no-such-claude", "--run", "R1")
+        self.assertEqual(code, 1)
+        self.assertNotIn("warning", err)
+        self.assertEqual(err.count("not found on PATH"), 1)
+
+
+class ReplacedCriticVersionTest(unittest.TestCase):
+    def test_it_is_the_latest_recorded_version_when_this_one_differs(self) -> None:
+        events = [review_round(reviewer_version="A"), review_finding(), review_round(reviewer_version="B", run="r2")]
+        self.assertEqual(replaced_critic_version(events, "C"), "B")
+        self.assertIsNone(replaced_critic_version(events, "B"))
+
+    def test_there_is_nothing_to_replace_without_a_version_to_compare(self) -> None:
+        self.assertIsNone(replaced_critic_version([review_round(reviewer_version="A")], None))
+        self.assertIsNone(replaced_critic_version([], "A"))
+        self.assertIsNone(replaced_critic_version([review_round(), review_round(reviewer_version=None)], "A"))  # old, and null
+
+    def test_a_review_with_a_null_version_is_not_the_previous_one(self) -> None:
+        events = [review_round(reviewer_version="A"), review_round(reviewer_version=None, run="r2", source="file")]
+        self.assertEqual(replaced_critic_version(events, "B"), "A")
+        self.assertIsNone(replaced_critic_version(events, "A"))
+
+
+def numbered(count: int, width: int = 0) -> list[str]:
+    """`line 1` .. `line <count>`, each padded with dots to `width` characters."""
+    return [f"line {number}".ljust(width, ".") for number in range(1, count + 1)]
+
+
+def joined(first: int, last: int) -> str:
+    return "\n".join(f"line {number}" for number in range(first, last + 1))
+
+
+class SnippetWindowTest(unittest.TestCase):
+    def test_three_lines_either_side_of_the_flagged_one(self) -> None:
+        self.assertEqual(snippet_around(numbered(20), 10), joined(7, 13))
+
+    def test_the_start_and_end_of_the_file_clip_the_window_and_say_nothing(self) -> None:
+        lines = numbered(10)
+        self.assertEqual(snippet_around(lines, 1), joined(1, 4))
+        self.assertEqual(snippet_around(lines, 2), joined(1, 5))
+        self.assertEqual(snippet_around(lines, 9), joined(6, 10))
+        self.assertEqual(snippet_around(lines, 10), joined(7, 10))
+        self.assertEqual(snippet_around(["only"], 1), "only")
+
+    def test_a_line_the_file_does_not_have_has_no_snippet(self) -> None:
+        for line in (0, 11, 1000):
+            self.assertIsNone(snippet_around(numbered(10), line), line)
+        self.assertIsNone(snippet_around([], 1))
+
+    def test_seven_lines_that_fit_the_budget_exactly_are_kept_whole(self) -> None:
+        lines = ["x" * 85] * 3 + ["x" * 84] + ["x" * 85] * 3  # 6 * 85 + 84 characters and 6 line breaks: 600
+        whole = snippet_around(lines, 4)
+        self.assertEqual((len(whole), len(whole.splitlines())), (MAX_SNIPPET_CHARS, 7))
+        self.assertNotIn(TRUNCATED_MARK, whole)
+
+    def test_one_character_over_the_budget_drops_a_line_and_says_so(self) -> None:
+        over = snippet_around(["x" * 85] * 7, 4)  # 601
+        shown = over.splitlines()
+        self.assertEqual(shown, ["x" * 85] * 6 + [TRUNCATED_MARK])
+
+    def test_long_lines_are_dropped_farthest_first_and_the_flagged_line_stays(self) -> None:
+        lines = [f"{number}:" + "y" * 198 for number in range(1, 21)]  # 200 characters each
+        shown = snippet_around(lines, 10).splitlines()
+        self.assertEqual(shown, [lines[9], lines[10], TRUNCATED_MARK])  # ties between above and below go to the line above
+
+    def test_the_farthest_line_goes_first_when_the_window_is_lopsided(self) -> None:
+        lines = [f"{number}:" + "y" * 198 for number in range(1, 21)]
+        shown = snippet_around(lines, 2).splitlines()  # one line above the flagged one, three below
+        self.assertEqual(shown, [lines[1], lines[2], TRUNCATED_MARK])
+
+    def test_a_flagged_line_longer_than_the_budget_is_cut_and_marked(self) -> None:
+        self.assertEqual(snippet_around(["short", "z" * 5000, "short"], 2), "z" * MAX_SNIPPET_CHARS + "\n" + TRUNCATED_MARK)
+
+    def test_the_whole_snippet_stays_within_seven_lines_and_the_budget_plus_the_mark(self) -> None:
+        for width in (0, 50, 90, 100, 150, 250, 700):
+            for line in (1, 5, 20):
+                with self.subTest(width=width, line=line):
+                    snippet = snippet_around(numbered(20, width), line)
+                    self.assertLessEqual(len(snippet.splitlines()), 7)
+                    self.assertLessEqual(len(snippet), MAX_SNIPPET_CHARS + len(TRUNCATED_MARK) + 1)
+                    self.assertIn(f"line {line}", snippet)
+
+
+class SnippetLocatorTest(RepoCase):
+    def snapshot(self, basis: str = "local_pre_review") -> dict:
+        return {"basis": basis, "head": None, "omitted_files": [], "files": {
+            "src/a.py": {"status": "available", "text": "\n".join(numbered(10)) + "\n", "sha256": "x"},
+            "src/big.py": {"status": "unavailable", "reason": "Review evidence text budget exceeded."}}}
+
+    def locator(self, snapshot: dict):
+        return snapshot_snippets(make_config(root=self.repo, ledger_path=self.repo / ".style-findings.jsonl"), self.repo, snapshot)
+
+    def test_a_review_snippet_is_cut_from_the_snapshot_whichever_way_the_file_is_spelled(self) -> None:
+        locate = self.locator(self.snapshot())
+        for spelling in ("src/a.py", "./src/a.py", str(self.repo / "src" / "a.py")):
+            with self.subTest(spelling=spelling):
+                self.assertEqual(locate(spelling, 5), (joined(2, 8), "review"))
+
+    def test_what_the_snapshot_cannot_show_is_unavailable(self) -> None:
+        locate = self.locator(self.snapshot())
+        for file, line in (("src/missing.py", 1), ("src/big.py", 1), ("src/a.py", 11), ("src/a.py", 0),
+                           (str(self.tmp / "outside" / "a.py"), 1), ("../a.py", 1)):
+            with self.subTest(file=file, line=line):
+                self.assertEqual(locate(file, line), (None, "unavailable"))
+
+    def test_a_snapshot_that_is_not_verified_against_the_reviewed_target_is_not_used(self) -> None:
+        locate = self.locator(self.snapshot("local_pre_review_target_unverified"))
+        self.assertEqual(locate("src/a.py", 5), (None, "unavailable"))
+
+
+class CommittedSnippetLocatorTest(RepoCase):
+    """What the locator does with a file the snapshot does not hold: one unchanged since HEAD is cut from the HEAD it names."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        (self.repo / "src").mkdir()
+        (self.repo / "src" / "same.py").write_text("\n".join(numbered(10)) + "\n", encoding="utf-8")
+        (self.repo / ".ratchet").mkdir()
+        (self.repo / ".ratchet" / "notes.txt").write_text("\n".join(numbered(10)) + "\n", encoding="utf-8")
+        (self.repo / ".style-findings.jsonl").write_text("\n".join(numbered(10)) + "\n", encoding="utf-8")
+        git(self.repo, "add", "-A")
+        self.head = self.commit("c1")
+        self.config = make_config(root=self.repo, ledger_path=self.repo / ".style-findings.jsonl")
+
+    def locate(self, file: str, line: int = 5, **snapshot: object) -> tuple[str | None, str]:
+        held = {"basis": "local_pre_review", "head": self.head, "omitted_files": [], "files": {}, **snapshot}
+        return snapshot_snippets(self.config, self.repo, held)(file, line)
+
+    def test_a_file_the_snapshot_does_not_hold_is_cut_from_the_head_it_names(self) -> None:
+        for spelling in ("src/same.py", "./src/same.py", str(self.repo / "src" / "same.py")):
+            with self.subTest(spelling=spelling):
+                self.assertEqual(self.locate(spelling), (joined(2, 8), "review"))
+        self.assertEqual(self.locate("src/same.py", 11), (None, "unavailable"))
+
+    def test_it_is_the_head_the_snapshot_names_not_the_one_the_repo_has_now(self) -> None:
+        (self.repo / "src" / "same.py").write_text("moved on\n", encoding="utf-8")
+        git(self.repo, "add", "src")
+        self.commit("c2")
+        self.assertEqual(self.locate("src/same.py"), (joined(2, 8), "review"))
+
+    def test_a_file_the_snapshot_holds_is_never_replaced_by_the_head(self) -> None:
+        kept = {"status": "available", "text": "\n".join(f"snap {number}" for number in range(1, 11))}
+        self.assertEqual(self.locate("src/same.py", files={"src/same.py": kept}),
+                         ("\n".join(f"snap {number}" for number in range(2, 9)), "review"))
+        too_short = {"status": "available", "text": "only\ntwo lines"}  # the reviewer saw no line 5 here, whatever HEAD has
+        over_budget = {"status": "unavailable", "reason": "Review evidence text budget exceeded."}
+        for entry in (too_short, over_budget):
+            with self.subTest(entry=entry):
+                self.assertEqual(self.locate("src/same.py", files={"src/same.py": entry}), (None, "unavailable"))
+
+    def test_a_changed_file_the_snapshot_left_out_has_no_snippet(self) -> None:
+        self.assertEqual(self.locate("src/same.py", omitted_files=["src/same.py"]), (None, "unavailable"))
+        self.assertEqual(self.locate("src/same.py", omitted_files=["src/other.py"]), (joined(2, 8), "review"))
+
+    def test_the_files_ratchet_writes_itself_have_no_snippet(self) -> None:
+        for name in (".ratchet/notes.txt", ".style-findings.jsonl"):
+            with self.subTest(name=name):
+                self.assertEqual(self.locate(name), (None, "unavailable"))
+
+    def test_before_the_first_commit_there_is_nothing_to_read(self) -> None:
+        self.assertEqual(self.locate("src/same.py", head=None), (None, "unavailable"))
+
+    def test_a_snapshot_that_is_not_verified_against_the_reviewed_target_reads_nothing_from_the_head_either(self) -> None:
+        self.assertEqual(self.locate("src/same.py", basis="local_pre_review_target_unverified"), (None, "unavailable"))
+
+    def test_what_the_commit_does_not_hold_is_unavailable(self) -> None:
+        (self.repo / "untracked.py").write_text("\n".join(numbered(10)) + "\n", encoding="utf-8")
+        for file in ("untracked.py", "src/missing.py", "src", "../same.py", str(self.tmp / "outside" / "same.py")):
+            with self.subTest(file=file):
+                self.assertEqual(self.locate(file), (None, "unavailable"))
+
+
+class WorktreeSnippetLocatorTest(RepoCase):
+    def test_a_worktree_snippet_is_read_from_the_file_as_it_is_now(self) -> None:
+        (self.repo / "src").mkdir()
+        (self.repo / "src" / "a.py").write_text("\n".join(numbered(10)) + "\n", encoding="utf-8")
+        locate = worktree_snippets(self.repo)
+        self.assertEqual(locate("src/a.py", 5), (joined(2, 8), "worktree"))
+        self.assertEqual(locate(str(self.repo / "src" / "a.py"), 10), (joined(7, 10), "worktree"))
+        (self.repo / "src" / "a.py").write_text("changed\n", encoding="utf-8")
+        self.assertEqual(locate("src/a.py", 1), ("changed", "worktree"))
+
+    def test_a_worktree_snippet_never_comes_from_outside_the_repo_or_from_a_secret(self) -> None:
+        (self.tmp / "outside.txt").write_text("not yours\n", encoding="utf-8")
+        (self.repo / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
+        (self.repo / "link.txt").symlink_to(self.tmp / "outside.txt")
+        (self.repo / "empty.py").write_text("", encoding="utf-8")
+        locate = worktree_snippets(self.repo)
+        for file in ("../outside.txt", str(self.tmp / "outside.txt"), ".env", ".git/config", "link.txt", "absent.py",
+                     "empty.py", "."):
+            with self.subTest(file=file):
+                self.assertEqual(locate(file, 1), (None, "unavailable"))
+
+
+class SnippetCase(ReviewCase):
+    """src/a.py is committed as base-1..base-10 and edited to work-1..work-10, so the review sees the edit."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        (self.repo / "src").mkdir()
+        self.write_numbered("src/a.py", "base")
+        self.write_numbered("src/unchanged.py", "same")
+        git(self.repo, "add", "src")
+        self.commit("baseline")
+        self.write_numbered("src/a.py", "work")
+
+    def write_numbered(self, name: str, word: str) -> None:
+        (self.repo / name).write_text("".join(f"{word}-{number}\n" for number in range(1, 11)), encoding="utf-8")
+
+    def window(self, word: str, first: int, last: int) -> str:
+        return "\n".join(f"{word}-{number}" for number in range(first, last + 1))
+
+    def by_line(self) -> dict[tuple[str, int], dict]:
+        return {(event["file"], event["line"]): event for event in self.findings()}
+
+
+class ReviewSnippetTest(SnippetCase):
+    def test_a_snippet_is_the_file_as_it_was_when_the_review_started(self) -> None:
+        rewrite = f"open({str(self.repo / 'src' / 'a.py')!r}, 'w').write('edited while claude was busy\\n')"
+        script = self.fake_claude(review_text(review_item(file="src/a.py", line=5, category="p0e-1")), during_review=rewrite)
+        code, _, err = self.review(script, "--run", "R1")
+        self.assertEqual(code, 0, err)
+        self.assertEqual((self.repo / "src" / "a.py").read_text(encoding="utf-8"), "edited while claude was busy\n")
+        (finding,) = self.findings()
+        self.assertEqual(finding["snippet"], self.window("work", 2, 8))
+        self.assertEqual(finding["snippet_source"], "review")
+
+    def test_the_window_is_clipped_at_the_file_edges_and_the_file_may_be_named_by_absolute_path(self) -> None:
+        items = [review_item(file="src/a.py", line=1, category="p0e-1"),
+                 review_item(file=str(self.repo / "src" / "a.py"), line=10, category="p0e-1")]
+        self.assertEqual(self.review(self.fake_claude(review_text(*items)), "--run", "R1")[0], 0)
+        shown = self.by_line()
+        self.assertEqual(shown[("src/a.py", 1)]["snippet"], self.window("work", 1, 4))
+        self.assertEqual(shown[(str(self.repo / "src" / "a.py"), 10)]["snippet"], self.window("work", 7, 10))
+        self.assertEqual({event["snippet_source"] for event in self.findings()}, {"review"})
+
+    def test_what_the_review_never_saw_is_recorded_as_unavailable_not_left_out(self) -> None:
+        items = [review_item(file="src/missing.py", line=1), review_item(file="src/a.py", line=99),
+                 review_item(file="/elsewhere/x.py", line=1)]
+        self.assertEqual(self.review(self.fake_claude(review_text(*items)), "--run", "R1")[0], 0)
+        self.assertEqual(len(self.findings()), 3)
+        for event in self.findings():
+            with self.subTest(file=event["file"], line=event["line"]):
+                self.assertEqual(event["snippet_source"], "unavailable")
+                self.assertNotIn("snippet", event)
+
+    def test_a_secret_file_is_not_read_into_a_snippet_however_its_name_is_spelled(self) -> None:
+        (self.repo / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
+        git(self.repo, "add", "-f", ".env")
+        self.commit("a committed secret")  # unchanged since, so the snippet comes from the commit, not from the review's snapshot
+        names = (".env", ":.env", ":(top).env", ":(literal).env", ":/.env", str(self.repo / ".env"), str(self.repo / ":.env"))
+        items = [review_item(file=name, line=1, category="p0e-1") for name in names]
+        self.assertEqual(self.review(self.fake_claude(review_text(*items)), "--run", "R1")[0], 0)
+        self.assertEqual(len(self.findings()), len(names))
+        for event in self.findings():
+            with self.subTest(file=event["file"]):
+                self.assertEqual(event["snippet_source"], "unavailable")
+                self.assertNotIn("snippet", event)
+        self.assertNotIn("secret", self.ledger.read_text(encoding="utf-8"))
+
+    def test_findings_on_the_same_line_share_one_snippet(self) -> None:
+        items = [review_item(file="src/a.py", line=5, category="p0e-1"),
+                 review_item(file="src/a.py", line=5, summary="Another problem", category="p1-1")]
+        self.review(self.fake_claude(review_text(*items)), "--run", "R1")
+        (finding,) = self.findings()
+        self.assertEqual(len(finding["also_matches"]), 1)
+        self.assertEqual((finding["snippet"], finding["snippet_source"]), (self.window("work", 2, 8), "review"))
+
+    def test_long_lines_are_shortened_and_the_snippet_says_so(self) -> None:
+        (self.repo / "src" / "a.py").write_text("".join(f"{number}: " + "w" * 200 + "\n" for number in range(1, 11)), encoding="utf-8")
+        self.review(self.fake_claude(review_text(review_item(file="src/a.py", line=5, category="p0e-1"))), "--run", "R1")
+        (finding,) = self.findings()
+        shown = finding["snippet"].splitlines()
+        self.assertEqual(shown[-1], TRUNCATED_MARK)
+        self.assertTrue(shown[0].startswith("5: "), shown)
+        self.assertLessEqual(len(finding["snippet"]), MAX_SNIPPET_CHARS + len(TRUNCATED_MARK) + 1)
+        self.assertEqual(finding["snippet_source"], "review")
+
+    def test_a_target_review_has_no_verified_snapshot_and_records_unavailable(self) -> None:
+        item = review_item(file="src/a.py", line=5, category="p0e-1")
+        self.assertEqual(self.review(self.fake_claude(review_text(item)), "--run", "R1", "--target", "feature/x")[0], 0)
+        (finding,) = self.findings()
+        self.assertEqual(finding["snippet_source"], "unavailable")
+        self.assertNotIn("snippet", finding)
+        evidence = json.loads((self.reviews_dir() / "R1.evidence.json").read_text(encoding="utf-8"))
+        self.assertEqual(evidence["basis"], "local_pre_review_target_unverified")  # the reason it is not trusted
+
+    def test_a_replay_keeps_the_snippet_of_the_original_review(self) -> None:
+        item = review_item(file="src/a.py", line=5, category="p0e-1")
+        self.review(self.fake_claude(review_text(item)), "--run", "R1")
+        before = self.ledger_bytes()
+        self.write_numbered("src/a.py", "later")
+        code, out, _ = self.cli("review", "--from-file", str(self.reviews_dir() / "R1.txt"), "--run", "R1")
+        self.assertEqual(code, 0)
+        self.assertIn("no new findings", out)
+        self.assertEqual(self.ledger_bytes(), before)
+        self.assertEqual(self.findings()[0]["snippet"], self.window("work", 2, 8))
+
+    def test_the_snippet_does_not_change_what_the_table_or_the_ids_look_like(self) -> None:
+        _, out, _ = self.review(self.fake_claude(review_text(review_item(file="src/a.py", line=5, category="p0e-1"))), "--run", "R1")
+        self.assertIn("R1-1", out)
+        self.assertNotIn("work-", out)
+
+
+class FromFileSnippetTest(SnippetCase):
+    def review_file(self, *items: dict) -> str:
+        path = self.tmp / "earlier.txt"
+        path.write_text(review_text(*items), encoding="utf-8")
+        return str(path)
+
+    def test_the_snippet_is_read_from_the_working_tree_and_says_so(self) -> None:
+        items = [review_item(file="src/a.py", line=5, category="p0e-1"),
+                 review_item(file="src/unchanged.py", line=1, category="p0e-1")]
+        self.assertEqual(self.cli("review", "--from-file", self.review_file(*items), "--run", "F1")[0], 0)
+        shown = self.by_line()
+        self.assertEqual((shown[("src/a.py", 5)]["snippet"], shown[("src/a.py", 5)]["snippet_source"]),
+                         (self.window("work", 2, 8), "worktree"))
+        self.assertEqual((shown[("src/unchanged.py", 1)]["snippet"], shown[("src/unchanged.py", 1)]["snippet_source"]),
+                         (self.window("same", 1, 4), "worktree"))
+
+    def test_a_missing_file_or_line_is_unavailable(self) -> None:
+        items = [review_item(file="src/missing.py", line=1), review_item(file="src/a.py", line=99)]
+        self.assertEqual(self.cli("review", "--from-file", self.review_file(*items), "--run", "F1")[0], 0)
+        self.assertEqual([(event["snippet_source"], "snippet" in event) for event in self.findings()],
+                         [("unavailable", False), ("unavailable", False)])
+
+    def test_a_review_file_cannot_pull_text_from_outside_the_repo_into_the_ledger(self) -> None:
+        (self.tmp / "outside.txt").write_text("private text\n", encoding="utf-8")
+        (self.repo / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
+        items = [review_item(file="../outside.txt", line=1), review_item(file=str(self.tmp / "outside.txt"), line=1),
+                 review_item(file=".env", line=1)]
+        self.assertEqual(self.cli("review", "--from-file", self.review_file(*items), "--run", "F1")[0], 0)
+        self.assertEqual({event["snippet_source"] for event in self.findings()}, {"unavailable"})
+        self.assertNotIn("private text", self.ledger.read_text(encoding="utf-8"))
+        self.assertNotIn("secret", self.ledger.read_text(encoding="utf-8"))
+
+    def test_dry_run_shows_the_snippet_it_would_record(self) -> None:
+        item = review_item(file="src/a.py", line=5, category="p0e-1")
+        code, out, _ = self.cli("review", "--dry-run", "--from-file", self.review_file(item), "--run", "F1")
+        self.assertEqual(code, 0)
+        self.assertIn('"snippet_source":"worktree"', out)
+        self.assertIn("work-5", out)
+        self.assertFalse(self.ledger.exists())
+
+
+class OtherImportsKeepNoSnippetTest(SnippetCase):
+    """Only `review` reads code: `add` records what it is given and `ingest-code-review` records no snippet."""
+
+    def test_ingest_code_review_records_no_snippet_and_no_source(self) -> None:
+        item = review_item(file="src/a.py", line=5, category="p0e-1")
+        self.cli_ok("ingest-code-review", "--source", "l1", "--run", "R1", stdin=json.dumps([item]))
+        (finding,) = self.findings()
+        self.assertNotIn("snippet", finding)
+        self.assertNotIn("snippet_source", finding)
+
+    def test_add_keeps_the_snippet_it_was_given_and_adds_no_source(self) -> None:
+        item = {"id": "R1-1", "file": "src/a.py", "line": 5, "summary": "s", "failure_scenario": "f", "verdict": "PLAUSIBLE",
+                "rule_id": "P0E.1", "snippet": "typed by hand"}
+        self.cli_ok("add", "--source", "l1", "--run", "R1", stdin=json.dumps([item]))
+        (finding,) = self.findings()
+        self.assertEqual(finding["snippet"], "typed by hand")
+        self.assertNotIn("snippet_source", finding)
+
+
+class CommittedFileSnippetTest(SnippetCase):
+    """The evidence holds the files that had changed. One it did not hold had not, so the commit holds what the reviewer read."""
+
+    def at(self, file: str, line: int = 5) -> dict:
+        return review_item(file=file, line=line, category="p0e-1")
+
+    def commit_files(self, subject: str, **files: str) -> None:
+        """Write and commit files under src/, named by the keyword with `_` for `.`; each is ten lines `<word>-<n>`."""
+        for name, word in files.items():
+            self.write_numbered("src/" + name.replace("_", "."), word)
+        git(self.repo, "add", "src")
+        self.commit(subject)
+
+    def test_an_unchanged_committed_file_is_cut_from_the_commit_the_review_started_on(self) -> None:
+        def commit_while_claude_is_busy(argv: list[str], cwd: Path) -> str:
+            self.commit_files("late edit", unchanged_py="late")
+            return review_text(self.at("src/unchanged.py"))
+
+        with mock.patch("ratchet.cli.run_claude", side_effect=commit_while_claude_is_busy):
+            code, _, err = self.review(self.fake_claude(), "--run", "R1")
+        self.assertEqual(code, 0, err)
+        (finding,) = self.findings()
+        self.assertEqual((finding["snippet"], finding["snippet_source"]), (self.window("same", 2, 8), "review"))
+
+    def test_an_edit_made_while_the_reviewer_was_busy_does_not_reach_the_snippet(self) -> None:
+        rewrite = f"open({str(self.repo / 'src' / 'unchanged.py')!r}, 'w').write('edited while claude was busy\\n')"
+        script = self.fake_claude(review_text(self.at("src/unchanged.py")), during_review=rewrite)
+        self.assertEqual(self.review(script, "--run", "R1")[0], 0)
+        self.assertEqual((self.repo / "src" / "unchanged.py").read_text(encoding="utf-8"), "edited while claude was busy\n")
+        (finding,) = self.findings()
+        self.assertEqual((finding["snippet"], finding["snippet_source"]), (self.window("same", 2, 8), "review"))
+
+    def test_every_file_the_reviewer_could_read_has_a_snippet_whatever_state_it_was_in(self) -> None:
+        self.write_numbered("src/staged.py", "staged")
+        git(self.repo, "add", "src/staged.py")
+        self.write_numbered("untracked.py", "fresh")
+        items = [self.at(name) for name in ("src/a.py", "src/staged.py", "untracked.py", "src/unchanged.py")]
+        self.assertEqual(self.review(self.fake_claude(review_text(*items)), "--run", "R1")[0], 0)
+        shown = {event["file"]: (event["snippet"], event["snippet_source"]) for event in self.findings()}
+        self.assertEqual(shown, {"src/a.py": (self.window("work", 2, 8), "review"),
+                                 "src/staged.py": (self.window("staged", 2, 8), "review"),
+                                 "untracked.py": (self.window("fresh", 2, 8), "review"),
+                                 "src/unchanged.py": (self.window("same", 2, 8), "review")})
+
+    def test_what_the_working_tree_reader_refuses_is_refused_for_the_commit_too(self) -> None:
+        (self.repo / "config").mkdir()
+        (self.repo / ".env").write_text("TOKEN=secret\nline two\n", encoding="utf-8")
+        (self.repo / "config" / ".env.local").write_text("TOKEN=secret\nline two\n", encoding="utf-8")
+        (self.repo / "link.py").symlink_to("src/unchanged.py")
+        (self.repo / "src" / "big.py").write_text("x" * (MAX_SOURCE_BYTES + 1) + "\n", encoding="utf-8")
+        (self.repo / "src" / "binary.dat").write_bytes(b"line one\n\0\nline three\n")
+        (self.repo / "src" / "latin.txt").write_bytes(b"caf\xe9\nline two\n")
+        git(self.repo, "add", ".env", "config", "link.py", "src/big.py", "src/binary.dat", "src/latin.txt")
+        git(self.repo, "update-index", "--add", "--cacheinfo", f"160000,{git(self.repo, 'rev-parse', 'HEAD')},vendor/sub")
+        self.commit("files the readers refuse")
+        refused = [".env", "config/.env.local", "link.py", "src/big.py", "src/binary.dat", "src/latin.txt", "vendor/sub", "src",
+                   "../outside.txt", str(self.tmp / "outside.txt")]
+        items = [self.at("src/unchanged.py", 1), *(self.at(name, 1) for name in refused)]
+        self.assertEqual(self.review(self.fake_claude(review_text(*items)), "--run", "R1")[0], 0)
+        by_file = {event["file"]: event for event in self.findings()}
+        self.assertEqual(by_file["src/unchanged.py"]["snippet_source"], "review")  # the commit is being read at all
+        for name in refused:
+            with self.subTest(name=name):
+                self.assertEqual(by_file[name]["snippet_source"], "unavailable")
+                self.assertNotIn("snippet", by_file[name])
+        self.assertNotIn("secret", self.ledger.read_text(encoding="utf-8"))
+
+    def test_a_file_the_evidence_saw_change_but_could_not_keep_never_falls_back_to_the_commit(self) -> None:
+        self.commit_files("old files", b_py="old", gone_py="old")  # this commits the edit of src/a.py too, so edit it again
+        self.write_numbered("src/a.py", "edit")
+        (self.repo / "src" / "b.py").write_bytes(b"binary now\0\n")
+        (self.repo / "src" / "gone.py").unlink()
+        items = [self.at(name) for name in ("src/a.py", "src/b.py", "src/gone.py", "src/unchanged.py")]
+        with mock.patch("ratchet.review_evidence.MAX_TEXT_BYTES", 40):  # src/a.py is 70 bytes
+            self.assertEqual(self.review(self.fake_claude(review_text(*items)), "--run", "R1")[0], 0)
+        evidence = json.loads((self.reviews_dir() / "R1.evidence.json").read_text(encoding="utf-8"))
+        self.assertEqual({name: entry["status"] for name, entry in evidence["files"].items() if name.startswith("src/")},
+                         {"src/a.py": "unavailable", "src/b.py": "unavailable", "src/gone.py": "unavailable"})
+        by_file = {event["file"]: event for event in self.findings()}
+        self.assertEqual(by_file["src/unchanged.py"]["snippet_source"], "review")
+        for name in ("src/a.py", "src/b.py", "src/gone.py"):
+            with self.subTest(name=name):
+                self.assertEqual(by_file[name]["snippet_source"], "unavailable")
+                self.assertNotIn("snippet", by_file[name])
+
+    def test_a_changed_file_beyond_the_evidence_cap_never_falls_back_to_the_commit(self) -> None:
+        self.commit_files("old file", b_py="old")
+        git(self.repo, "add", "rules.md", ".ratchet.json")  # so that only the two src files differ from HEAD
+        self.commit("rules and config")
+        self.write_numbered("src/a.py", "edit")  # committed together with b.py above; changed again
+        self.write_numbered("src/b.py", "new")
+        with mock.patch("ratchet.review_evidence.MAX_FILES", 1):
+            self.assertEqual(self.review(self.fake_claude(review_text(self.at("src/a.py"), self.at("src/b.py"))), "--run", "R1")[0], 0)
+        evidence = json.loads((self.reviews_dir() / "R1.evidence.json").read_text(encoding="utf-8"))
+        self.assertEqual((list(evidence["files"]), evidence["omitted_files"]), (["src/a.py"], ["src/b.py"]))
+        by_file = {event["file"]: event for event in self.findings()}
+        self.assertEqual(by_file["src/a.py"]["snippet_source"], "review")
+        self.assertEqual(by_file["src/b.py"]["snippet_source"], "unavailable")
+        self.assertNotIn("snippet", by_file["src/b.py"])
+
+    def test_the_files_ratchet_writes_itself_never_fall_back_to_the_commit(self) -> None:
+        (self.repo / ".ratchet").mkdir()
+        (self.repo / ".ratchet" / "notes.txt").write_text("".join(f"note {number}\n" for number in range(1, 11)), encoding="utf-8")
+        self.append_raw(review_finding(display_id="X-1", run="X"))
+        git(self.repo, "add", ".ratchet/notes.txt", ".style-findings.jsonl")
+        self.commit("ratchet's own files")
+        (self.repo / ".ratchet" / "notes.txt").write_text("changed\n", encoding="utf-8")
+        self.append_raw(review_finding(display_id="X-2", run="X", line=11))
+        items = [self.at(".ratchet/notes.txt", 1), self.at(".style-findings.jsonl", 1)]
+        self.assertEqual(self.review(self.fake_claude(review_text(*items)), "--run", "R1")[0], 0)
+        by_file = {event["file"]: event for event in self.findings() if event["run_id"] == "R1"}
+        self.assertEqual({name: event["snippet_source"] for name, event in by_file.items()},
+                         {".ratchet/notes.txt": "unavailable", ".style-findings.jsonl": "unavailable"})
+
+    def test_an_untracked_file_git_ignores_has_no_snippet(self) -> None:
+        (self.repo / ".gitignore").write_text("ignored.log\n", encoding="utf-8")
+        self.write_numbered("ignored.log", "log")
+        self.assertEqual(self.review(self.fake_claude(review_text(self.at("ignored.log"))), "--run", "R1")[0], 0)
+        (finding,) = self.findings()
+        self.assertEqual(finding["snippet_source"], "unavailable")
+        self.assertNotIn("snippet", finding)
+
+    def test_a_target_review_has_no_snippet_even_for_an_unchanged_committed_file(self) -> None:
+        item = self.at("src/unchanged.py")
+        self.assertEqual(self.review(self.fake_claude(review_text(item)), "--run", "R1", "--target", "feature/x")[0], 0)
+        (finding,) = self.findings()
+        self.assertEqual(finding["snippet_source"], "unavailable")
+        self.assertNotIn("snippet", finding)
+
+    def test_a_replay_keeps_the_snippet_cut_from_the_commit(self) -> None:
+        self.review(self.fake_claude(review_text(self.at("src/unchanged.py"))), "--run", "R1")
+        before = self.ledger_bytes()
+        self.commit_files("moved on", unchanged_py="later")
+        code, out, _ = self.cli("review", "--from-file", str(self.reviews_dir() / "R1.txt"), "--run", "R1")
+        self.assertEqual(code, 0)
+        self.assertIn("no new findings", out)
+        self.assertEqual(self.ledger_bytes(), before)
+        self.assertEqual(self.findings()[0]["snippet"], self.window("same", 2, 8))
+
+
+class UnbornSnippetTest(ReviewCase):
+    def test_nothing_is_read_from_a_commit_when_the_review_began_before_the_first_commit(self) -> None:
+        def commit_while_claude_is_busy(argv: list[str], cwd: Path) -> str:
+            (self.repo / "late.py").write_text("late\n", encoding="utf-8")  # created and committed after the evidence was taken
+            git(self.repo, "add", "late.py")
+            self.commit("late")
+            return review_text(review_item(file="late.py", line=1, category="p0e-1"))
+
+        with mock.patch("ratchet.cli.run_claude", side_effect=commit_while_claude_is_busy):
+            code, _, err = self.review(self.fake_claude(), "--run", "R1")
+        self.assertEqual(code, 0, err)
+        (finding,) = self.findings()
+        self.assertEqual(finding["snippet_source"], "unavailable")
+        self.assertNotIn("snippet", finding)
+        self.assertEqual(self.review_runs()[0]["head"], "none")
+
+
+class LinkedWorktreeTest(SnippetCase):
+    """`review` is about the worktree it is run in. The ledger, the saved reviews and the config stay in the main one.
+
+    The two worktrees stand on different commits and hold different edits of src/a.py, so a review of the wrong one shows.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()  # main: HEAD is the baseline, and src/a.py is edited to work-N, not committed
+        self.baseline = git(self.repo, "rev-parse", "HEAD")
+        self.tree = self.tmp / "feature-tree"
+        git(self.repo, "worktree", "add", "-q", "-b", "feature", str(self.tree))
+        self.write_in_tree("src/unchanged.py", "feature")
+        git(self.tree, "add", "src")
+        git(self.tree, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "feature work")
+        self.tree_head = git(self.tree, "rev-parse", "HEAD")
+        self.write_in_tree("src/a.py", "feat")  # edited, not committed
+        self.main_head = self.commit("main moves on")
+        self.feature_key = f"feature@{self.baseline[:12]}"
+        self.main_key = f"main@{self.main_head[:12]}"
+
+    def write_in_tree(self, name: str, word: str) -> None:
+        (self.tree / name).write_text("".join(f"{word}-{number}\n" for number in range(1, 11)), encoding="utf-8")
+
+    def at(self, file: str) -> dict:
+        return review_item(file=file, line=5, category="p0e-1")
+
+    def both_files(self) -> str:
+        return review_text(self.at("src/a.py"), self.at("src/unchanged.py"))
+
+    def review_in(self, tree: Path, claude: Path, *argv: str) -> tuple[int, str, str]:
+        with mock.patch.dict(os.environ, {"RATCHET_CLAUDE_CMD": str(claude)}):
+            return self.cli("review", *argv, "--repo", str(tree), with_repo=False)
+
+    def snippets(self) -> dict[str, tuple[str, str]]:
+        return {event["file"]: (event["snippet"], event["snippet_source"]) for event in self.findings()}
+
+    def test_claude_runs_in_the_worktree_it_was_started_in_whichever_way_that_is_named(self) -> None:
+        script = self.fake_claude(review_text())
+        self.assertEqual(self.review_in(self.tree, script, "--run", "R1")[0], 0)
+        self.assertEqual(Path(self.call()["cwd"]).resolve(), self.tree.resolve())
+        (self.tree / "sub").mkdir()
+        cwd = os.getcwd()
+        os.chdir(self.tree / "sub")
+        self.addCleanup(os.chdir, cwd)
+        with mock.patch.dict(os.environ, {"RATCHET_CLAUDE_CMD": str(script)}):
+            self.assertEqual(self.cli("review", "--run", "R2", with_repo=False)[0], 0)  # no --repo: the current directory, one level down
+        self.assertEqual(Path(self.call()["cwd"]).resolve(), self.tree.resolve())
+
+    def test_the_evidence_the_round_key_and_the_findings_are_those_of_the_worktree_that_was_reviewed(self) -> None:
+        code, _, err = self.review_in(self.tree, self.fake_claude(self.both_files()), "--run", "R1")
+        self.assertEqual((code, err), (0, ""))
+        evidence = json.loads((self.reviews_dir() / "R1.evidence.json").read_text(encoding="utf-8"))
+        self.assertEqual(evidence["head"], self.tree_head)
+        self.assertEqual({name: entry["text"] for name, entry in evidence["files"].items()}, {"src/a.py": self.window("feat", 1, 10)})
+        self.assertEqual(list(evidence["source_stable_during_review"].items()), [("src/a.py", True)])
+        (run,) = self.review_runs()
+        self.assertEqual((run["head"], run["round_key"]), (self.tree_head, self.feature_key))
+        self.assertEqual(self.snippets(), {"src/a.py": (self.window("feat", 2, 8), "review"),
+                                           "src/unchanged.py": (self.window("feature", 2, 8), "review")})
+        self.assertEqual({event["sha"] for event in self.findings()}, {self.tree_head[:8]})
+
+    def test_the_ledger_the_saved_review_and_its_evidence_stay_in_the_main_worktree(self) -> None:
+        self.assertEqual(self.review_in(self.tree, self.fake_claude(self.both_files()), "--run", "R1")[0], 0)
+        self.assertEqual(self.saved(), ["R1.txt"])
+        self.assertTrue((self.reviews_dir() / "R1.evidence.json").exists())
+        self.assertEqual(len(self.findings()), 2)
+        self.assertFalse((self.tree / ".ratchet").exists())
+        self.assertFalse((self.tree / ".style-findings.jsonl").exists())
+
+    def test_the_main_worktree_is_reviewed_as_itself_while_a_linked_one_exists(self) -> None:
+        self.assertEqual(self.review(self.fake_claude(self.both_files()), "--run", "R1")[0], 0)
+        self.assertEqual(Path(self.call()["cwd"]).resolve(), self.repo.resolve())
+        (run,) = self.review_runs()
+        self.assertEqual((run["head"], run["round_key"]), (self.main_head, self.main_key))
+        self.assertEqual(self.snippets(), {"src/a.py": (self.window("work", 2, 8), "review"),
+                                           "src/unchanged.py": (self.window("same", 2, 8), "review")})
+        self.assertEqual({event["sha"] for event in self.findings()}, {self.main_head[:8]})
+
+    def test_a_from_file_review_takes_its_head_key_and_snippets_from_the_worktree_it_is_run_in(self) -> None:
+        saved = self.tmp / "earlier.txt"
+        saved.write_text(self.both_files(), encoding="utf-8")
+        code, _, err = self.cli("review", "--from-file", str(saved), "--run", "F1", "--repo", str(self.tree), with_repo=False)
+        self.assertEqual((code, err), (0, ""))
+        (run,) = self.review_runs()
+        self.assertEqual((run["head"], run["round_key"]), (self.tree_head, self.feature_key))
+        self.assertEqual(self.snippets(), {"src/a.py": (self.window("feat", 2, 8), "worktree"),
+                                           "src/unchanged.py": (self.window("feature", 2, 8), "worktree")})
+        self.assertEqual({event["sha"] for event in self.findings()}, {self.tree_head[:8]})
+
+    def test_a_file_named_by_its_absolute_path_is_looked_up_in_the_worktree_that_was_reviewed(self) -> None:
+        in_tree = [str(self.tree / "src" / "a.py"), str(self.tree / "src" / "unchanged.py")]
+        in_main = str(self.repo / "src" / "a.py")  # the other worktree is outside the one the reviewer was started in
+        code, _, err = self.review_in(self.tree, self.fake_claude(review_text(*(self.at(name) for name in (*in_tree, in_main)))), "--run", "R1")
+        self.assertEqual((code, err), (0, ""))
+        shown = {event["file"]: (event.get("snippet"), event["snippet_source"]) for event in self.findings()}
+        self.assertEqual(shown, {in_tree[0]: (self.window("feat", 2, 8), "review"),
+                                 in_tree[1]: (self.window("feature", 2, 8), "review"),
+                                 in_main: (None, "unavailable")})
+
+    def test_a_dry_run_names_the_worktree_it_would_review(self) -> None:
+        code, out, _ = self.review_in(self.tree, self.fake_claude(review_text()), "--dry-run", "--run", "R1")
+        self.assertEqual(code, 0)
+        self.assertIn(f"review round 1/3 for {self.feature_key}", out)
+        self.assertIn(f" in {self.tree} (run R1)", out)
+
+    def test_count_ends_with_the_rounds_of_the_worktree_it_is_run_in(self) -> None:
+        self.assertEqual(self.review_in(self.tree, self.fake_claude(review_text()), "--run", "R1")[0], 0)
+        in_tree = self.cli("count", "--repo", str(self.tree), with_repo=False)[1]
+        self.assertEqual(in_tree.splitlines()[-1], f"review rounds on {self.feature_key}: 1/3")
+        self.assertEqual(self.cli_ok("count").splitlines()[-1], f"review rounds on {self.main_key}: 0/3")
+
+    def test_each_worktree_counts_its_own_rounds_in_the_one_ledger(self) -> None:
+        self.write_config(rules_files=["rules.md"], max_review_rounds=1)
+        script = self.fake_claude(review_text())
+        self.assertEqual(self.review_in(self.tree, script, "--run", "R1")[0], 0)
+        self.assertEqual(self.review_in(self.tree, script, "--run", "R2")[0], 3)  # the feature change has used its round
+        self.assertEqual(self.review(script, "--run", "R3")[0], 0)  # the main worktree's has not
+        self.assertEqual([run["round_key"] for run in self.review_runs()], [self.feature_key, self.main_key])
+
+    def test_the_real_executable_run_from_inside_a_linked_worktree(self) -> None:
+        script = self.fake_claude(self.both_files())
+        proc = subprocess.run([sys.executable, str(REPO_ROOT / "bin" / "ratchet"), "review", "--run", "R1"], cwd=self.tree,
+                              capture_output=True, text=True, env={**os.environ, "RATCHET_CLAUDE_CMD": str(script)})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(Path(self.call()["cwd"]).resolve(), self.tree.resolve())
+        self.assertEqual(self.review_runs()[0]["head"], self.tree_head)
+        self.assertEqual(self.snippets()["src/unchanged.py"], (self.window("feature", 2, 8), "review"))
+
+
+class ReviewTreeTest(SnippetCase):
+    """The `tree` of a review_run is the worktree as the review started: what a later `ratchet wrapup` measures new work from."""
+
+    def object_files(self) -> set[str]:
+        root = self.repo / ".git" / "objects"
+        return {str(path.relative_to(root)) for path in root.rglob("*") if path.is_file()}
+
+    def saved_review(self) -> Path:
+        saved = self.tmp / "earlier.txt"
+        saved.write_text(review_text(review_item(file="src/a.py", line=5, category="p0e-1")), encoding="utf-8")
+        return saved
+
+    def test_the_tree_is_the_worktree_when_claude_started_not_when_it_finished(self) -> None:
+        late = self.repo / "late.txt"
+        busy = (f"open({str(self.repo / 'src' / 'a.py')!r}, 'w').write('edited while claude was busy\\n')\n"
+                f"open({str(late)!r}, 'w').write('created while claude was busy\\n')")
+        script = self.fake_claude(review_text(review_item(file="src/a.py", line=5, category="p0e-1")), during_review=busy)
+        code, _, err = self.review(script, "--run", "R1")
+        self.assertEqual((code, err), (0, ""))
+        self.assertTrue(late.exists())
+        (run,) = self.review_runs()
+        self.assertEqual(git(self.repo, "show", f"{run['tree']}:src/a.py"), self.window("work", 1, 10))  # the edit during the run is not in it
+        names = git(self.repo, "ls-tree", "-r", "--name-only", run["tree"]).split("\n")
+        self.assertNotIn("late.txt", names)
+        self.assertIn("rules.md", names)  # an untracked file is in it
+
+    def test_a_review_of_a_target_takes_no_tree_since_no_wrapup_measures_from_it(self) -> None:
+        before = self.object_files()
+        script = self.fake_claude(review_text(review_item(file="src/a.py", line=5, category="p0e-1")))
+        code, _, err = self.review(script, "--run", "R1", "--target", "feature/x")
+        self.assertEqual((code, err), (0, ""))
+        (run,) = self.review_runs()
+        self.assertEqual((run["round_key"], "tree" in run), ("target:feature/x", False))  # a key that names no branch
+        self.assertEqual(self.object_files(), before)  # and no objects were written for it
+        self.assertEqual(self.review(script, "--run", "R2")[0], 0)
+        self.assertEqual(["tree" in run for run in self.review_runs()], [False, True])  # a review of the branch still takes one
+
+    def test_a_saved_review_records_the_tree_of_the_worktree_when_the_file_was_read(self) -> None:
+        expected = state_tree(self.repo)
+        self.assertEqual(self.cli("review", "--from-file", str(self.saved_review()), "--run", "F1")[0], 0)
+        (run,) = self.review_runs()
+        self.assertEqual((run["source"], run["tree"]), ("file", expected))
+
+    def test_a_dry_run_of_a_saved_review_and_a_replay_of_a_recorded_one_take_no_tree(self) -> None:
+        saved = self.saved_review()
+        before = self.object_files()
+        code, out, _ = self.cli("review", "--dry-run", "--from-file", str(saved), "--run", "F1")
+        self.assertEqual(code, 0)
+        self.assertNotIn('"tree"', out)  # the event it shows would be written without one
+        self.assertEqual((self.object_files(), self.review_runs()), (before, []))
+        self.assertEqual(self.cli("review", "--from-file", str(saved), "--run", "F1")[0], 0)
+        recorded = self.review_runs()
+        self.assertEqual(len(recorded), 1)
+        (self.repo / "src" / "a.py").write_text("changed after the review\n", encoding="utf-8")  # a tree taken now would be new objects
+        before = self.object_files()
+        code, out, _ = self.cli("review", "--from-file", str(saved), "--run", "F1")
+        self.assertIn("replay of run F1", out)
+        self.assertEqual((self.object_files(), self.review_runs()), (before, recorded))
+
+    def test_a_dry_run_that_would_run_claude_takes_no_tree_either(self) -> None:
+        before = self.object_files()
+        code, out, _ = self.review(self.fake_claude(review_text()), "--dry-run", "--run", "R1")
+        self.assertEqual(code, 0)
+        self.assertIn("nothing run or written", out)
+        self.assertEqual((self.object_files(), self.review_runs()), (before, []))
+
+    def test_a_tree_that_cannot_be_taken_is_said_and_the_review_goes_on_without_it(self) -> None:
+        refusal = RatchetError("`git add -A` failed in /x (rc=128): no space left\nthe second line is not shown")
+        with mock.patch("ratchet.cli.state_tree", side_effect=refusal):
+            code, _, err = self.review(self.fake_claude(review_text(review_item(file="src/a.py", line=5, category="p0e-1"))), "--run", "R1")
+            saved_code, _, saved_err = self.cli("review", "--from-file", str(self.saved_review()), "--run", "F1")
+        warning = ("warning: working tree not recorded (`git add -A` failed in /x (rc=128): no space left); "
+                   "this review_run has no tree, so a wrap-up measures from its HEAD")
+        self.assertEqual((code, saved_code), (0, 0), (err, saved_err))
+        self.assertIn(warning, err)
+        self.assertIn(warning, saved_err)
+        self.assertNotIn("the second line", err)
+        self.assertEqual([("tree" in run, run["source"]) for run in self.review_runs()], [(False, "claude"), (False, "file")])
+        self.assertEqual(self.saved(), ["F1.txt", "R1.txt"])  # both reviews were kept
+
+
+class CaseSpelledSecretSnippetTest(SnippetCase):
+    """macOS and Windows open `.ENV` as the file `.env`: no snippet is cut from a secret under any spelling of its name."""
+
+    NAMES = (".ENV", ".Env", ".ENV.local", "sub/.ENV", ".GIT/config", ".Git/config", ".git/CONFIG")
+
+    def assert_no_snippet(self, count: int) -> None:
+        self.assertEqual(len(self.findings()), count)
+        for event in self.findings():
+            with self.subTest(file=event["file"]):
+                self.assertEqual(event["snippet_source"], "unavailable")
+                self.assertNotIn("snippet", event)
+        self.assertNotIn("secret", self.ledger.read_text(encoding="utf-8"))
+
+    def test_a_review_read_from_a_file_cuts_no_snippet_from_the_working_tree(self) -> None:
+        (self.repo / "sub").mkdir()
+        for name in (".env", ".env.local", "sub/.env"):
+            (self.repo / name).write_text("TOKEN=secret\n", encoding="utf-8")
+        git(self.repo, "remote", "add", "origin", "https://user:secret@example.invalid/org/repo.git")  # `.git/config` holds a token now
+        saved = self.tmp / "earlier.txt"
+        saved.write_text(review_text(*[review_item(file=name, line=1, category="p0e-1") for name in self.NAMES]), encoding="utf-8")
+        self.assertEqual(self.cli("review", "--from-file", str(saved), "--run", "F1")[0], 0)
+        self.assert_no_snippet(len(self.NAMES))
+
+    def test_a_review_cuts_no_snippet_from_a_committed_secret(self) -> None:
+        (self.repo / ".ENV").write_text("TOKEN=secret\n", encoding="utf-8")
+        git(self.repo, "add", "-f", ".ENV")
+        self.commit("a committed secret")  # unchanged since, so a snippet would come from the commit
+        names = (".ENV", ".Env", str(self.repo / ".ENV"))
+        items = [review_item(file=name, line=1, category="p0e-1") for name in names]
+        self.assertEqual(self.review(self.fake_claude(review_text(*items)), "--run", "R1")[0], 0)
+        self.assert_no_snippet(len(names))
+
+
+class WholeValueRunIdTest(ReviewCase):
+    """`$` also matches before a final newline, so `F1\\n` passed the check and became the file name `F1\\n.txt`."""
+
+    def test_a_run_id_with_a_final_newline_is_refused(self) -> None:
+        for bad in ("F1\n", "r1\n", "a.b-c_d\n"):
+            with self.subTest(run=bad), self.assertRaises(RatchetError):
+                check_run_id(bad)
+        self.assertEqual(check_run_id("a.b-c_d"), "a.b-c_d")
+
+    def test_such_a_run_id_stops_a_review_before_claude_runs_or_anything_is_saved(self) -> None:
+        code, _, err = self.review(self.fake_claude(review_text(FINDING_A)), "--run", "F1\n")
+        self.assertEqual(code, 1)
+        self.assertIn("must match", err)
+        self.assertFalse(self.record.exists())  # claude was never called
+        self.assertEqual((self.saved(), self.ledger.exists()), ([], False))
+
+    def test_a_saved_review_read_back_with_such_a_run_id_leaves_nothing_behind(self) -> None:
+        saved = self.tmp / "earlier.txt"
+        saved.write_text(review_text(FINDING_A), encoding="utf-8")
+        code, _, err = self.cli("review", "--from-file", str(saved), "--run", "F1\n")
+        self.assertEqual(code, 1)
+        self.assertIn("must match", err)
+        self.assertEqual((self.saved(), self.ledger.exists()), ([], False))
 
 
 if __name__ == "__main__":

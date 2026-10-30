@@ -123,6 +123,7 @@ flowchart LR
 | Digest | `compile` | 不需要：确定性文本 |
 | 导入 | `ingest-code-review`、`add`、`review --from-file` | 不需要：任何 reviewer 的 JSON 都行 |
 | 处置结果 | `infer`、`gate record`、`gate pass`、`label-page`、`apply-labels` | 不需要 |
+| 直接标注 | `label` | 不需要：人在宿主弹窗里给出的判断，直接记成一条 `human` 处置结果 |
 | 决策记录 | `decision-context`、`prepare-decisions`、`apply-decisions`、`apply-proposals`、`rollback-proposals` | 不需要：它们不调用模型 |
 | 运行 reviewer | `review` | 需要：它运行 `claude -p "/code-review <level>"` |
 | 评估与提问 | `maintain` skill | 需要：由宿主 agent 写评估并发起原生提问 |

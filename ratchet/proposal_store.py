@@ -19,10 +19,22 @@ def fingerprint(value: object) -> str:
     return hashlib.sha256(encoded(value).encode()).hexdigest()
 
 
+def _is_protected(part: str) -> bool:
+    """One path segment that is `..` or names a secret: `.git` (its config can hold a remote URL with a token) or `.env*`.
+
+    Compared with the case folded: macOS (APFS) and Windows open `.ENV` as the file `.env` and `.GIT/config` as `.git/config`.
+    NFC/NFD normalization adds nothing: both names are ASCII, and no other code point folds into them (checked over every
+    code point). On APFS only the case variants open them; fullwidth, zero-width and trailing-dot spellings do not
+    (probed 2026-10-29).
+    """
+    folded = part.casefold()
+    return folded in ("..", ".git") or folded.startswith(".env")
+
+
 def local_path(root: Path, name: str) -> Path:
     """State and write targets stay inside the repo, with no symlink or secret-file traversal."""
     relative = Path(name)
-    if relative.is_absolute() or not relative.parts or any(p in ("..", ".git") or p.startswith(".env") for p in relative.parts):
+    if relative.is_absolute() or not relative.parts or any(_is_protected(part) for part in relative.parts):
         raise RatchetError(f"unsafe proposal path: {name}")
     path = root
     for part in relative.parts:

@@ -21,6 +21,13 @@ def validate(instance: Any, schema: dict) -> list[str]:
     return validate_sub(instance, schema, schema)
 
 
+def _matches_pattern(pattern: str, text: str) -> bool:
+    """A JSON Schema pattern is ECMA-262, where `$` holds only at the very end of the text. Python's also holds before a final
+    newline, which would let "<40 hex>\\n" through here while any other validator of the schema file rejects it: `\\Z` is the end."""
+    assert "$" not in pattern[:-1], f"{pattern}: a `$` other than the last character needs its own translation"
+    return re.search(pattern[:-1] + r"\Z" if pattern.endswith("$") else pattern, text) is not None
+
+
 def _resolve(ref: str, root: dict) -> dict:
     assert ref.startswith("#/"), f"unsupported $ref {ref}"
     node: Any = root
@@ -52,7 +59,7 @@ def _check(instance: Any, schema: dict, root: dict, path: str, errors: list[str]
     if isinstance(instance, str):
         if len(instance) < schema.get("minLength", 0):
             errors.append(f"{path}: shorter than minLength")
-        if "pattern" in schema and re.search(schema["pattern"], instance) is None:
+        if "pattern" in schema and not _matches_pattern(schema["pattern"], instance):
             errors.append(f"{path}: {instance!r} does not match {schema['pattern']}")
     if type(instance) is int and "minimum" in schema and instance < schema["minimum"]:
         errors.append(f"{path}: below minimum {schema['minimum']}")

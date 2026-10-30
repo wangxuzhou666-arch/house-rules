@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 from unittest import mock
 
-from support import RepoCase, review_finding
+from support import RepoCase, git, review_finding
 from ratchet.config import load_config
 from ratchet.decision_context import _read_source, assess, build_context
 from ratchet.errors import RatchetError
@@ -158,3 +158,36 @@ class DecisionContextTest(RepoCase):
         broken["assessments"][0]["changes"].pop()
         with self.assertRaisesRegex(RatchetError, "merge must"):
             self.prepare(broken)
+
+
+class ProtectedNameContextTest(RepoCase):
+    """A ledger finding can name any file; the packet must not carry a protected one just because it is spelled in another case."""
+
+    NAMES = (".ENV", ".Env", ".ENV.local", "sub/.ENV", ".GIT/config", ".Git/config", ".git/CONFIG")
+
+    def setUp(self):
+        super().setUp()
+        self.with_sample_rules()
+        (self.repo / "sub").mkdir()
+        for name in (".env", ".env.local", "sub/.env"):
+            (self.repo / name).write_text("TOKEN=secret\nMORE=secret\n")
+        (self.repo / "a.py").write_text("first\nsecond\n")
+        git(self.repo, "remote", "add", "origin", "https://user:secret@example.invalid/org/repo.git")  # `.git/config` holds a token now
+        self.append_raw(*[review_finding(display_id=f"R1-{number}", file=name, line=1) for number, name in enumerate(self.NAMES, 1)],
+                        review_finding(display_id="R1-99", file="a.py", line=1))
+
+    def test_a_protected_file_in_another_case_is_unavailable_and_an_ordinary_one_is_read(self):
+        packet = json.loads(self.cli_ok("decision-context"))
+        sources = {item["finding"]["file"]: item["source"] for item in packet["findings"]}
+        self.assertEqual(sources["a.py"]["text"], "first\nsecond")
+        for name in self.NAMES:
+            with self.subTest(name=name):
+                self.assertEqual(sources[name]["status"], "unavailable")
+                self.assertIn("unsafe proposal path", sources[name]["reason"])
+        self.assertFalse("secret" in json.dumps(packet), "a secret reached the packet")
+
+    def test_a_chosen_range_of_such_a_file_is_refused_too(self):
+        finding_id = f"demo-repo:l1:R1:R1-{self.NAMES.index('.ENV') + 1}"
+        packet = json.loads(self.cli_ok("decision-context", "--finding", finding_id, "--location", finding_id + "=1:2"))
+        self.assertEqual(packet["findings"][0]["source"]["status"], "unavailable")
+        self.assertFalse("secret" in json.dumps(packet), "a secret reached the packet")

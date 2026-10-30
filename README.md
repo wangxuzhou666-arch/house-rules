@@ -97,13 +97,15 @@ With the plugin:
 
 1. In your repo, run `/review-ratchet:setup`. It previews and then runs `ratchet init`: a rules file (the bundled template is a draft to adjust), the compiled style digest, an `@import` line in `CLAUDE.md`, git hooks (each is run once to prove it is reached) and `.gitignore` entries. It ends with a ready `git add ... && git commit` line for the files it created: run it, because the pre-commit hook checks the staged copies.
 2. Run `/review-ratchet:review`. It runs Claude Code's `/code-review`, records the findings against your rules' clause IDs, and shows them in a table.
-3. To maintain the rules from those findings, run `/review-ratchet:maintain`. The agent gathers code evidence, proposes scoped changes, and asks through the host's native question tool. Accepted changes update the rules and digest; rejection, deferral and requests for revision are also recorded. No custom UI or manual JSON copying is required. See [the workflow and assessment contract](docs/DECISION-CARDS.md).
+3. When you finish a stretch of work, run `/review-ratchet:wrapup` (or say "wrap up"). It counts what changed since the last review, reviews once only if enough did (`wrapup_min_changed_lines`, default 200, or `wrapup_min_files`, default 5), and asks one question only when the review found something no rule covers. See [wrap-up](docs/WRAPUP.md).
+4. To maintain the rules from those findings, run `/review-ratchet:maintain`. The agent gathers code evidence, proposes scoped changes, and asks through the host's native question tool. Accepted changes update the rules and digest; rejection, deferral and requests for revision are also recorded. No custom UI or manual JSON copying is required. See [the workflow and assessment contract](docs/DECISION-CARDS.md).
 
 Without the plugin, from a terminal in your repo:
 
 ```sh
 /path/to/review-ratchet/bin/ratchet init            # asks a few questions; --yes accepts the defaults, --dry-run only prints the plan
 /path/to/review-ratchet/bin/ratchet review          # runs claude -p "/code-review high", records the findings
+/path/to/review-ratchet/bin/ratchet wrapup          # counts the work since the last review; reviews once only if enough changed
 /path/to/review-ratchet/bin/ratchet count --by-rule # what is open, by clause
 ```
 
@@ -119,6 +121,7 @@ the future [personal decision metrics](docs/DECISION-METRICS.md) direction.
 ```sh
 bin/ratchet init [--yes] [--dry-run]                                       # set up this repo (config, rules file, digest, CLAUDE.md, hooks, .gitignore)
 bin/ratchet review [--level high] [--target T] [--from-file F] [--over-cap] # run /code-review, save the raw output, record the findings; 3 rounds per change, then exit 3
+bin/ratchet wrapup [--level high] [--base REF] [--from-file F] [--json] [--dry-run] # count what changed since the last review; review once if enough did (docs/WRAPUP.md); exit 3 at the round cap
 bin/ratchet ingest-code-review --source l1 --run R12 < review-output.txt   # JSON array, or text containing a ```json block
 bin/ratchet add --source l2 --run R12 --input report.json                  # explicit report shape
 bin/ratchet count [--by-rule [--label-source]]                             # totals, open findings, by source / rule / how the rule was labeled
@@ -126,7 +129,10 @@ bin/ratchet decision-context [--finding ID] [--assessment FILE]            # evi
 bin/ratchet prepare-decisions --assessment FILE [--finding ID]            # persist analysis and proposed edits for native human questions
 bin/ratchet apply-decisions --input FILE                                  # record actual answers and apply accepted groups
 bin/ratchet decision-summary                                             # author-specific accept/revise/reject/defer counts, not accuracy
+bin/ratchet rollback-proposals --batch ID [--dry-run]                      # restore the rules, digest and changelog of an applied batch, unless they were edited since
+bin/ratchet recover-proposals                                              # restore the files of an interrupted apply or rollback (takes no --dry-run: it only restores)
 bin/ratchet infer [--all] [--quiet]                                        # close findings from Fixes-Finding trailers and gate passes
+bin/ratchet label r3-2 r3-5 --outcome false_positive [--note TEXT]         # record an outcome by id (the short ids the review table shows), no label page; all or nothing
 bin/ratchet label-page                                                     # local HTML page to label what is still open
 bin/ratchet apply-labels < labels.json                                     # record the labels copied from that page
 bin/ratchet compile                                                        # rules files -> CODING-STYLE.digest.md (+ marker blocks in inject_targets)
@@ -136,7 +142,7 @@ bin/ratchet gate pass --files a.py b.py                                    # the
 bin/ratchet vendor --into third_party/ratchet [--check [--against-source]] # copy the tool into a repo / verify that copy
 ```
 
-Every command but `vendor` takes `--repo PATH`; all but `init` and `vendor` also take `--ledger FILE` and `--config FILE`. Every command that writes takes `--dry-run`, which writes nothing and prints what it would have written (for `compile`, a diff; for `init`, the plan; for `review`, the command it would run).
+Every command but `vendor` takes `--repo PATH`; all but `init` and `vendor` also take `--ledger FILE` and `--config FILE`. Every command that writes takes `--dry-run`, except `recover-proposals`, which only restores what an interrupted write left half done. `--dry-run` writes nothing and prints what it would have written (for `compile`, a diff; for `init`, the plan; for `review`, the command it would run; for `wrapup`, the measurement and whether it would review).
 
 To give Claude Code's built-in `/code-review` the rules by hand instead of `init`, run `ratchet compile` and add one line to the repo's `CLAUDE.md`:
 

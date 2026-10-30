@@ -123,6 +123,7 @@ Most of the loop is plain files and a standard-library Python CLI; Claude Code s
 | Digest | `compile` | no: deterministic text |
 | Import | `ingest-code-review`, `add`, `review --from-file` | no: any reviewer's JSON |
 | Outcomes | `infer`, `gate record`, `gate pass`, `label-page`, `apply-labels` | no |
+| Direct label | `label` | no: a person's answer in the host's question popup is recorded straight as a `human` outcome |
 | Decision records | `decision-context`, `prepare-decisions`, `apply-decisions`, `apply-proposals`, `rollback-proposals` | no: they call no model |
 | Run the reviewer | `review` | yes: it runs `claude -p "/code-review <level>"` |
 | Assess and ask | the `maintain` skill | yes: the host agent writes the assessment and asks the native question |

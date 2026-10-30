@@ -5,25 +5,29 @@ import hashlib
 from pathlib import Path
 
 from .errors import RatchetError
+from .git import committed_blob
 from .proposal_store import local_path
 
 MAX_SOURCE_BYTES = 256 * 1024
 
 
-def read_source(root: Path, name: str, line: int | None, end_line: int | None = None) -> dict:
-    """Bounded, repo-local text only. Missing/unsafe evidence stays explicitly unavailable."""
-    result = {"file": name, "absolute_path": None, "line": line,
-              "status": "unavailable", "version": "current_workspace"}
-    try:
-        path = Path(name)
-        relative = path.relative_to(root).as_posix() if path.is_absolute() else name
-        path = local_path(root, relative)
-        result.update(file=relative, absolute_path=str(path))
-        with path.open("rb") as handle:
-            data = handle.read(MAX_SOURCE_BYTES + 1)
-    except (OSError, ValueError, RatchetError) as exc:
-        result["reason"] = str(exc)
-        return result
+def _checked_path(root: Path, name: str) -> tuple[str, Path]:
+    """`name` relative to `root` (an absolute path inside `root` is accepted) and where that is on disk.
+
+    ValueError: an absolute path outside `root`. RatchetError: a path `local_path` refuses (`..`, `.git`, `.env*` in any case,
+    a symlink).
+    """
+    path = Path(name)
+    relative = path.relative_to(root).as_posix() if path.is_absolute() else name
+    return relative, local_path(root, relative)
+
+
+def _unavailable(name: str, line: int | None, version: str) -> dict:
+    return {"file": name, "absolute_path": None, "line": line, "status": "unavailable", "version": version}
+
+
+def _source_from_bytes(result: dict, data: bytes, line: int | None, end_line: int | None) -> dict:
+    """`result` with the file's text, or with the reason the bytes are not bounded UTF-8 text or the line is not in them."""
     if len(data) > MAX_SOURCE_BYTES or b"\0" in data:
         result["reason"] = "Source exceeds the text limit or is binary."
         return result
@@ -43,3 +47,38 @@ def read_source(root: Path, name: str, line: int | None, end_line: int | None = 
     result.update(status="available", line_start=start, line_end=end,
                   text="\n".join(lines[start - 1:end]))
     return result
+
+
+def read_source(root: Path, name: str, line: int | None, end_line: int | None = None) -> dict:
+    """Bounded, repo-local text only. Missing/unsafe evidence stays explicitly unavailable."""
+    result = _unavailable(name, line, "current_workspace")
+    try:
+        relative, path = _checked_path(root, name)
+        result.update(file=relative, absolute_path=str(path))
+        with path.open("rb") as handle:
+            data = handle.read(MAX_SOURCE_BYTES + 1)
+    except (OSError, ValueError, RatchetError) as exc:
+        result["reason"] = str(exc)
+        return result
+    return _source_from_bytes(result, data, line, end_line)
+
+
+def read_committed_source(root: Path, commit: str, name: str) -> dict:
+    """The whole file `name` as `commit` holds it, refused for the same reasons `read_source` refuses it.
+
+    The refusals are those very functions: `local_path` for the name (it looks at the working tree, which is right for a
+    file that has not changed since `commit`) and the same text checks on the bytes. On top of that the commit itself must
+    hold a regular file of at most MAX_SOURCE_BYTES there: not a symlink, a directory or a submodule, and not nothing.
+    """
+    result = _unavailable(name, None, f"commit:{commit}")
+    try:
+        relative, _ = _checked_path(root, name)
+        data = committed_blob(root, commit, relative, MAX_SOURCE_BYTES)
+    except (ValueError, RatchetError) as exc:
+        result["reason"] = str(exc)
+        return result
+    if data is None:
+        result["reason"] = "The commit holds no regular file of that size at that path."
+        return result
+    result["file"] = relative
+    return _source_from_bytes(result, data, None, None)

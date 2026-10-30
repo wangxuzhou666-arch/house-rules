@@ -2,7 +2,8 @@
 
 Four event kinds share one JSON-lines file: `finding` (something was flagged), `outcome` (what became of it),
 `gate_pass` (an automated gate passed over these files) and `review_run` (one review round of a change happened; it
-feeds the round cap and never touches a finding). Current state = fold of the events in file order.
+feeds the round cap, records which critic ran and on what HEAD and working tree, and never touches a finding). Current state = fold of
+the events in file order.
 Validation mirrors schemas/finding.v1.schema.json; tests/test_schema.py keeps the two in step.
 """
 from __future__ import annotations
@@ -22,6 +23,7 @@ Event = dict[str, Any]
 SOURCES = ("gate", "l1", "l2")
 REVIEW_SOURCES = ("l1", "l2")
 REVIEW_RUN_SOURCES = ("claude", "file")  # a review run by `claude -p`, or one read with --from-file
+SNIPPET_SOURCES = ("review", "worktree", "unavailable")  # where `ratchet review` read a finding's snippet from
 VERDICTS = ("CONFIRMED", "PLAUSIBLE")
 OUTCOMES = ("fixed", "dismissed", "false_positive")
 OUTCOME_BY = ("auto:commit", "auto:gate_pass", "human")
@@ -35,6 +37,7 @@ _SHA_RE = re.compile(r"^([0-9a-f]{7,40}|none)$")
 _SLUG_RE = re.compile(r"^[a-z0-9-]+$")
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _HEX12_RE = re.compile(r"^[0-9a-f]{12}$")
+_TREE_RE = re.compile(r"^[0-9a-f]{40}$")
 # Structural only: whether a clause id exists is decided against the configured rules files when an event is
 # created, never when old events are read back.
 _RULE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]*$")
@@ -56,7 +59,9 @@ def _nonempty_str(value: Any) -> bool:
 
 
 def _matches(pattern: re.Pattern[str]) -> Check:
-    return lambda value: isinstance(value, str) and pattern.match(value) is not None
+    """The whole value fits `pattern`. Not `match`: a pattern ends in `$`, which in Python also holds before a final newline
+    (so "<40 hex>\\n" would pass), where the same `$` in the schema file (ECMA-262) holds only at the very end."""
+    return lambda value: isinstance(value, str) and pattern.fullmatch(value) is not None
 
 
 def _one_of(options: tuple[str, ...]) -> Check:
@@ -65,6 +70,11 @@ def _one_of(options: tuple[str, ...]) -> Check:
 
 def _is_int_at_least(minimum: int) -> Check:
     return lambda value: type(value) is int and value >= minimum  # `type is int` keeps True/False out
+
+
+def _or_null(check: Check) -> Check:
+    """The same check, with an explicit JSON null also accepted: the field is known to be absent, not forgotten."""
+    return lambda value: value is None or check(value)
 
 
 def _is_also_matches(value: Any) -> bool:
@@ -100,11 +110,12 @@ _FINDING_FIELDS: dict[str, Check] = {
     "failure_scenario": _nonempty_str,
     "verdict": _one_of(VERDICTS),
     "snippet": lambda value: isinstance(value, str),
+    "snippet_source": _one_of(SNIPPET_SOURCES),
     "discovered_at": _matches(_TS_RE),
     "also_matches": _is_also_matches,
     "rule_id_source": _one_of(RULE_ID_SOURCES),
 }
-_FINDING_OPTIONAL = frozenset({"snippet", "discovered_at", "also_matches", "rule_id_source"})
+_FINDING_OPTIONAL = frozenset({"snippet", "snippet_source", "discovered_at", "also_matches", "rule_id_source"})
 _OUTCOME_FIELDS: dict[str, Check] = {
     "v": _FINDING_FIELDS["v"],
     "kind": lambda value: value == "outcome",
@@ -134,12 +145,23 @@ _REVIEW_RUN_FIELDS: dict[str, Check] = {
     "over_cap": lambda value: type(value) is bool,
     "finding_count": _is_int_at_least(0),
     "source": _one_of(REVIEW_RUN_SOURCES),
+    # Added with the critic version: absent on older events. Structural checks only, so a later reviewer or level never
+    # makes an old ledger unreadable.
+    "reviewer": _or_null(_nonempty_str),
+    "reviewer_version": _or_null(_nonempty_str),
+    "level": _or_null(_nonempty_str),
+    "head": _matches(_SHA_RE),
+    "version_changed": lambda value: type(value) is bool,
+    # The id of a git tree holding the worktree as the review found it, uncommitted and untracked files included. Absent
+    # when the review ran before trees were recorded, or when taking one failed.
+    "tree": _matches(_TREE_RE),
 }
+_REVIEW_RUN_OPTIONAL = frozenset({"reviewer", "reviewer_version", "level", "head", "version_changed", "tree"})
 _FIELDS_BY_KIND: dict[str, tuple[dict[str, Check], frozenset[str]]] = {
     "finding": (_FINDING_FIELDS, _FINDING_OPTIONAL),
     "outcome": (_OUTCOME_FIELDS, frozenset()),
     "gate_pass": (_GATE_PASS_FIELDS, frozenset()),
-    "review_run": (_REVIEW_RUN_FIELDS, frozenset()),
+    "review_run": (_REVIEW_RUN_FIELDS, _REVIEW_RUN_OPTIONAL),
 }
 
 

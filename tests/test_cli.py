@@ -4,7 +4,11 @@ import sys
 import unittest
 
 import support  # noqa: F401  (puts the repo root on sys.path)
-from support import REPO_ROOT, RepoCase, gate_finding, gate_pass, git, report_item, review_finding, review_item
+from support import (
+    FIXTURES, REPO_ROOT, RepoCase, gate_finding, gate_pass, git, report_item, review_finding, review_item, review_round,
+)
+
+from ratchet.config import load_config
 
 
 class DryRunTest(RepoCase):
@@ -112,6 +116,68 @@ class CountByRuleTest(RepoCase):
         self.assertNotIn("P0E.1", self.cli_ok("count", "--by-rule", "--label-source"))
 
 
+class CountByCriticVersionTest(RepoCase):
+    """With findings from more than one critic version `count` lists them per version; with one it prints what it always did."""
+
+    A, B = "2.1.0 (Claude Code)", "2.2.0 (Claude Code)"
+    HEADING = "by critic version:"
+
+    def fixed(self, finding: dict) -> dict:
+        return {"v": 1, "kind": "outcome", "id": finding["id"], "outcome": "fixed", "outcome_by": "human", "evidence": "e",
+                "ts": "2026-01-08T00:00:00"}
+
+    def lines_after_heading(self, out: str) -> list[str]:
+        """The rows between the heading and the rounds line, which stays last."""
+        lines = out.splitlines()
+        return lines[lines.index(self.HEADING) + 1:-1]
+
+    def test_findings_are_listed_per_version_through_their_runs(self) -> None:
+        closed = review_finding("r1-2", run="r1", line=11)
+        self.append_raw(
+            review_round(run="r1", reviewer_version=self.A), review_finding("r1-1", run="r1"), closed, self.fixed(closed),
+            review_round(run="r2", round=2, reviewer_version=self.B), review_finding("r2-1", run="r2", source="l2"),
+            review_round(run="r3", round=3, source="file", reviewer=None, reviewer_version=None), review_finding("r3-1", run="r3"),
+            review_finding("r4-1", run="r4"),  # from before review_run events: no run to say which critic
+            gate_finding("a.py"))
+        out = self.cli_ok("count")
+        self.assertEqual(self.lines_after_heading(out), [f"  {self.A}: 2 total, 1 open", f"  {self.B}: 1 total, 1 open",
+                                                         "  no version recorded: 2 total, 2 open"])
+        self.assertEqual(out.splitlines()[-1], "review rounds on main@unborn: 0/3")
+        self.assertTrue(out.startswith("findings: 6 total, 5 open (gate 1 / l1 3 / l2 1)"), out)
+
+    def test_versions_are_in_the_order_they_first_reviewed_and_a_version_that_returns_keeps_its_place(self) -> None:
+        self.append_raw(
+            review_round(run="r1", reviewer_version="2.10.0"), review_finding("r1-1", run="r1"),
+            review_round(run="r2", round=2, reviewer_version="2.9.0"), review_finding("r2-1", run="r2"),
+            review_round(run="r3", round=3, reviewer_version="2.10.0"), review_finding("r3-1", run="r3"))
+        self.assertEqual(self.lines_after_heading(self.cli_ok("count")), ["  2.10.0: 2 total, 2 open", "  2.9.0: 1 total, 1 open"])
+
+    def test_a_single_version_changes_nothing(self) -> None:
+        self.append_raw(review_round(run="r1", reviewer_version=self.A), review_finding("r1-1", run="r1"),
+                        review_round(run="r2", round=2, reviewer_version=self.A), review_finding("r2-1", run="r2"),
+                        review_finding("r3-1", run="r3"))  # an unversioned review next to one version is still one version
+        out = self.cli_ok("count")
+        self.assertNotIn(self.HEADING, out)
+        self.assertEqual(len(out.splitlines()), 2)  # the totals line and the rounds line
+
+    def test_a_version_whose_reviews_found_nothing_is_not_a_second_version(self) -> None:
+        self.append_raw(review_round(run="r1", reviewer_version=self.A), review_finding("r1-1", run="r1"),
+                        review_round(run="r2", round=2, reviewer_version=self.B))  # a clean review
+        self.assertNotIn(self.HEADING, self.cli_ok("count"))
+
+    def test_a_ledger_from_before_the_critic_fields_prints_what_it_always_did(self) -> None:
+        self.ledger.write_text((FIXTURES / "legacy_ledger.jsonl").read_text(encoding="utf-8"), encoding="utf-8")
+        self.append_raw(review_round(run="r1"), review_round(run="r2", round=2))
+        self.assertNotIn(self.HEADING, self.cli_ok("count"))
+
+    def test_the_listing_follows_by_rule_and_precedes_the_rounds_line(self) -> None:
+        self.append_raw(review_round(run="r1", reviewer_version=self.A), review_finding("r1-1", run="r1", rule_id="P1.1"),
+                        review_round(run="r2", round=2, reviewer_version=self.B), review_finding("r2-1", run="r2", rule_id="P1.1"))
+        lines = self.cli_ok("count", "--by-rule").splitlines()
+        self.assertEqual(lines[1:], ["  P1.1: 2", self.HEADING, f"  {self.A}: 1 total, 1 open", f"  {self.B}: 1 total, 1 open",
+                                     "review rounds on main@unborn: 0/3"])
+
+
 class ConfigTest(RepoCase):
     def slug_of_new_finding(self) -> str:
         self.add_findings([report_item(rule_id="unmapped")])
@@ -197,6 +263,30 @@ class ConfigTest(RepoCase):
         self.assertEqual(code, 1)
         self.assertIn("cannot read input", err)
 
+    def test_wrapup_thresholds_default_to_200_lines_and_5_files(self) -> None:
+        config = load_config(self.repo, None, None, self.repo)
+        self.assertEqual((config.wrapup_min_changed_lines, config.wrapup_min_files), (200, 5))
+
+    def test_wrapup_thresholds_come_from_the_config_each_on_its_own(self) -> None:
+        self.write_config(wrapup_min_changed_lines=50, wrapup_min_files=2)
+        config = load_config(self.repo, None, None, self.repo)
+        self.assertEqual((config.wrapup_min_changed_lines, config.wrapup_min_files), (50, 2))
+        self.write_config(wrapup_min_files=9)
+        config = load_config(self.repo, None, None, self.repo)
+        self.assertEqual((config.wrapup_min_changed_lines, config.wrapup_min_files), (200, 9))
+        self.write_config(wrapup_min_changed_lines=1000)
+        config = load_config(self.repo, None, None, self.repo)
+        self.assertEqual((config.wrapup_min_changed_lines, config.wrapup_min_files), (1000, 5))
+
+    def test_wrapup_thresholds_must_be_positive_integers(self) -> None:
+        for key in ("wrapup_min_changed_lines", "wrapup_min_files"):
+            for bad in (0, -3, "200", 2.5, True, None):
+                with self.subTest(key=key, bad=bad):
+                    self.write_config(**{key: bad})
+                    code, _, err = self.cli("count")
+                    self.assertEqual(code, 1)
+                    self.assertIn(f"config {key!r} must be a positive integer", err)
+
 
 class ExecutableTest(RepoCase):
     def test_bin_ratchet_runs_end_to_end(self) -> None:
@@ -221,6 +311,20 @@ class ExecutableTest(RepoCase):
         self.assertEqual(proc.returncode, 1)
         self.assertIn("ratchet: error:", proc.stderr)
         self.assertNotIn("Traceback", proc.stderr)
+
+
+class WholeValueSlugTest(RepoCase):
+    """`$` also matches before a final newline, so `demo\\n` passed as a slug and failed later, in the ledger."""
+
+    def test_a_repo_slug_with_a_final_newline_is_rejected_when_the_config_is_read(self) -> None:
+        self.write_config(repo_slug="demo\n")
+        code, _, err = self.cli("count")
+        self.assertEqual(code, 1)
+        self.assertIn("repo_slug", err)
+
+    def test_a_plain_slug_is_still_accepted(self) -> None:
+        self.write_config(repo_slug="demo-2")
+        self.assertEqual(self.cli("count")[0], 0)
 
 
 if __name__ == "__main__":

@@ -100,11 +100,11 @@ class FreshRepoTest(InitCase):
         self.assertIn("|| exit 1", self.text(".git/hooks/pre-commit"))
         self.assertIn("|| true", self.text(".git/hooks/post-commit"))
 
-    def test_gitignore_lists_the_ledger_the_label_files_and_the_saved_reviews(self) -> None:
+    def test_gitignore_lists_the_ledger_the_label_files_and_the_local_state_directory(self) -> None:
         self.init("--yes")
         self.assertEqual(self.text(".gitignore"), "\n".join([
             HASH_BEGIN, ".style-findings.jsonl", ".ratchet-label-page.html", ".ratchet-label-batch.json",
-            ".ratchet/reviews/", HASH_END, ""]))
+            ".ratchet/", HASH_END, ""]))
 
     def test_it_ends_with_three_next_steps(self) -> None:
         out = self.init("--yes")
@@ -112,8 +112,12 @@ class FreshRepoTest(InitCase):
         self.assertEqual([line[:7] for line in steps], ["next 1:", "next 2:", "next 3:"])
         self.assertIn("review --level high", steps[0])
         self.assertIn("count --by-rule", steps[1])
-        self.assertIn("label-page", steps[2])
         self.assertEqual(out.splitlines()[-1], steps[-1])
+
+    def test_the_last_next_step_points_to_the_wrap_up_and_label_first_and_to_label_page_as_the_batch_route(self) -> None:
+        last = [line for line in self.init("--yes").splitlines() if line.startswith("next 3:")][0]
+        marks = [last.index(text) for text in (" wrapup ", "/review-ratchet:wrapup", " label <id> --outcome ", " label-page ")]
+        self.assertEqual(marks, sorted(marks))
 
     def test_a_directory_that_is_not_a_git_repo_is_an_error(self) -> None:
         code, _, err = self.cli("init", "--yes", "--repo", str(self.tmp), with_repo=False)
@@ -531,7 +535,7 @@ class GitignoreTest(InitCase):
         self.assertEqual(self.text(".gitignore").count(".style-findings.jsonl"), 1)
 
     def test_everything_already_listed_means_no_block(self) -> None:
-        listed = "\n".join([".style-findings.jsonl", ".ratchet-label-page.html", ".ratchet-label-batch.json", ".ratchet/reviews/", ""])
+        listed = "\n".join([".style-findings.jsonl", ".ratchet-label-page.html", ".ratchet-label-batch.json", ".ratchet/", ""])
         (self.repo / ".gitignore").write_text(listed, encoding="utf-8")
         out = self.init("--yes")
         self.assertEqual(self.text(".gitignore"), listed)
@@ -548,13 +552,41 @@ class GitignoreTest(InitCase):
     def test_a_ledger_outside_the_repo_is_not_listed(self) -> None:
         self.write_config(ledger=str(self.tmp / "ledger.jsonl"))
         self.init("--yes")
-        self.assertEqual(self.text(".gitignore").splitlines(), [HASH_BEGIN, ".ratchet/reviews/", HASH_END])
+        self.assertEqual(self.text(".gitignore").splitlines(), [HASH_BEGIN, ".ratchet/", HASH_END])
 
     def test_a_half_written_block_is_an_error(self) -> None:
         (self.repo / ".gitignore").write_text(f"{HASH_END}\n{HASH_BEGIN}\n", encoding="utf-8")
         code, _, err = self.cli("init", "--yes")
         self.assertEqual(code, 1)
         self.assertIn(".gitignore", err)
+
+    def is_ignored(self, name: str) -> bool:
+        path = self.repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)  # a trailing-slash pattern matches a directory that exists
+        path.write_text("x", encoding="utf-8")
+        return subprocess.run(["git", "check-ignore", "-q", name], cwd=self.repo, env=_GIT_ENV).returncode == 0
+
+    def test_everything_under_the_local_state_directory_is_ignored_and_the_rule_change_record_is_not(self) -> None:
+        self.init("--yes")
+        for name in (".ratchet/reviews/r1.txt", ".ratchet/proposals/abc/batch.json", ".ratchet/proposals/abc/receipt.json",
+                     ".ratchet/proposals/version.json", ".ratchet/proposals/write.lock"):
+            with self.subTest(name):
+                self.assertTrue(self.is_ignored(name))
+        for name in ("CODING-STYLE.changelog.md", "CODING-STYLE.md", "CODING-STYLE.digest.md"):
+            with self.subTest(name):
+                self.assertFalse(self.is_ignored(name))
+
+    def test_a_block_from_an_earlier_version_is_refreshed_in_place(self) -> None:
+        self.init("--yes")
+        old_block = [HASH_BEGIN, ".style-findings.jsonl", ".ratchet-label-page.html", ".ratchet-label-batch.json",
+                     ".ratchet/reviews/", HASH_END]
+        (self.repo / ".gitignore").write_text("\n".join(["node_modules/", "", *old_block, "dist/", ""]), encoding="utf-8")
+        out = self.init("--yes")
+        self.assertEqual(self.statuses(out)[".gitignore"], "updated")
+        self.assertEqual(self.text(".gitignore"), "\n".join([
+            "node_modules/", "", HASH_BEGIN, ".style-findings.jsonl", ".ratchet-label-page.html", ".ratchet-label-batch.json",
+            ".ratchet/", HASH_END, "dist/", ""]))
+        self.assertEqual(self.statuses(self.init("--yes"))[".gitignore"], "already ok")
 
 
 class InteractiveTest(InitCase):

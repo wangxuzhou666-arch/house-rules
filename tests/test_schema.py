@@ -106,6 +106,22 @@ class SchemaAgreementTest(unittest.TestCase):
             self.assertNotEqual(schema_errors(event), [], f"schema accepted {event!r}")
             self.assertNotEqual(ledger.validation_problems(event), [], f"code accepted {event!r}")
 
+    def test_a_pattern_is_matched_against_the_whole_value_not_up_to_a_final_newline(self) -> None:
+        """Python's `$` also matches before a final newline; ECMA-262's, which the schema file is written in, does not."""
+        checked = [(review_finding(discovered_at="2026-01-07T10:59:00"),
+                    ("id", "display_id", "run_id", "repo", "ts", "sha", "rule_id", "discovered_at")),
+                   (gate_finding("a.py"), ("id", "display_id")),
+                   (gate_pass(["a.py"]), ("repo", "ts", "sha")),
+                   (review_round(head="0123456789abcdef0123456789abcdef01234567", tree="4b825dc642cb6eb9a060e54bf8d69288fbee4904"),
+                    ("repo", "ts", "run", "head", "tree"))]
+        for event, fields in checked:
+            self.assertEqual((schema_errors(event), ledger.validation_problems(event)), ([], []), event)
+            for field in fields:
+                with self.subTest(kind=event["kind"], field=field):
+                    with_newline = {**event, field: event[field] + "\n"}
+                    self.assertNotEqual(schema_errors(with_newline), [], f"schema accepted {with_newline!r}")
+                    self.assertNotEqual(ledger.validation_problems(with_newline), [], f"code accepted {with_newline!r}")
+
     def test_enums_in_code_match_the_schema_file(self) -> None:
         finding = SCHEMA["$defs"]["finding"]["properties"]
         outcome = SCHEMA["$defs"]["outcome"]["properties"]

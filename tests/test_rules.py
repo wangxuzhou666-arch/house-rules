@@ -415,5 +415,33 @@ class EffectiveSeverityTest(unittest.TestCase):
         self.assertIsNone(rules.severity_of("unmapped"))
 
 
+class WholeValueToolIdTest(unittest.TestCase):
+    """`$` also matches before a final newline, so `ruff:F811\\n` passed as a tool's rule id."""
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.rules_path = Path(tmp.name) / "rules.md"
+        self.rules_path.write_text(SAMPLE_RULES, encoding="utf-8")
+
+    def rules(self, **overrides: object):
+        return load_rules(make_config((self.rules_path,), **overrides))
+
+    def test_a_reported_tool_id_with_a_final_newline_is_unknown(self) -> None:
+        rules = self.rules()
+        self.assertEqual(rules.resolve_reported("ruff:F811"), ("ruff:F811", "tool"))
+        with self.assertRaisesRegex(RatchetError, "unknown rule_id"):
+            rules.resolve_reported("ruff:F811\n")
+
+    def test_a_tool_rule_map_key_with_a_final_newline_is_refused(self) -> None:
+        with self.assertRaisesRegex(RatchetError, "must look like"):
+            self.rules(tool_rule_map={"ruff:F811\n": "P2.3"})
+
+    def test_a_scenarios_key_with_a_final_newline_is_refused(self) -> None:
+        self.rules(scenarios={"ruff:F811": "text"})
+        with self.assertRaisesRegex(RatchetError, "scenarios key"):
+            self.rules(scenarios={"ruff:F811\n": "text"})
+
+
 if __name__ == "__main__":
     unittest.main()

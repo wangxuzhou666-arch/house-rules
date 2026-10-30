@@ -96,13 +96,15 @@ claude --plugin-dir /path/to/review-ratchet
 
 1. 在你的仓库里运行 `/review-ratchet:setup`。它先预览，再运行 `ratchet init`：一个规则文件（内置模板只是待调整的草稿）、编译出的风格 digest、`CLAUDE.md` 里的一行 `@import`、git hooks（每个都会被实际运行一次，证明确实被触发）以及 `.gitignore` 条目。结尾会给出一行现成的 `git add ... && git commit`，对应它创建的那些文件：请执行它，因为 pre-commit hook 检查的是暂存的副本。
 2. 运行 `/review-ratchet:review`。它会运行 Claude Code 的 `/code-review`，按你规则的条款 ID 记录发现，并用表格展示。
-3. 想根据这些发现维护规则，运行 `/review-ratchet:maintain`。agent 会收集代码证据，提出限定范围的改动，并通过宿主原生的提问工具来问你。被接受的改动会更新规则和 digest；拒绝、暂缓和要求修改也都会被记录。不需要自定义 UI，也不需要手动复制 JSON。详见[工作流与评估契约](docs/DECISION-CARDS.md)。
+3. 做完一段工作后，运行 `/review-ratchet:wrapup`（或直接说“收口”）。它统计上次 review 之后改了多少，只有改动够多（`wrapup_min_changed_lines` 默认 200 行，或 `wrapup_min_files` 默认 5 个文件）才 review 一次，并且只在 review 发现了没有任何规则覆盖的问题时才问你一个问题。详见[收口](docs/WRAPUP.md)。
+4. 想根据这些发现维护规则，运行 `/review-ratchet:maintain`。agent 会收集代码证据，提出限定范围的改动，并通过宿主原生的提问工具来问你。被接受的改动会更新规则和 digest；拒绝、暂缓和要求修改也都会被记录。不需要自定义 UI，也不需要手动复制 JSON。详见[工作流与评估契约](docs/DECISION-CARDS.md)。
 
 不用插件，在你仓库的终端里：
 
 ```sh
 /path/to/review-ratchet/bin/ratchet init            # 会问几个问题；--yes 接受默认值，--dry-run 只打印计划
 /path/to/review-ratchet/bin/ratchet review          # 运行 claude -p "/code-review high"，并记录发现
+/path/to/review-ratchet/bin/ratchet wrapup          # 统计上次 review 之后的改动；够多才 review 一次
 /path/to/review-ratchet/bin/ratchet count --by-rule # 按条款统计还有哪些未关闭
 ```
 
@@ -133,6 +135,7 @@ cp /path/to/review-ratchet/templates/CODING-STYLE.template.zh.md CODING-STYLE.md
 ```sh
 bin/ratchet init [--yes] [--dry-run]                                       # 初始化当前仓库（配置、规则文件、digest、CLAUDE.md、hooks、.gitignore）
 bin/ratchet review [--level high] [--target T] [--from-file F] [--over-cap] # 运行 /code-review，保存原始输出，记录发现；每个改动最多 3 轮，之后以退出码 3 退出
+bin/ratchet wrapup [--level high] [--base REF] [--from-file F] [--json] [--dry-run] # 统计上次 review 之后的改动；够多才 review 一次（见 docs/WRAPUP.md）；到轮次上限以退出码 3 退出
 bin/ratchet ingest-code-review --source l1 --run R12 < review-output.txt   # JSON 数组，或包含 ```json 代码块的文本
 bin/ratchet add --source l2 --run R12 --input report.json                  # 显式指定的报告格式
 bin/ratchet count [--by-rule [--label-source]]                             # 总数、未关闭的发现，按来源 / 规则 / 规则的标注方式统计
@@ -140,7 +143,10 @@ bin/ratchet decision-context [--finding ID] [--assessment FILE]            # 证
 bin/ratchet prepare-decisions --assessment FILE [--finding ID]            # 持久化分析结果和拟议的编辑，供原生的人工提问使用
 bin/ratchet apply-decisions --input FILE                                  # 记录实际回答，并应用被接受的分组
 bin/ratchet decision-summary                                             # 针对作者个人的接受/修改/拒绝/暂缓计数，不是准确率
+bin/ratchet rollback-proposals --batch ID [--dry-run]                      # 还原一个已应用批次的规则、digest 和 changelog（之后被改过则拒绝）
+bin/ratchet recover-proposals                                              # 还原被中断的应用或回滚留下的文件（不接受 --dry-run：它只做还原）
 bin/ratchet infer [--all] [--quiet]                                        # 根据 Fixes-Finding trailer 和 gate 通过记录关闭发现
+bin/ratchet label r3-2 r3-5 --outcome false_positive [--note TEXT]         # 按 id 直接记录处置结果（用 review 表格里显示的短 id），不用标注页；要么全部记录要么都不记
 bin/ratchet label-page                                                     # 本地 HTML 页面，用来给仍未关闭的发现打标注
 bin/ratchet apply-labels < labels.json                                     # 记录从该页面复制出来的标注
 bin/ratchet compile                                                        # 规则文件 -> CODING-STYLE.digest.md（以及 inject_targets 里的标记块）
@@ -150,7 +156,7 @@ bin/ratchet gate pass --files a.py b.py                                    # gat
 bin/ratchet vendor --into third_party/ratchet [--check [--against-source]] # 把工具复制进一个仓库 / 校验该副本
 ```
 
-除 `vendor` 外，每个命令都接受 `--repo PATH`；除 `init` 和 `vendor` 外，其余命令还接受 `--ledger FILE` 和 `--config FILE`。每个会写入的命令都接受 `--dry-run`：它什么都不写，只打印本来会写的内容（`compile` 打印 diff，`init` 打印计划，`review` 打印它将要运行的命令）。
+除 `vendor` 外，每个命令都接受 `--repo PATH`；除 `init` 和 `vendor` 外，其余命令还接受 `--ledger FILE` 和 `--config FILE`。每个会写入的命令都接受 `--dry-run`，只有 `recover-proposals` 例外（它只还原被中断的写入留下的半成品）。`--dry-run` 什么都不写，只打印本来会写的内容（`compile` 打印 diff，`init` 打印计划，`review` 打印它将要运行的命令，`wrapup` 打印统计结果以及是否会 review）。
 
 如果不用 `init`，想手动让 Claude Code 内置的 `/code-review` 拿到这些规则，运行 `ratchet compile`，并在仓库的 `CLAUDE.md` 里加一行：
 

@@ -46,6 +46,23 @@ not merely variable names. Keep examples beside the full clause or in a linked f
 do not put every example into the session digest. These examples provide context for
 the reviewer; they are not executed tests unless a separate test actually runs them.
 
+## Phrasing and the digest budget
+
+- **Prefer "Don't …" where the rule can be a prohibition.** "Don't wrap more than the
+  one line expected to fail in `try`" is easier to check than "Keep the guarded block
+  small", and it names the failure. Zhang et al. (2026),
+  ["Guardrails Beat Guidance"](https://arxiv.org/abs/2604.11088), studied rule files
+  for coding agents and found that every individually helpful rule was a prohibition.
+  The study measured task resolution, not style compliance, so take it as a reason to
+  try the phrasing, not as evidence that it improves reviews in your repository. A
+  requirement with no clean negation (a required step, an ordering) stays positive.
+- **Merge or retire before you add.** The digest has a byte budget (`digest_max_bytes`,
+  default 4096) and the whole digest is loaded into every session. `ratchet compile`
+  only warns when it is over budget, but a proposal that would push it over is refused
+  when it is prepared or applied. When the budget is nearly full, first look for two
+  clauses that can become one, or one that no longer applies, and propose that change
+  before the addition.
+
 ## What the current implementation retrieves
 
 There are three different mechanisms today:

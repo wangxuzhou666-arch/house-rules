@@ -88,8 +88,8 @@ class SkillTest(unittest.TestCase):
     def skills(self) -> dict[str, str]:
         return {path.parent.name: path.read_text(encoding="utf-8") for path in sorted(SKILLS.glob("*/SKILL.md"))}
 
-    def test_the_plugin_exposes_setup_review_and_rule_maintenance(self) -> None:
-        self.assertEqual(set(self.skills()), {"setup", "review", "maintain"})
+    def test_the_plugin_exposes_setup_review_wrapup_and_rule_maintenance(self) -> None:
+        self.assertEqual(set(self.skills()), {"setup", "review", "wrapup", "maintain"})
 
     def test_each_has_a_precise_description_that_says_when_to_use_it(self) -> None:
         for name, text in self.skills().items():
@@ -115,11 +115,58 @@ class SkillTest(unittest.TestCase):
         self.assertIn("ratchet init --dry-run", text)
         self.assertIn("ratchet init --yes", text)
 
-    def test_review_runs_review_and_offers_the_label_page(self) -> None:
+    def test_review_runs_review_and_keeps_the_label_page_only_as_a_fallback(self) -> None:
         text = self.skills()["review"]
         self.assertIn("ratchet review --level", text)
-        self.assertIn("label-page", text)
         self.assertIn("$ARGUMENTS", text)
+        self.assertIn("label-page", text)
+        self.assertIn("fallback", text)
+        self.assertIn("Do not offer it by default", text)
+
+    def test_review_ends_in_the_wrapup_question_and_does_not_define_it_again(self) -> None:
+        text = self.skills()["review"]
+        self.assertIn("ratchet wrapup --json --report-only", text)
+        self.assertIn("(../wrapup/SKILL.md)", text)
+        self.assertNotIn("AskUserQuestion call", text)  # the question is written once, in the wrapup skill
+        self.assertNotIn("multiSelect", text)
+        self.assertIn("AskUserQuestion", frontmatter(text)["allowed-tools"])  # the user's review-to-question path must not need a prompt
+
+    def test_wrapup_measures_first_and_asks_at_most_one_two_part_question(self) -> None:
+        text = self.skills()["wrapup"]
+        self.assertIn("ratchet wrapup --json", text)
+        for status in ("skipped", "capped", "reviewed"):
+            self.assertIn(f"`{status}`", text)
+        self.assertEqual(text.count("AskUserQuestion call"), 1)
+        self.assertIn("ONE AskUserQuestion call with two questions", text)
+        self.assertIn("multiSelect", text)
+        self.assertIn("4 most severe at most", text)
+        self.assertIn("`Now (Recommended)`", text)
+        self.assertIn("(Recommended)", text)
+
+    def test_wrapup_records_only_false_positive_with_one_direct_label_command(self) -> None:
+        text = self.skills()["wrapup"]
+        self.assertIn('ratchet label <display_id>... --outcome false_positive --note "wrap-up: not a real problem"', text)
+        self.assertIn("Use no other outcome", text)
+        self.assertNotIn("--input FILE", text)  # the default path opens no batch and writes no scratch file
+
+    def test_wrapup_keeps_the_label_page_and_apply_labels_as_the_batch_fallback(self) -> None:
+        text = self.skills()["wrapup"]
+        for command in ("ratchet label-page", "ratchet apply-labels", "ratchet distill --drafts"):
+            self.assertIn(command, text)
+        self.assertIn("the batch route", text)
+        self.assertIn("fallbacks, not the default path", text)
+
+    def test_wrapup_never_lifts_the_round_cap_by_itself_and_hands_rules_to_maintain(self) -> None:
+        text = self.skills()["wrapup"]
+        self.assertIn("Do not run `ratchet review --over-cap` on your own", text)
+        self.assertIn("(../maintain/SKILL.md)", text)
+        for trigger in ("wrap up", "收口", "/ship"):
+            self.assertIn(trigger, frontmatter(text)["description"])
+
+    def test_review_keeps_its_original_triggers(self) -> None:
+        description = frontmatter(self.skills()["review"])["description"]
+        for trigger in ("review changes with review-ratchet", "log or track review findings", '"ratchet review"'):
+            self.assertIn(trigger, description)
 
     def test_review_states_the_round_cap_and_never_lets_the_agent_lift_it(self) -> None:
         text = self.skills()["review"]

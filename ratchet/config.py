@@ -18,14 +18,18 @@ DEFAULT_DIGEST = "CODING-STYLE.digest.md"
 DEFAULT_DIGEST_MAX_CHARS = 90
 DEFAULT_DIGEST_MAX_BYTES = 4096
 DEFAULT_MAX_REVIEW_ROUNDS = 3
+# `ratchet wrapup` reviews only when the work since the last review reaches either number.
+DEFAULT_WRAPUP_MIN_CHANGED_LINES = 200
+DEFAULT_WRAPUP_MIN_FILES = 5
 # The sections of the digest an inject target can ask for, in the order they are written.
 INJECT_SECTIONS = ("violations", "reviewer", "labeling")
 
-SLUG_RE = re.compile(r"^[a-z0-9-]+$")
+SLUG_RE = re.compile(r"^[a-z0-9-]+$")  # checked with fullmatch: `$` alone also holds before a final newline
 _KNOWN_KEYS = frozenset({
     "repo_slug", "ledger", "rules_files", "tool_rule_map", "scenarios", "skips_file",
     "label_page_threshold", "clause_id_pattern", "legacy_unmapped_alias",
     "digest", "digest_max_chars", "digest_max_bytes", "inject_targets", "bin", "max_review_rounds", "default_branch",
+    "wrapup_min_changed_lines", "wrapup_min_files",
 })
 
 
@@ -53,6 +57,8 @@ class Config:
     inject_targets: tuple[InjectTarget, ...]
     max_review_rounds: int = DEFAULT_MAX_REVIEW_ROUNDS
     default_branch: str | None = None  # None: origin/HEAD's target, else main, else master
+    wrapup_min_changed_lines: int = DEFAULT_WRAPUP_MIN_CHANGED_LINES
+    wrapup_min_files: int = DEFAULT_WRAPUP_MIN_FILES
 
 
 def slugify(text: str) -> str:
@@ -156,7 +162,7 @@ def load_config(repo: Path | None, ledger: Path | None, config_file: Path | None
         raw = {}
 
     slug = raw["repo_slug"] if "repo_slug" in raw else default_slug(root)
-    if not isinstance(slug, str) or not SLUG_RE.match(slug):
+    if not isinstance(slug, str) or not SLUG_RE.fullmatch(slug):
         raise RatchetError(f"config repo_slug {slug!r} must match {SLUG_RE.pattern}")
 
     ledger_name = raw.get("ledger", DEFAULT_LEDGER)
@@ -208,4 +214,6 @@ def load_config(repo: Path | None, ledger: Path | None, config_file: Path | None
         inject_targets=_inject_targets(raw, root),
         max_review_rounds=_positive_int(raw, "max_review_rounds", DEFAULT_MAX_REVIEW_ROUNDS),
         default_branch=default_branch,
+        wrapup_min_changed_lines=_positive_int(raw, "wrapup_min_changed_lines", DEFAULT_WRAPUP_MIN_CHANGED_LINES),
+        wrapup_min_files=_positive_int(raw, "wrapup_min_files", DEFAULT_WRAPUP_MIN_FILES),
     )

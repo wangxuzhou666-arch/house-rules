@@ -122,6 +122,29 @@ def index_blob(top: Path, rel_path: str) -> bytes | None:
     return proc.stdout
 
 
+_REGULAR_FILE_MODES = ("100644", "100755")  # what is left of a git mode once symlinks (120000), directories and submodules are out
+
+
+def committed_blob(top: Path, commit: str, rel_path: str, max_bytes: int) -> bytes | None:
+    """The bytes of the regular file `rel_path` as `commit` holds it, or None when `commit` has none there or it is over `max_bytes`.
+
+    `top` is the worktree top, `rel_path` is relative to it. `git ls-tree -l` reports the kind and the size without loading
+    the file, so a huge blob is refused before it is read (and a symlink is never read as the text of its target).
+    Literal pathspecs: `rel_path` comes from a reviewer's output, and git reads `:.env` or `:(top).env` as the pathspec `.env`,
+    a file the caller's name check (which saw one segment, `:.env`) never vetted.
+    """
+    listed = run_git(["--literal-pathspecs", "ls-tree", "-z", "-l", commit, "--", rel_path], top).stdout
+    if not listed:  # a path the commit does not have prints nothing, and that is no error
+        return None
+    mode, _, blob_id, size = listed.partition("\t")[0].split()  # "100644 blob <id> <size>", then a tab and the path
+    if mode not in _REGULAR_FILE_MODES or int(size) > max_bytes:
+        return None
+    proc = _run(["cat-file", "blob", blob_id], top, keep_index_file=False, text=False)
+    if proc.returncode != 0:
+        raise RatchetError(f"cannot read {rel_path} as {commit[:8]} holds it: {proc.stderr.decode('utf-8', 'replace').strip()}")
+    return proc.stdout
+
+
 def uncommitted_paths(top: Path, rel_paths: list[str]) -> list[str]:
     """The `rel_paths` (relative to the worktree top `top`) git sees as untracked, modified, or staged but not committed.
 

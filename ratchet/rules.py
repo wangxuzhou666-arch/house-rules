@@ -30,6 +30,7 @@ from .errors import RatchetError
 from .ledger import SEVERITIES, UNMAPPED
 from .sources import DiskReader, FileReader
 
+# Checked with fullmatch: `$` alone also holds before a final newline.
 TOOL_ID_RE = re.compile(r"^[a-z][a-z0-9_-]*:[A-Za-z0-9_.@/-]+$")
 
 _SEVERITY_WORDS = "blocker|should-fix|nice"
@@ -253,7 +254,7 @@ class Rules:
             return self.tool_rule_map[raw], "tool"
         if raw == UNMAPPED or self.is_known_clause(raw):
             return raw, None
-        if TOOL_ID_RE.match(raw):
+        if TOOL_ID_RE.fullmatch(raw):
             return raw, "tool"
         hint = "no rules_files configured" if not self.clauses else f"{len(self.clauses)} known clauses"
         raise RatchetError(
@@ -316,10 +317,10 @@ def load_rules(config: Config, reader: FileReader = DiskReader()) -> Rules:
 
 def _check_config_references(rules: Rules) -> None:
     for tool_id, clause_id in rules.tool_rule_map.items():
-        if not TOOL_ID_RE.match(tool_id):
+        if not TOOL_ID_RE.fullmatch(tool_id):
             raise RatchetError(f"config tool_rule_map key {tool_id!r} must look like '<tool>:<code>'")
         if not rules.is_known_clause(clause_id):
             raise RatchetError(f"config tool_rule_map maps {tool_id!r} to {clause_id!r}, which no rules file defines")
     for rule_id in rules.scenarios:
-        if not (rule_id == UNMAPPED or rules.is_known_clause(rule_id) or TOOL_ID_RE.match(rule_id)):
+        if not (rule_id == UNMAPPED or rules.is_known_clause(rule_id) or TOOL_ID_RE.fullmatch(rule_id)):
             raise RatchetError(f"config scenarios key {rule_id!r} is not a known clause, 'unmapped' or '<tool>:<code>'")

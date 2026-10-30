@@ -16,7 +16,7 @@ import re
 import secrets
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .errors import RatchetError
 from .git import head_sha, run_git
@@ -90,11 +90,21 @@ def _consumed_commits(events: list[Event]) -> set[tuple[str, str]]:
     return pairs
 
 
-def commit_outcomes(events: list[Event], commits: list[Commit], ts: str) -> TrailerResult:
-    state = fold(events)
+def finding_lookup(state: dict[str, FindingState]) -> Callable[[str], list[str]]:
+    """token -> the ids of the findings it names: the finding with that full id, else every finding with that display_id.
+
+    Empty: it names nothing. Two or more: the display_id is shared (it is only unique within a run), and only a full id
+    picks one. A `Fixes-Finding` trailer and `ratchet label` read their ids through this one lookup.
+    """
     by_display_id: dict[str, list[str]] = {}
     for finding_id, item in state.items():
         by_display_id.setdefault(item.finding["display_id"], []).append(finding_id)
+    return lambda token: [token] if token in state else by_display_id.get(token, [])
+
+
+def commit_outcomes(events: list[Event], commits: list[Commit], ts: str) -> TrailerResult:
+    state = fold(events)
+    lookup = finding_lookup(state)
     consumed = _consumed_commits(events)
 
     outcomes: list[Event] = []
@@ -102,7 +112,7 @@ def commit_outcomes(events: list[Event], commits: list[Commit], ts: str) -> Trai
     ambiguous: list[tuple[str, str]] = []
     for commit in commits:
         for token in commit.tokens:
-            targets = [token] if token in state else by_display_id.get(token, [])
+            targets = lookup(token)
             if not targets:
                 unmatched.append((commit.sha, token))
             elif len(targets) > 1:
@@ -228,8 +238,10 @@ def validate_labels(payload: Any, batch: dict[str, Any], state: dict[str, Findin
     return errors
 
 
-def label_events(payload: dict[str, Any], batch_id: str, ts: str) -> list[Event]:
+def label_events(payload: dict[str, Any], default_evidence: str, ts: str) -> list[Event]:
+    """One `human` outcome per label, built here for both `apply-labels` and `ratchet label` so the two cannot drift apart.
+    A label's note is its evidence; a label without one gets `default_evidence`, which says where it came from."""
     return [{"v": 1, "kind": "outcome", "id": label["id"], "outcome": label["outcome"], "outcome_by": "human",
-             "ts": ts, "evidence": (label.get("note") or "").strip() or f"label page batch {batch_id}"}
+             "ts": ts, "evidence": (label.get("note") or "").strip() or default_evidence}
             for label in payload["labels"]]
 

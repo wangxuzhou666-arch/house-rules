@@ -11,7 +11,7 @@ from pathlib import Path
 from .errors import RatchetError, RoundKeyUnavailable
 from .fsutil import read_text, write_text
 from .git import commit_sha, current_branch, merge_base_with_head, origin_head_branch
-from .ledger import REVIEW_SOURCES, Event
+from .ledger import REVIEW_SOURCES, Event, FindingState
 
 LEVELS = ("low", "medium", "high", "xhigh", "max")
 DEFAULT_LEVEL = "high"
@@ -19,10 +19,14 @@ DEFAULT_LEVEL = "high"
 CLAUDE_CMD_ENV = "RATCHET_CLAUDE_CMD"
 REVIEWS_SUBDIR = Path(".ratchet") / "reviews"
 TIMEOUT_SECONDS = 1800  # a max-level review is minutes; half an hour means it is stuck
+VERSION_TIMEOUT_SECONDS = 10  # `claude --version` answers at once; ten seconds means the command is stuck
 SUMMARY_WIDTH = 60
 FORK_POINT_LENGTH = 12  # hex digits of the fork point kept in a round key
+REVIEWER = "claude-code"  # the `reviewer` of a review_run that ratchet ran itself
+NO_COMMIT = "none"  # `head` on a branch with no commit yet: the word a finding's `sha` uses for the same state
 
-_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")  # also the file name of the saved output
+# The run id is also the file name of the saved output, so it is checked with fullmatch: `$` alone also holds before a final newline.
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def review_run_ids(events: list[Event], root: Path) -> set[str]:
@@ -46,7 +50,7 @@ def default_run_id(known_runs: set[str]) -> str:
 
 
 def check_run_id(run_id: str) -> str:
-    if not _RUN_ID_RE.match(run_id):
+    if not _RUN_ID_RE.fullmatch(run_id):
         raise RatchetError(f"run id {run_id!r} must match {_RUN_ID_RE.pattern}")
     return run_id
 
@@ -78,6 +82,9 @@ def round_key(root: Path, target: str | None, configured_default: str | None) ->
     `target:<T>` with --target. Otherwise `<branch>@<fork point>`: the first 12 hex of where the branch forked from the
     default branch. On the default branch itself the fork point is HEAD, so every commit there is a change of its own;
     merging the default branch into a feature branch moves the fork point and starts the count over.
+
+    `root` is the worktree under review, not necessarily the main one: a linked worktree has its own HEAD and branch, so
+    its own key.
     """
     if target is not None:
         return f"target:{target.strip()}"
@@ -102,10 +109,69 @@ def review_rounds_used(events: list[Event], key: str) -> int:
 
 
 def review_run_event(repo: str, ts: str, *, run_id: str, key: str, round_number: int, max_rounds: int, over_cap: bool,
-                     finding_count: int, from_file: bool) -> Event:
-    return {"v": 1, "kind": "review_run", "repo": repo, "ts": ts, "run": run_id, "round_key": key, "round": round_number,
-            "max_rounds": max_rounds, "over_cap": over_cap, "finding_count": finding_count,
-            "source": "file" if from_file else "claude"}
+                     finding_count: int, level: str | None, head: str, reviewer_version: str | None,
+                     version_changed: bool, from_file: bool, tree: str | None = None) -> Event:
+    """One review round. A --from-file review does not know its reviewer, version or level: those are recorded as null.
+
+    `head` is the commit HEAD pointed at before the reviewer started (for --from-file, when the file was read).
+    `tree` is the id of the working tree as it was then, uncommitted work included; it is left out when there is none.
+    `version_changed` is written only when true.
+    """
+    event: Event = {"v": 1, "kind": "review_run", "repo": repo, "ts": ts, "run": run_id, "round_key": key,
+                    "round": round_number, "max_rounds": max_rounds, "over_cap": over_cap,
+                    "finding_count": finding_count, "source": "file" if from_file else "claude",
+                    "reviewer": None if from_file else REVIEWER, "reviewer_version": reviewer_version, "level": level,
+                    "head": head}
+    if tree is not None:
+        event["tree"] = tree
+    if version_changed:
+        event["version_changed"] = True
+    return event
+
+
+def replaced_critic_version(events: list[Event], reviewer_version: str | None) -> str | None:
+    """The critic version this review replaces: the latest one a review_run recorded, if `reviewer_version` differs from it.
+
+    None means nothing to announce: this review has no version, none was recorded before, or it is the same one. A
+    review_run without a version (read with --from-file, or `--version` failed) is skipped, not taken as "the previous".
+    """
+    if reviewer_version is None:
+        return None
+    earlier = next((event["reviewer_version"] for event in reversed(events)
+                    if event["kind"] == "review_run" and event.get("reviewer_version") is not None), None)
+    return earlier if earlier != reviewer_version else None
+
+
+def critic_version_counts(events: list[Event], state: dict[str, FindingState]) -> list[tuple[str | None, int, int]]:
+    """[(critic version, findings, open)] for the review findings in `state`, versions in the order they first reviewed.
+
+    A finding has the version recorded by the review_run of its run. The row with version None collects review findings
+    whose run recorded none (an older ledger, a --from-file review, an unreadable version) and comes last. Empty unless
+    findings come from two or more distinct versions: with one there is nothing to tell apart. Gate findings are not the
+    critic's and are left out. The rows are a listing, not a comparison: a different critic is a different instrument.
+    """
+    version_of_run: dict[str, str | None] = {}
+    version_order: list[str] = []
+    for event in events:
+        if event["kind"] != "review_run" or event["run"] in version_of_run:
+            continue
+        version = event.get("reviewer_version")
+        version_of_run[event["run"]] = version
+        if version is not None and version not in version_order:
+            version_order.append(version)
+    tallies: dict[str | None, list[int]] = {}  # version -> [findings, open]
+    for item in state.values():
+        if item.finding["source"] in REVIEW_SOURCES:
+            tally = tallies.setdefault(version_of_run.get(item.finding["run_id"]), [0, 0])
+            tally[0] += 1
+            tally[1] += 1 if item.outcome is None else 0
+    versions = [version for version in version_order if version in tallies]
+    if len(versions) < 2:
+        return []
+    rows: list[tuple[str | None, int, int]] = [(version, *tallies[version]) for version in versions]
+    if None in tallies:
+        rows.append((None, *tallies[None]))
+    return rows
 
 
 def check_target(target: str | None) -> None:
@@ -113,28 +179,55 @@ def check_target(target: str | None) -> None:
         raise RatchetError("--target must be a single non-empty line")
 
 
+def claude_executable() -> list[str]:
+    """The review command without its arguments: `claude`, or what RATCHET_CLAUDE_CMD names."""
+    return shlex.split(os.environ.get(CLAUDE_CMD_ENV) or "claude")
+
+
 def claude_command(level: str, target: str | None) -> list[str]:
     check_target(target)
     prompt = f"/code-review {level}" + (f" {target.strip()}" if target else "")
-    return [*shlex.split(os.environ.get(CLAUDE_CMD_ENV) or "claude"), "-p", prompt]
+    return [*claude_executable(), "-p", prompt]
 
 
-def run_claude(argv: list[str], cwd: Path) -> str:
-    """The command's stdout. stdin is closed so a headless `claude -p` never waits for input."""
+def require_claude(argv: list[str]) -> None:
+    """Refuse a review whose command is not installed, before anything is captured, asked or billed."""
     if shutil.which(argv[0]) is None:
         raise RatchetError(f"`{argv[0]}` not found on PATH; install Claude Code, or run the review elsewhere "
                            "and pass its saved output with --from-file FILE")
+
+
+def _run_command(argv: list[str], cwd: Path, timeout: float) -> str:
+    """The command's stdout. stdin is closed so a headless `claude -p` never waits for input."""
     try:
         proc = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                              stdin=subprocess.DEVNULL, timeout=TIMEOUT_SECONDS)
+                              stdin=subprocess.DEVNULL, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        raise RatchetError(f"`{shlex.join(argv)}` did not finish within {TIMEOUT_SECONDS}s") from exc
+        raise RatchetError(f"`{shlex.join(argv)}` did not finish within {timeout}s") from exc
     except OSError as exc:
         raise RatchetError(f"cannot run `{argv[0]}`: {exc}") from exc
     if proc.returncode != 0:
         tail = "\n".join(proc.stderr.strip().splitlines()[-5:])
         raise RatchetError(f"`{shlex.join(argv)}` exited with {proc.returncode}" + (f":\n{tail}" if tail else ""))
     return proc.stdout
+
+
+def run_claude(argv: list[str], cwd: Path) -> str:
+    return _run_command(argv, cwd, TIMEOUT_SECONDS)
+
+
+def critic_version(cwd: Path) -> str:
+    """What the reviewer reports as its version: the stripped stdout of `<claude command> --version`.
+
+    Asked of the very command the review runs (a RATCHET_CLAUDE_CMD wrapper answers for itself), and before the review
+    starts: an installation that updates itself while a long review runs would otherwise be recorded under a version
+    that did not run it.
+    """
+    argv = [*claude_executable(), "--version"]
+    version = _run_command(argv, cwd, VERSION_TIMEOUT_SECONDS).strip()
+    if not version:
+        raise RatchetError(f"`{shlex.join(argv)}` printed nothing")
+    return version
 
 
 def review_path(root: Path, run_id: str) -> Path:

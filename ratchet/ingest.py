@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from .config import Config
 from .errors import RatchetError
@@ -12,6 +12,10 @@ from .ledger import SEVERITIES, STATUS_TO_OUTCOME, UNMAPPED, Event
 from .rules import Rules, category_of
 
 _FENCE_RE = re.compile(r"```json[^\S\n]*\n(.*?)```", re.DOTALL | re.IGNORECASE)
+
+# What `code_review_events` asks of a caller that wants snippets: for a file and a line, the code around it (None: there
+# is none to show) and where it was read from (one of ledger.SNIPPET_SOURCES). Only `ratchet review` supplies one.
+Locator = Callable[[str, int], tuple[str | None, str]]
 
 
 def parse_json_items(text: str) -> list[dict[str, Any]]:
@@ -239,10 +243,13 @@ def _candidate(number: int, item: dict[str, Any], rules: Rules) -> _Candidate:
 
 
 def code_review_events(items: list[dict[str, Any]], *, config: Config, rules: Rules, source: str, run_id: str,
-                       verdict: str, sha: str, ts: str, discovered_at: str | None) -> IngestResult:
+                       verdict: str, sha: str, ts: str, discovered_at: str | None,
+                       locate: Locator | None = None) -> IngestResult:
     """Findings on the same file+line collapse into one: the most severe is primary, the rest go to also_matches.
 
     display_ids are `<run_id>-1`, `-2`, ... in input order after collapsing, so re-ingesting the same review is a no-op.
+    With `locate`, each finding gets the code around its line as `snippet` and the place it came from as `snippet_source`;
+    when there is no code to show, `snippet_source` is still recorded (as "unavailable") and `snippet` is left out.
     """
     candidates = [_candidate(number, item, rules) for number, item in enumerate(items, start=1)]
     groups: dict[tuple[str, int], list[_Candidate]] = {}
@@ -263,6 +270,11 @@ def code_review_events(items: list[dict[str, Any]], *, config: Config, rules: Ru
         }
         if discovered_at is not None:
             finding["discovered_at"] = discovered_at
+        if locate is not None:
+            snippet, snippet_source = locate(primary.file, primary.line)
+            if snippet is not None:
+                finding["snippet"] = snippet
+            finding["snippet_source"] = snippet_source
         others = [c for c in group if c is not primary]
         if others:
             finding["also_matches"] = [

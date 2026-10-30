@@ -35,7 +35,7 @@ range. Inspect the code before attributing a defect to it. If it moved, use
 Both the reported line and the selected current range survive in the output.
 Unknown locations remain unknown. Do not invent a historical snapshot.
 
-Source reads refuse paths outside the repository, symlinks, `.git`, `.env*`,
+Source reads refuse paths outside the repository, symlinks, `.git`, `.env*` (in any letter case),
 binary files and text over 256 KiB. An unavailable source includes its reason.
 Keep the resulting evidence local; code excerpts may contain private project data.
 
@@ -194,6 +194,78 @@ be partially accepted. The receipt saves human responses and the context ID,
 including when nothing changes. Current evidence or rule drift invalidates an
 unapplied batch. Check `compile --check --strict` afterward. Existing rollback and
 recovery commands apply; accepting a rule never marks its source findings fixed.
+
+## Rolling back and recovering
+
+The batch ID is the `batch_id` that `prepare-decisions` printed (it is also the folder name under `.ratchet/proposals/`). To take an applied batch back, run `ratchet rollback-proposals --batch <batch-id>`; add `--dry-run` first to see which files it would restore, which writes nothing. It restores the rules file, the digest, the consumers and the changelog to their exact previous bytes, and refuses (naming the file) if any of them was edited after the apply: a rollback never discards a later edit.
+
+A rolled-back batch is spent: `apply-decisions` refuses it ("batch already decided or rolled back; create a new batch"). To apply the change again, run `prepare-decisions` again, which makes a new batch with a new ID, and ask the human again; the old answer does not carry over.
+
+`ratchet recover-proposals` is for an apply that was interrupted half way (the next apply says "interrupted proposal transaction; run ratchet recover-proposals first"). It restores the files of the unfinished write from the journal, and refuses if one of them was edited since. It takes no `--batch` and no `--dry-run`.
+
+## The rule-change record
+
+Every applied batch also appends one entry to `CODING-STYLE.changelog.md`, beside the
+rules file, in the same recoverable transaction that writes the rules, the digest and
+the consumers. The batch folder, receipts and saved reviews under `.ratchet/` are local
+and git-ignored; the changelog is plain Markdown meant to be committed with the rules,
+so anyone reading the repository can see what changed, why, on what evidence and who
+decided, without the receipts.
+
+````markdown
+## Revision 3 — 2026-10-29 (batch <batch-id>)
+
+### rewrite P1.1
+
+- Before:
+  ```markdown
+  1. **[P1.1]** Boolean names must start with is_. (should-fix)
+  ```
+- After:
+  ```markdown
+  1. **[P1.1]** Boolean names must convey boolean meaning; clear idioms need no prefix. (should-fix)
+  ```
+- Why: Preserve clear idioms while rejecting ambiguous names.
+- Evidence: `repo:l1:r1:r1-1` — `src/a.py:10` — The prefix rule flags a clear name.
+  ```
+  def check(flag):
+      return flag
+  ```
+- Decision: accept by Jane — "Yes, ship it."
+
+### Not applied
+
+- add P1.2 — defer by Jane — "Wait for a second example."
+````
+
+- **One `###` entry per applied proposal.** Before and After are the clause blocks
+  verbatim, with `(new clause)` for an add and `(retired)` for a retirement. Each
+  finding behind the proposal is one `Evidence` bullet: ID, file and line, summary, and
+  the finding's recorded `snippet` as a short fenced block (cut after 8 lines) when the
+  ledger has one. Nothing is looked up or invented: the entry is built from the saved
+  batch and the decision payload.
+- **The decision names who and, where recorded, what the human said.** The native flow
+  keeps the human's own words from the answer; a group's one answer repeats on each of
+  its entries, so a merge's rewrite and retirements read alike. The legacy page records
+  no words, so its line stops at the name, and its `rewrite` choice appears as `revise`:
+  the After block is the human's text. A native `revise` is never applied; it is listed
+  under `Not applied`.
+- **`Not applied`** lists the proposals of the same batch that were answered `reject`,
+  `defer` or `revise`, each with the decision and the words. Covered and keep groups
+  change no rule, so they are not listed; their answers stay in the receipt. A batch
+  in which nothing is accepted writes no entry at all.
+- **Text stays on its line.** Rationale, summaries and the human's words are collapsed
+  to one line, so a newline cannot start a heading or a list item, and a fence is longer
+  than any backtick run inside the block it closes.
+- **Revision numbers continue from the changelog.** The number is one more than the
+  larger of the local `version.json` revision and the highest `## Revision N` already in
+  the changelog, so a fresh clone without `.ratchet/` carries on the sequence instead of
+  restarting it. Only `## Revision N` headings count: a hand-written section such as
+  `## Backfill — DATE` does not disturb the numbering.
+- **Rollback and recovery restore it.** `rollback-proposals` and `recover-proposals`
+  put the changelog back to its exact previous bytes (or delete it if the batch created
+  it) together with the rules and the digest. Like any file in the batch, it blocks a
+  rollback when it was edited after the apply: a rollback never discards a later edit.
 
 The legacy HTML proposal page remains compatible for existing users; it is not the
 native workflow's entrypoint. Automatic periodic maintenance, cross-project rule
