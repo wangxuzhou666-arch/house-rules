@@ -1,5 +1,6 @@
 {
   "rules_files": [
     "CODING-STYLE.md"
-  ]
+  ],
+  "wrapup_auto": true
 }
