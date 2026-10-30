@@ -13,20 +13,21 @@ from pathlib import Path
 from .config import Config
 from .digest import display_path
 from .errors import RatchetError, RoundKeyUnavailable
-from .git import commit_sha, current_branch, merge_base_with_head, run_git
+from .git import SHA_WIDTH, commit_sha, commit_tree, current_branch, is_ancestor, merge_base_with_head, run_git
 from .ledger import SEVERITIES, UNMAPPED, Event, effective_rule_id, fold
 from .onboard import ignore_entries
 from .proposals import CHANGELOG
-from .review import NO_COMMIT, REFUSE_ROUND_CAP, Refusal, default_branch, review_refusal
+from .review import NO_COMMIT, REFUSE_ROUND_CAP, Refusal, checked_out_default_branch, default_branch, review_refusal
+from .start_point import usable_start_point
 from .state_tree import numstat_since, tree_exists
 
 # Why a base was chosen: the first rule in docs/WRAPUP.md that held.
 BASE_FLAG = "--base"
 BASE_LAST_REVIEW_TREE = "last-review-tree"
 BASE_LAST_REVIEW = "last-review"
+BASE_START_POINT = "start-point"
 BASE_MERGE_BASE = "merge-base"
 BASE_HEAD = "head"
-SHA_WIDTH = 12  # hex digits of a sha shown to a person, as in a round key
 BINARY_PROBE_BYTES = 8000  # git calls a file binary when a NUL byte is in its first 8000 bytes
 READ_CHUNK_BYTES = 1 << 20
 SUMMARY_WIDTH = 72
@@ -42,6 +43,7 @@ class Base:
     reason: str  # one of the BASE_* words
     note: str  # the rule that chose it, in a sentence part
     caveat: str = ""  # what that rule cannot see, said as a line of its own; empty when it misses nothing
+    review_start: str | None = None  # the commit a review of the work since this base starts from (`review_range`); None when there is none
 
 
 @dataclass(frozen=True)
@@ -65,21 +67,26 @@ class Thresholds:
 
 # ---- the base -------------------------------------------------------------------------------------------------
 
-def choose_base(worktree: Path, events: list[Event], explicit: str | None, configured_default: str | None) -> Base:
+def choose_base(config: Config, events: list[Event], explicit: str | None) -> Base:
     """What the work is measured from: `--base`, else the working tree of the last review of this branch (its HEAD when it kept
-    none), else the fork point, else HEAD."""
+    none), else on the default branch the start point recorded there, else the fork point, else HEAD."""
+    worktree = config.worktree
     if explicit is not None:
         explicit_sha = commit_sha(worktree, explicit)
         if explicit_sha is None:
             raise RatchetError(f"--base {explicit!r} is not a commit of this repo")
-        return Base(explicit_sha, BASE_FLAG, f"--base {explicit}")
+        return Base(explicit_sha, BASE_FLAG, f"--base {explicit}", review_start=explicit_sha)
     head = commit_sha(worktree, "HEAD")
     if head is None:
         return Base(None, BASE_HEAD, "no commit yet, so every file counts as new")
-    reviewed = _last_reviewed(worktree, events)
+    reviewed = last_reviewed(worktree, events)
     if reviewed is not None:
-        return _review_base(worktree, reviewed)
-    fork = _fork_point(worktree, configured_default)
+        return replace(_review_base(worktree, reviewed), review_start=reviewed.head)
+    start = _start_point(config)
+    if start is not None:
+        start_sha, default_name = start
+        return Base(start_sha, BASE_START_POINT, f"the start point recorded for {default_name}", review_start=start_sha)
+    fork = _fork_point(worktree, config.default_branch)
     if fork is not None:
         fork_sha, default_name = fork
         return Base(fork_sha, BASE_MERGE_BASE, f"where this branch forked from {default_name}")
@@ -99,7 +106,7 @@ def round_key_branch(key: str) -> str | None:
     return key.rpartition("@")[0] or None  # no `@` leaves nothing before it either
 
 
-def _last_reviewed(worktree: Path, events: list[Event]) -> Reviewed | None:
+def last_reviewed(worktree: Path, events: list[Event]) -> Reviewed | None:
     """The newest review of the branch HEAD is on whose starting HEAD this HEAD descends from.
 
     The ledger is shared by every worktree of the repo, and a review's tree holds the uncommitted work of the worktree it
@@ -119,7 +126,7 @@ def _last_reviewed(worktree: Path, events: list[Event]) -> Reviewed | None:
         if event["kind"] != "review_run" or round_key_branch(event["round_key"]) != branch:
             continue
         head = event.get("head")
-        if head not in (None, NO_COMMIT) and _is_ancestor(worktree, head):
+        if head not in (None, NO_COMMIT) and is_ancestor(worktree, head, "HEAD"):
             return Reviewed(head, event["run"], event.get("tree"))
     return None
 
@@ -127,7 +134,9 @@ def _last_reviewed(worktree: Path, events: list[Event]) -> Reviewed | None:
 def _review_base(worktree: Path, reviewed: Reviewed) -> Base:
     """The working tree as the review found it, which counts only what happened after it; else the review's HEAD, and why.
 
-    The HEAD is a commit, which holds none of the work the review read while it was uncommitted: that counts again.
+    The HEAD is a commit, which holds none of the work the review read while it was uncommitted: that counts again. A review
+    whose tree is the tree of its own HEAD (a review of a commit range, which read committed work only, or of a clean working
+    tree) found HEAD, and the note says so; otherwise it found the working tree, uncommitted work included.
     """
     from_head = f"HEAD when review {reviewed.run} started"
     if reviewed.tree is None:
@@ -137,14 +146,19 @@ def _review_base(worktree: Path, reviewed: Reviewed) -> Base:
         return Base(reviewed.head, BASE_LAST_REVIEW, from_head,
                     f"review {reviewed.run}'s tree {reviewed.tree[:SHA_WIDTH]} is no longer in this repo (git gc removes "
                     "objects nothing refers to), so work it left uncommitted counts again")
-    return Base(reviewed.tree, BASE_LAST_REVIEW_TREE, f"the working tree as review {reviewed.run} found it")
+    reviewed_state = "HEAD" if reviewed.tree == commit_tree(worktree, reviewed.head) else "the working tree"
+    return Base(reviewed.tree, BASE_LAST_REVIEW_TREE, f"{reviewed_state} as review {reviewed.run} found it")
 
 
-def _is_ancestor(worktree: Path, commit: str) -> bool:
-    """Whether HEAD descends from `commit`. A commit this clone no longer has (pruned after a rebase) is not an ancestor."""
-    if commit_sha(worktree, commit) is None:
-        return False
-    return run_git(["merge-base", "--is-ancestor", commit, "HEAD"], worktree, allowed_returncodes=(0, 1)).returncode == 0
+def _start_point(config: Config) -> tuple[str, str] | None:
+    """(commit, default branch name) of the usable start point recorded for the default branch, when HEAD is on that branch.
+    On any other branch the fork point measures the work, and a recorded start point does not apply."""
+    default = checked_out_default_branch(config.worktree, config.default_branch)
+    if default is None:
+        return None
+    default_name, default_commit = default
+    start = usable_start_point(config, default_name, default_commit)
+    return None if start is None else (start, default_name)
 
 
 def _fork_point(worktree: Path, configured_default: str | None) -> tuple[str, str] | None:
@@ -155,6 +169,22 @@ def _fork_point(worktree: Path, configured_default: str | None) -> tuple[str, st
         return None
     fork = merge_base_with_head(worktree, default_commit)
     return None if fork is None else (fork, default_name)
+
+
+def review_range(worktree: Path, base: Base, configured_default: str | None) -> str | None:
+    """`<start>..<HEAD>`, in full shas: the commits a review of the work since `base` is told to read. On the default branch a
+    plain `/code-review` has no branch to compare with, and on a clean tree it reads a scope the model picks (Claude Code 2.1.284
+    took all three commits of a probe repo, the root among them). A range as target was held to: `<c1>..HEAD` read c2 and c3 only.
+
+    None on any other branch (the review reads the branch's own diff), when `base` has no commit to start a review from, and
+    when nothing was committed since it. The range holds committed work only: what is still uncommitted is no part of it.
+    """
+    if base.review_start is None or checked_out_default_branch(worktree, configured_default) is None:
+        return None
+    head = commit_sha(worktree, "HEAD")
+    if head in (None, base.review_start):
+        return None
+    return f"{base.review_start}..{head}"
 
 
 # ---- how much changed -----------------------------------------------------------------------------------------
@@ -303,7 +333,7 @@ def plan_wrapup(config: Config, events: list[Event], *, explicit_base: str | Non
     """
     thresholds = config_thresholds(config)
     worktree = config.worktree  # the tree a review would read, which is not config.root in a linked worktree
-    base = choose_base(worktree, events, explicit_base, config.default_branch)
+    base = choose_base(config, events, explicit_base)
     changes = count_changes(worktree, base, [*ignore_entries(config), *rule_change_entries(config)])
     open_unmapped = len(unmapped_findings(events, config.legacy_unmapped_alias))
     hits = thresholds_reached(changes, thresholds)

@@ -82,6 +82,17 @@ def default_branch(root: Path, configured: str | None) -> tuple[str, str]:
                               "no default branch found (no origin/HEAD, main or master)")
 
 
+def checked_out_default_branch(root: Path, configured: str | None) -> tuple[str, str] | None:
+    """`default_branch`'s (name, commit) when HEAD is on that branch, where the fork point is HEAD itself. None on any other
+    branch, on a detached HEAD, and when there is no default branch to tell."""
+    branch = current_branch(root)
+    try:
+        name, commit = default_branch(root, configured)
+    except RoundKeyUnavailable:  # no origin/HEAD, main or master
+        return None
+    return (name, commit) if branch == name else None
+
+
 def round_key(root: Path, target: str | None, configured_default: str | None) -> str:
     """Names the change under review, so its review rounds can be counted.
 

@@ -1,8 +1,8 @@
 """`ratchet init`: wire a repo up in one idempotent pass.
 
-Six steps, each reporting `add`, `update`, `ok` (already in place), `skip`, `manual` or `failed`: the config, the rules file,
-the compiled digest, the CLAUDE.md import, two git hooks and the .gitignore entries. Nothing is overwritten:
-files the tool owns are written only when absent, and edits to files the user owns (CLAUDE.md, .gitignore, hooks)
+Seven steps, each reporting `add`, `update`, `ok` (already in place), `skip`, `manual` or `failed`: the config, the rules file,
+the compiled digest, the CLAUDE.md import, two git hooks, the .gitignore entries and the start point of the wrap-up. Nothing is
+overwritten: files the tool owns are written only when absent, and edits to files the user owns (CLAUDE.md, .gitignore, hooks)
 live in a marked block that a rerun finds and refreshes in place.
 """
 from __future__ import annotations
@@ -20,13 +20,15 @@ from typing import Callable
 from .blocks import HASH_BEGIN, HASH_END, HTML_BEGIN, HTML_END, split_block, upsert_block
 from .config import CONFIG_NAME, Config, read_config_file, rules_name, tracked_path
 from .digest import Output, display_path, plan_outputs
-from .errors import RatchetError
+from .errors import RatchetError, RoundKeyUnavailable
 from .fsutil import is_executable, read_text, write_text
-from .git import default_hooks_dir, hooks_dir, hooks_path_origin, uncommitted_paths
+from .git import SHA_WIDTH, commit_sha, default_hooks_dir, hooks_dir, hooks_path_origin, uncommitted_paths
 from .hooks import HOOK_NAMES, HookPlan, Pinned, plan_hook, probe_hook
 from .outcomes import BATCH_NAME, PAGE_NAME
+from .review import default_branch
 from .rules import load_rules
 from .sources import DiskReader
+from .start_point import record_start_point, usable_start_point
 
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE_PATH = PACKAGE_ROOT / "templates" / "CODING-STYLE.template.md"
@@ -362,6 +364,29 @@ def _gitignore_step(config: Config, options: InitOptions) -> Step:
     return Step(".gitignore", status, ", ".join(wanted), (FileChange(path, text, new_text),) if status != "ok" else ())
 
 
+# ---- step 7: start point ----------------------------------------------------------------------------------------
+
+def _start_point_step(config: Config, options: InitOptions) -> Step:
+    """Record where the default branch stands as the commit its first wrap-up measures from (see `start_point`). Without one the
+    fork point there is HEAD itself and the commits made after init would never count. A start point already recorded and usable
+    stays where it is. It is the default branch that is recorded, whichever branch init runs on."""
+    if commit_sha(config.worktree, "HEAD") is None:
+        return Step("start point", "skip", "no commit yet")
+    try:
+        name, tip = default_branch(config.worktree, config.default_branch)
+    except RoundKeyUnavailable as exc:
+        return Step("start point", "skip", f"{exc.reason}: set default_branch in {CONFIG_NAME} and run init again")
+    except RatchetError as exc:  # a default_branch in the config that is not a branch of this repo
+        return Step("start point", "skip", str(exc))
+    start = usable_start_point(config, name, tip)
+    if start is not None:
+        return Step("start point", "ok", f"{name} is measured from {start[:SHA_WIDTH]}")
+    if not options.dry_run:
+        record_start_point(config, name, tip)
+    return Step("start point", "add", f"{name} is measured from {tip[:SHA_WIDTH]}, where it stands now: the first wrap-up there counts "
+                                      "the commits made after it")
+
+
 # ---- driver -----------------------------------------------------------------------------------------------------
 
 def command_name() -> str:
@@ -409,7 +434,7 @@ def closing_lines(result: InitResult, options: InitOptions, command: str) -> lis
 
 
 def run_init(config: Config, options: InitOptions, ask: Ask | None, report: Callable[[Step], None]) -> InitResult:
-    """Run the six steps in order, calling `report` after each. A step that cannot finish raises (earlier steps stay done and a
+    """Run the seven steps in order, calling `report` after each. A step that cannot finish raises (earlier steps stay done and a
     rerun resumes); a hook that is installed but never runs is reported as `failed` and the remaining steps still run."""
     steps: list[Step] = []
 
@@ -427,5 +452,6 @@ def run_init(config: Config, options: InitOptions, ask: Ask | None, report: Call
     for step in _hooks_steps(effective, directory, options, ask):
         finish(step)
     finish(_gitignore_step(effective, options))
+    finish(_start_point_step(effective, options))
     hook_files = [] if directory is None else [directory / hook for hook in HOOK_NAMES]
     return InitResult(steps, [] if options.dry_run else files_to_stage(effective, options, hook_files))

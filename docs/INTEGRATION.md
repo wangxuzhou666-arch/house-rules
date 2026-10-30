@@ -5,7 +5,7 @@ The goal is to set it up once and then work as you do now. The review-to-rules l
 ## The workflow
 
 1. **Install the plugin** ([README](../README.md#install)). The automatic wrap-up needs Claude Code 2.1.163 or newer.
-2. **Run `/review-ratchet:setup` once in each repository.** It creates the rules file, the compiled digest, the git hooks and the `.gitignore` entries, and asks whether to turn on the automatic wrap-up. Commit the files it lists ([Onboarding](ONBOARDING.md)).
+2. **Run `/review-ratchet:setup` once in each repository.** It creates the rules file, the compiled digest, the git hooks and the `.gitignore` entries, records the [start point](WRAPUP.md#the-start-point) of the default branch (where its first wrap-up measures from), and asks whether to turn on the automatic wrap-up. Commit the files it lists ([Onboarding](ONBOARDING.md)).
 3. **Commit as usual.** With the automatic wrap-up on, each commit made in a Claude Code session is noted in a small file on your machine ([the commit note](ONBOARDING.md#the-commit-note)).
 4. **A turn ends after a commit, and the work since the last review has reached a threshold** (200 changed lines or 5 files by default). Claude runs the wrap-up review in the background. Below the threshold nothing runs ([Automatic wrap-up](WRAPUP.md#automatic-wrap-up)).
 5. **Answer the one question, if there is one.** It is asked only about blind spots that are new: which of them are not real problems, and should the rest become rules now. Nothing new, nothing asked.

@@ -26,7 +26,14 @@ The ledger's recorded SHA is import-time HEAD, not proof of the reviewed tree.
 Current excerpts are explicitly labeled `current_workspace`. New local reviews save
 bounded pre-review text, rules, content hashes and raw-output binding in
 `.ratchet/reviews/<run>.evidence.json`; `review_source` exposes the reported excerpt.
-Files changed during review are marked unstable. For `--target`, local evidence is
+Files changed during review are marked unstable. A review of a commit range, which
+`ratchet review` starts on the default branch
+([WRAPUP.md](WRAPUP.md#on-the-default-branch)), read commits only, so its evidence is
+the files that range changed, as the commit HEAD was at when it started holds them.
+Uncommitted edits and untracked files are not in it, and the rules are still read
+from disk. The evidence file records the range as `committed_range` (`null` for any
+other review), and the stability check re-reads that commit, so an edit made while
+the review runs does not mark a file unstable. For `--target`, local evidence is
 explicitly target-unverified; it must not be described as a snapshot of an external
 PR or another branch. Imports never manufacture missing historical evidence.
 A reported line can drift even when it is still in

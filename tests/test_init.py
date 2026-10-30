@@ -21,6 +21,7 @@ from ratchet.cli import main
 from ratchet.errors import RatchetError
 from ratchet.hooks import Pinned, Placement, hook_body, place_block, probe_hook
 from ratchet.onboard import CLAUDE_MD_HEADING, EXECUTABLE_PATH, TEMPLATE_PATH
+from ratchet.start_point import START_POINTS_NAME
 
 DIGEST = "CODING-STYLE.digest.md"
 QUOTED_EXECUTABLE = shlex.quote(str(EXECUTABLE_PATH))
@@ -62,6 +63,11 @@ class InitCase(RepoCase):
         pattern = (r"  (config|rules file|compile|CLAUDE\.md|hook [a-z-]+|git hooks|\.gitignore) +"
                    r"(added|updated|already ok|skipped|MANUAL|FAILED|would add|would update) ")
         return {match.group(1): match.group(2) for match in re.finditer(pattern, out)}
+
+    def start_point_step(self, out: str) -> tuple[str, str]:
+        """(status words, detail) of the `start point` line. `statuses()` does not list it: several tests count its seven steps."""
+        [(status, detail)] = re.findall(r"^  start point +(added|already ok|skipped|would add) +(.*)$", out, flags=re.MULTILINE)
+        return status, detail
 
 
 class FreshRepoTest(InitCase):
@@ -1378,6 +1384,10 @@ class CommitHintTest(InitCase):
     def test_once_everything_is_committed_a_rerun_prints_one_line(self) -> None:
         out = self.init("--yes")
         self.run_line(self.hint(out)[1].strip())
+        # The first init skipped the start point (no commit yet). Recording it is a change, so that run still ends with the next steps.
+        recording = self.init("--yes")
+        self.assertEqual(self.start_point_step(recording)[0], "added")
+        self.assertTrue(recording.splitlines()[-1].startswith("next 3:"))
         rerun = self.init("--yes")
         self.assertEqual(rerun.splitlines()[-1], "review-ratchet is set up")
         self.assertNotIn("commit the files", rerun)
@@ -1428,6 +1438,141 @@ class CommitHintTest(InitCase):
         header, line = self.hint(self.init("--yes", "--no-hooks"))
         self.assertIn("git commit -m", line)
         self.assertNotIn("blocked", header)
+
+
+class StartPointStepTest(InitCase):
+    """The last step of init records where the default branch stands, so the first wrap-up there counts the commits made after it."""
+
+    def init_without_hooks(self, *argv: str) -> str:
+        """Installed hooks would block the commits these tests go on to make, until init's own files are committed."""
+        return self.init("--yes", "--no-hooks", *argv)
+
+    def recorded(self) -> dict[str, str]:
+        return json.loads(self.text(START_POINTS_NAME))
+
+    def write_recorded(self, recorded: dict[str, str]) -> None:
+        path = self.repo / START_POINTS_NAME
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps(recorded), encoding="utf-8")
+
+    @staticmethod
+    def recording_detail(commit: str, branch: str = "main") -> str:
+        return f"{branch} is measured from {commit[:12]}, where it stands now: the first wrap-up there counts the commits made after it"
+
+    def test_a_repo_with_a_commit_gets_its_default_branch_recorded_where_it_stands(self) -> None:
+        base = self.commit("base")
+        out = self.init_without_hooks()
+        self.assertEqual(self.start_point_step(out), ("added", self.recording_detail(base)))
+        self.assertEqual(self.recorded(), {"main": base})
+
+    def test_a_dry_run_says_it_would_record_the_start_point_and_writes_nothing(self) -> None:
+        base = self.commit("base")
+        before = self.files()
+        out = self.init("--dry-run")
+        self.assertEqual(self.start_point_step(out), ("would add", self.recording_detail(base)))
+        self.assertEqual(self.files(), before)
+
+    def test_a_rerun_says_already_ok_and_the_start_stays_when_the_branch_moves_on(self) -> None:
+        base = self.commit("base")
+        self.init_without_hooks()
+        written = self.text(START_POINTS_NAME)
+        self.commit("later")
+        already_ok = ("already ok", f"main is measured from {base[:12]}")
+        self.assertEqual(self.start_point_step(self.init_without_hooks()), already_ok)
+        self.assertEqual(self.start_point_step(self.init("--dry-run")), already_ok)
+        self.assertEqual(self.text(START_POINTS_NAME), written)
+
+    def test_a_repo_without_a_commit_skips_the_step_until_there_is_one(self) -> None:
+        out = self.init_without_hooks()
+        self.assertEqual(self.start_point_step(out), ("skipped", "no commit yet"))
+        self.assertFalse((self.repo / START_POINTS_NAME).exists())
+        first = self.commit("first")
+        self.assertEqual(self.start_point_step(self.init_without_hooks()), ("added", self.recording_detail(first)))
+        self.assertEqual(self.recorded(), {"main": first})
+
+    def test_a_repo_with_no_origin_head_main_or_master_skips_the_step_until_default_branch_is_set(self) -> None:
+        base = self.commit("base")
+        git(self.repo, "branch", "-m", "main", "trunk")
+        out = self.init_without_hooks()
+        self.assertEqual(self.start_point_step(out), ("skipped", "no default branch found (no origin/HEAD, main or master): "
+                                                                 "set default_branch in .ratchet.json and run init again"))
+        self.assertFalse((self.repo / START_POINTS_NAME).exists())
+        self.write_config(**json.loads(self.text(".ratchet.json")), default_branch="trunk")
+        self.assertEqual(self.start_point_step(self.init_without_hooks()), ("added", self.recording_detail(base, "trunk")))
+        self.assertEqual(self.recorded(), {"trunk": base})
+
+    def test_a_default_branch_in_the_config_that_is_not_a_branch_skips_the_step_with_that_reason(self) -> None:
+        self.commit("base")
+        self.write_config(default_branch="develop")
+        out = self.init_without_hooks()
+        self.assertEqual(self.start_point_step(out), ("skipped", "config default_branch 'develop' is not a branch of this repo"))
+        self.assertFalse((self.repo / START_POINTS_NAME).exists())
+
+    def test_the_default_branch_in_the_config_is_the_one_recorded(self) -> None:
+        self.commit("base")
+        git(self.repo, "checkout", "-q", "-b", "develop")
+        develop = self.commit("develop work")
+        git(self.repo, "checkout", "-q", "main")
+        self.write_config(default_branch="develop")
+        out = self.init_without_hooks()
+        self.assertEqual(self.start_point_step(out), ("added", self.recording_detail(develop, "develop")))
+        self.assertEqual(self.recorded(), {"develop": develop})
+
+    def test_init_on_a_feature_branch_records_where_the_default_branch_stands_and_not_head(self) -> None:
+        base = self.commit("base")
+        git(self.repo, "checkout", "-q", "-b", "feature")
+        self.commit("feature work")
+        out = self.init_without_hooks()
+        self.assertEqual(self.start_point_step(out), ("added", self.recording_detail(base)))
+        self.assertEqual(self.recorded(), {"main": base})
+
+    def test_a_start_point_the_branch_no_longer_descends_from_is_replaced_and_the_other_branches_are_kept(self) -> None:
+        base = self.commit("base")
+        git(self.repo, "checkout", "-q", "-b", "side")
+        side = self.commit("side work")
+        git(self.repo, "checkout", "-q", "main")
+        tip = self.commit("tip")
+        unusable = {"a commit main does not descend from": side, "a commit this clone does not have": "a" * 40}
+        for label, start in unusable.items():
+            with self.subTest(label):
+                self.write_recorded({"main": start, "develop": base})
+                out = self.init_without_hooks()
+                self.assertEqual(self.start_point_step(out), ("added", self.recording_detail(tip)))
+                self.assertEqual(self.recorded(), {"main": tip, "develop": base})
+
+    def test_init_in_a_linked_worktree_records_into_the_shared_state_of_the_main_worktree(self) -> None:
+        self.write_rules(STYLE_RULES)
+        self.write_config(rules_files=["rules.md"])  # a linked worktree reads the config of the main one
+        git(self.repo, "add", "rules.md")
+        base = self.commit("base")
+        linked = self.tmp / "linked"
+        git(self.repo, "worktree", "add", "-q", "-b", "side", str(linked))
+        git(linked, "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "side work")
+        code, out, err = self.cli("init", "--yes", "--no-hooks", "--repo", str(linked), with_repo=False)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.start_point_step(out), ("added", self.recording_detail(base)))
+        self.assertEqual(self.recorded(), {"main": base})
+        self.assertFalse((linked / ".ratchet").exists())
+
+    def test_a_damaged_start_points_file_stops_init_and_is_left_alone_and_a_rerun_after_deleting_it_records(self) -> None:
+        base = self.commit("base")
+        path = self.repo / START_POINTS_NAME
+        path.parent.mkdir()
+        path.write_text("{not json", encoding="utf-8")
+        code, _, err = self.cli("init", "--yes", "--no-hooks")
+        self.assertEqual(code, 1)
+        self.assertIn("start-points.json is not JSON", err)
+        self.assertEqual(path.read_text(encoding="utf-8"), "{not json")
+        path.unlink()
+        self.assertEqual(self.start_point_step(self.init_without_hooks()), ("added", self.recording_detail(base)))
+
+    def test_the_step_runs_after_the_gitignore_step_so_a_failure_there_leaves_no_start_point_that_nothing_ignores(self) -> None:
+        self.commit("base")
+        (self.repo / ".gitignore").write_text(f"{HASH_END}\n{HASH_BEGIN}\n", encoding="utf-8")  # the .gitignore step cannot finish
+        code, _, err = self.cli("init", "--yes", "--no-hooks")
+        self.assertEqual(code, 1)
+        self.assertIn(".gitignore", err)
+        self.assertFalse((self.repo / START_POINTS_NAME).exists())
 
 
 class DryRunDiffTest(InitCase):

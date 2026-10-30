@@ -8,7 +8,7 @@ from ratchet.errors import RatchetError
 from ratchet.git import commit_sha, committed_blob
 from ratchet.proposal_store import local_path, read_local, replace_local
 from ratchet.review import save_review
-from ratchet.review_evidence import capture, save, source_for
+from ratchet.review_evidence import capture, save, snapshot_snippets, source_for
 from ratchet.source_evidence import MAX_SOURCE_BYTES, read_committed_source, read_source
 
 
@@ -107,6 +107,82 @@ class LinkedTreeEvidenceTest(RepoCase):
         (main_rules,) = capture(self.config, self.repo, None)["rules"]
         self.assertEqual(Path(main_rules["absolute_path"]), self.repo / "rules.md")
         self.assertNotEqual(main_rules["text"], "tree rules")
+
+
+class RangeEvidenceTest(RepoCase):
+    """A review of a commit range read those commits, so its evidence is the files the range changed as HEAD holds them,
+    though the working tree has edits to them that shift every line."""
+
+    def setUp(self):
+        super().setUp()
+        self.with_sample_rules()
+        self.config = load_config(self.repo, None, None, self.repo)
+        (self.repo / "a.py").write_text("old\n")
+        (self.repo / "outside.py").write_text("outside one\noutside two\n")
+        (self.repo / "gone.py").write_text("gone\n")
+        git(self.repo, "add", "-A")
+        self.start = self.commit("start")
+        (self.repo / "a.py").write_text("one\ntwo\nthree\nfour\nfive\n")
+        (self.repo / "b.py").write_text("b one\n")
+        (self.repo / "gone.py").unlink()
+        git(self.repo, "add", "-A")
+        self.head = self.commit("the reviewed range")
+        self.range = f"{self.start}..{self.head}"
+        (self.repo / "a.py").write_text("inserted\none\ntwo\nthree\nfour\nfive\n")  # a file of the range, edited since
+        (self.repo / "outside.py").write_text("edited\noutside one\noutside two\n")  # a file the range left alone, edited too
+        (self.repo / "c.py").write_text("untracked\n")
+
+    def test_the_evidence_is_the_files_the_range_changed_as_head_holds_them(self):
+        snapshot = capture(self.config, self.repo, None, self.range)
+        self.assertEqual(snapshot["committed_range"], self.range)
+        self.assertEqual(sorted(snapshot["files"]), ["a.py", "b.py", "gone.py"])
+        self.assertEqual(snapshot["files"]["a.py"]["text"], "one\ntwo\nthree\nfour\nfive")  # not the edited file
+        self.assertEqual(snapshot["files"]["a.py"]["version"], f"commit:{self.head}")
+        self.assertEqual(snapshot["files"]["gone.py"]["status"], "unavailable")  # the range deleted it
+        self.assertEqual(snapshot["omitted_files"], [])
+
+    def test_work_that_is_not_committed_is_no_part_of_it(self):
+        files = capture(self.config, self.repo, None, self.range)["files"]
+        self.assertTrue({"c.py", "outside.py"}.isdisjoint(files), sorted(files))
+
+    def test_a_review_of_the_local_changes_keeps_them_as_they_are_on_disk(self):
+        snapshot = capture(self.config, self.repo, None)
+        self.assertIsNone(snapshot["committed_range"])
+        self.assertEqual(sorted(snapshot["files"]), ["a.py", "c.py", "outside.py"])
+        self.assertEqual(snapshot["files"]["a.py"]["text"], "inserted\none\ntwo\nthree\nfour\nfive")
+        self.assertEqual(snapshot["files"]["a.py"]["version"], "current_workspace")
+
+    def test_the_rules_are_still_read_from_disk(self):
+        (self.repo / "rules.md").write_text("edited rules\n")  # the reviewer loads its rules from the working tree
+        (rules,) = capture(self.config, self.repo, None, self.range)["rules"]
+        self.assertEqual(rules["text"], "edited rules")
+
+    def test_a_snippet_is_cut_from_the_commit_for_any_file_the_working_tree_edited(self):
+        locate = snapshot_snippets(self.config, self.repo, capture(self.config, self.repo, None, self.range))
+        self.assertEqual(locate("a.py", 1), ("one\ntwo\nthree\nfour", "review"))  # the edited file would give "inserted\none\ntwo\nthree"
+        self.assertEqual(locate("outside.py", 1), ("outside one\noutside two", "review"))
+        self.assertEqual(locate("c.py", 1), (None, "unavailable"))  # a file no commit holds
+
+    def saved_stability(self, snapshot):
+        save_review(self.repo, "R1", "synthetic review")
+        save(self.config, self.repo, "R1", snapshot, "synthetic review")
+        record = json.loads((self.repo / ".ratchet" / "reviews" / "R1.evidence.json").read_text(encoding="utf-8"))
+        return record["source_stable_during_review"]
+
+    def test_a_file_the_working_tree_edits_while_the_review_runs_is_not_unstable(self):
+        snapshot = capture(self.config, self.repo, None, self.range)
+        (self.repo / "a.py").write_text("changed during the review\n")
+        stable = self.saved_stability(snapshot)
+        self.assertEqual((stable["a.py"], stable["b.py"]), (True, True))  # the commit did not change, whatever the file did
+        source = source_for(self.config, review_finding(file="a.py", line=2))
+        self.assertEqual((source["text"], source["stable_during_review"]), ("one\ntwo\nthree\nfour\nfive", True))
+
+    def test_a_commit_made_while_the_review_runs_does_not_make_the_evidence_unstable(self):
+        snapshot = capture(self.config, self.repo, None, self.range)
+        (self.repo / "a.py").write_text("committed during the review\n")
+        git(self.repo, "add", "a.py")
+        self.commit("made while the review ran")  # HEAD moves on; the evidence is still the commit it was captured from
+        self.assertEqual(self.saved_stability(snapshot)["a.py"], True)
 
 
 class CommittedSourceTest(RepoCase):

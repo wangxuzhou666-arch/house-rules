@@ -27,11 +27,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
 
 from .auto import (
-    CLAIMED_NAME, is_session_id, log_failure, make_state_dir, pending_path, raised_at, read_pending, session_id, state_dir,
-    utc_timestamp,
+    CLAIMED_NAME, PendingCommit, is_session_id, log_failure, make_state_dir, pending_path, raised_at, read_pending, session_id,
+    state_dir, utc_timestamp,
 )
-from .config import load_config
-from .review import REVIEW_CHILD_ENV, Refusal
+from .config import Config, load_config
+from .git import commit_sha, is_ancestor
+from .ledger import Event
+from .review import REVIEW_CHILD_ENV, Refusal, checked_out_default_branch
 
 if TYPE_CHECKING:
     from .wrapup import WrapupPlan
@@ -114,9 +116,39 @@ def _claim(pending: Path) -> Path | None:
     return claimed
 
 
-def _due_in(worktree: Path) -> Due | None:
-    """Judge one worktree a commit was noted in. None when there is nothing to judge or the work is too little: the path is gone, its
-    repo does not ask for the automatic wrap-up (any more), or it has not reached a threshold."""
+def _parent_of_first_note(worktree: Path, notes: list[PendingCommit]) -> str | None:
+    """The parent of the first noted commit that HEAD still descends from (one a rebase or a reset dropped is passed over) and that
+    has a parent. A fresh repo's first round often starts with its root commit, which has none: it is passed over for the commit
+    after it, so the root commit's own work is the one thing the first wrap-up does not count. A session that noted only the root
+    gives nothing, and a later Stop with more commits does."""
+    for note in notes:
+        parent = commit_sha(worktree, f"{note.head}^")
+        if parent is not None and is_ancestor(worktree, note.head, "HEAD"):
+            return parent
+    return None
+
+
+def _note_start_point(config: Config, events: list[Event], notes: list[PendingCommit]) -> None:
+    """On the default branch, with no review and no start point to measure from, record the parent of the first commit noted there
+    as the start point: without one the fork point is HEAD and the commits made in the session would not count. A repo that ran
+    `ratchet init` after its first commit has one already, and the first wrap-up there is measured from it."""
+    from .start_point import record_start_point, usable_start_point
+    from .wrapup import last_reviewed
+
+    default = checked_out_default_branch(config.worktree, config.default_branch)
+    if default is None or last_reviewed(config.worktree, events) is not None:
+        return
+    default_name, default_commit = default
+    if usable_start_point(config, default_name, default_commit) is not None:
+        return
+    start = _parent_of_first_note(config.worktree, notes)
+    if start is not None:
+        record_start_point(config, default_name, start)
+
+
+def _due_in(worktree: Path, notes: list[PendingCommit]) -> Due | None:
+    """Judge one worktree the commits `notes` were made in. None when there is nothing to judge or the work is too little: the path
+    is gone, its repo does not ask for the automatic wrap-up (any more), or it has not reached a threshold."""
     from .ledger import read_events
     from .wrapup import plan_wrapup  # the heavy part: a session with nothing noted never gets here
 
@@ -125,17 +157,22 @@ def _due_in(worktree: Path) -> Due | None:
     config = load_config(worktree, None, None, worktree)  # as `--repo <worktree>` loads it
     if not config.wrapup_auto:
         return None
-    plan = plan_wrapup(config, read_events(config.ledger_path), foresee_refusal=True)
+    events = read_events(config.ledger_path)
+    _note_start_point(config, events, notes)
+    plan = plan_wrapup(config, events, foresee_refusal=True)
     return Due(worktree, config.root, plan) if plan.due else None
 
 
 def _judge(claimed: Path) -> list[Due]:
     """The worktrees the claimed commits were made in whose work is due. A worktree counts once, however many commits were made in
-    it: the measurement is of everything since its last review."""
+    it: the measurement is of everything since its last review. The file is read once, so a line that is damaged is told once."""
+    noted: dict[Path, list[PendingCommit]] = {}
+    for commit in read_pending(claimed):
+        noted.setdefault(commit.worktree, []).append(commit)
     due = []
-    for worktree in dict.fromkeys(commit.worktree for commit in read_pending(claimed)):
+    for worktree, commits in noted.items():
         try:
-            judged = _due_in(worktree)
+            judged = _due_in(worktree, commits)
         except Exception as exc:  # batch isolation: a worktree that cannot be judged (a damaged config, a deleted branch) must not hide the rest
             log_failure(f"auto stop: {worktree}: {type(exc).__name__}: {exc}{raised_at(exc)}")
             continue

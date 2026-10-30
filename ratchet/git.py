@@ -9,6 +9,7 @@ from .errors import RatchetError
 
 # A process spawned by a git hook inherits these and would make git act on the hook's repo instead of cwd.
 _HOOK_ENV = ("GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE")
+SHA_WIDTH = 12  # hex digits of a sha shown to a person, as in a round key
 
 
 def _git_env(keep_index_file: bool) -> dict[str, str]:
@@ -100,6 +101,19 @@ def merge_base_with_head(root: Path, commit: str) -> str | None:
     """Full sha where HEAD forked from `commit`, or None when their histories share nothing (rc=1)."""
     proc = run_git(["merge-base", "HEAD", commit], root, allowed_returncodes=(0, 1))
     return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+def is_ancestor(root: Path, commit: str, tip: str) -> bool:
+    """Whether `tip` descends from `commit` (a commit is its own ancestor). A commit this clone no longer has (pruned after a
+    rebase) is not an ancestor of anything."""
+    if commit_sha(root, commit) is None:
+        return False
+    return run_git(["merge-base", "--is-ancestor", commit, tip], root, allowed_returncodes=(0, 1)).returncode == 0
+
+
+def commit_tree(root: Path, commit: str) -> str:
+    """The id of the tree `commit` holds. The tree is an object of the commit already, so asking for it writes nothing."""
+    return run_git(["rev-parse", f"{commit}^{{tree}}"], root).stdout.strip()
 
 
 def origin_url(root: Path) -> str | None:

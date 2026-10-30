@@ -1,0 +1,24 @@
+```json
+[
+  {
+    "file": "stats.py",
+    "line": 4,
+    "summary": "The loop starts at index 1 (`range(1, len(values))`), so the first element is never added and `total` under-counts.",
+    "failure_scenario": "`total([5, 1, 2])` returns 3 instead of 8. `total([10])` returns 0 instead of 10. Any caller summing a non-empty list gets a wrong result unless the first element is 0. The fix is `range(len(values))`, or iterate directly with `for v in values`."
+  },
+  {
+    "file": "stats.py",
+    "line": 4,
+    "summary": "The manual index loop re-implements the builtin `sum` and is what hides the off-by-one.",
+    "failure_scenario": "`return sum(values)` does the same job, has no start-index to get wrong, and gives the correct result for empty and one-element lists. The hand-written `result = 0; for i in range(...)` form adds maintenance cost and already produced the bug above."
+  },
+  {
+    "file": "stats.py",
+    "line": 1,
+    "summary": "The new function has no test, so nothing would have caught the wrong result.",
+    "failure_scenario": "The commit adds `total` with no test file. A one-line check such as `assert total([1, 2, 3]) == 6` would have failed immediately on the skipped first element."
+  }
+]
+```
+
+The range `7c93e38..HEAD` covers only `stats.py` (commit c3). There is also a bug in `loop.py`, outside the range, from commit c2. In `first_negative_index`, `i` is never incremented, so any list whose first element is non-negative loops forever. I did not include it in the findings because it is out of scope.

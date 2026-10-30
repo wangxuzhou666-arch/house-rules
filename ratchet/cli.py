@@ -24,7 +24,7 @@ from .direct_label import DEFAULT_EVIDENCE, direct_label_events
 from .errors import RatchetError, RoundCapReached, RoundKeyUnavailable
 from .fsutil import diff_lines, write_text
 from .gate import gate_pass_event, plan_gate_findings
-from .git import commit_sha, head_sha
+from .git import commit_sha, commit_tree, head_sha
 from .ingest import (
     IngestResult, Locator, code_review_events, extract_review_items_lenient, parse_json_items, report_events,
 )
@@ -48,8 +48,8 @@ from .sources import DiskReader, FileReader, IndexReader
 from .state_tree import state_tree
 from .vendor import MARKER_NAME, SOURCE_ROOT, check_vendored, plan_vendor, vendor_into
 from .wrapup import (
-    CAPPED, DRY_RUN, REPORTED, REVIEWED, SKIPPED, Thresholds, blind_spot_lines, config_thresholds, measure_lines, open_unmapped_line,
-    plan_wrapup, report, review_run_events, run_blind_spots, unmapped_findings, wrapup_cap_message,
+    CAPPED, DRY_RUN, REPORTED, REVIEWED, SKIPPED, Base, Thresholds, blind_spot_lines, choose_base, config_thresholds, measure_lines,
+    open_unmapped_line, plan_wrapup, report, review_range, review_run_events, run_blind_spots, unmapped_findings, wrapup_cap_message,
 )
 
 
@@ -153,6 +153,27 @@ def _record_state_tree(tree: Path) -> str | None:
         return None
 
 
+def _review_range(config: Config, events: list[Event], base: Base | None) -> str | None:
+    """The commit range a review of the current work is told to read (`review_range`), measured from `base`. A review that a
+    wrap-up runs gets the wrap-up's own base; one that runs on its own picks the base a wrap-up would."""
+    return review_range(config.worktree, choose_base(config, events, None) if base is None else base, config.default_branch)
+
+
+def _review_tree(tree: Path, head: str, target: str | None, committed_range: str | None) -> str | None:
+    """The tree a review_run records, which a later wrap-up measures new work from.
+
+    None for a --target review: its round key names no branch and a wrap-up measures only from a branch's review, so a tree would
+    be objects nothing reads. A review of a commit range read committed work only: its tree is that of the commit the range
+    ends at, `head`, which holds none of the work still uncommitted in the worktree, so the next wrap-up counts that work again.
+    Any other review read the worktree as it was when it started.
+    """
+    if target is not None:
+        return None
+    if committed_range is not None:
+        return commit_tree(tree, head)
+    return _record_state_tree(tree)
+
+
 # The refusals a dry run reports and carries on past. The others leave nothing to preview: no rules to ingest with, no round to name.
 _DRY_RUN_PREVIEWED = (REFUSE_ROUND_CAP, REFUSE_CLAUDE)
 
@@ -163,7 +184,8 @@ def _dry_run_refusal_line(refusal: Refusal) -> str:
     return f"[dry-run] a real run would be refused: {refusal.message}"
 
 
-def cmd_review(args: argparse.Namespace, config: Config) -> int:
+def cmd_review(args: argparse.Namespace, config: Config, *, base: Base | None = None) -> int:
+    """`base` is what the wrap-up that asked for this review measured the work from; None for a review run on its own."""
     if args.from_file and (args.level or args.target):
         raise RatchetError("--level and --target choose what to review; they do nothing with --from-file")
     events = read_events(config.ledger_path)
@@ -198,14 +220,14 @@ def cmd_review(args: argparse.Namespace, config: Config) -> int:
         locate = worktree_snippets(tree)
     else:
         level = args.level or DEFAULT_LEVEL
-        argv = claude_command(level, args.target)
+        committed_range = None if args.target is not None else _review_range(config, events, base)  # --target names the scope already
+        argv = claude_command(level, args.target or committed_range)
         if args.dry_run:
             print(f"[dry-run] review: would run `{shlex.join(argv)}` in {tree} (run {run_id}); nothing run or written")
             return 0
-        evidence_snapshot = capture_review_evidence(config, tree, args.target)
+        evidence_snapshot = capture_review_evidence(config, tree, args.target, committed_range)
         head = evidence_snapshot["head"] or NO_COMMIT  # HEAD as the reviewer starts, not as it is when the review ends
-        # A --target round key names no branch and a wrap-up measures only from a branch's review: its tree would be objects nothing reads.
-        state_tree_id = None if args.target is not None else _record_state_tree(tree)  # the working tree as the reviewer starts, for the same reason
+        state_tree_id = _review_tree(tree, head, args.target, committed_range)  # taken as the reviewer starts, for the same reason
         reviewer_version = _read_critic_version(tree)
         text = run_claude(argv, tree)
         locate = snapshot_snippets(config, tree, evidence_snapshot)
@@ -538,10 +560,10 @@ def _review_args(args: argparse.Namespace) -> argparse.Namespace:
     return build_parser().parse_args(argv)
 
 
-def _run_wrapup_review(args: argparse.Namespace, config: Config, events: list[Event]) -> str:
-    """Run `ratchet review` as it would run on its own and return the run id it recorded."""
+def _run_wrapup_review(args: argparse.Namespace, config: Config, events: list[Event], base: Base) -> str:
+    """Run `ratchet review` as it would run on its own, over the work measured from `base`, and return the run id it recorded."""
     try:
-        cmd_review(_review_args(args), config)
+        cmd_review(_review_args(args), config, base=base)
     except RoundCapReached as exc:
         raise RoundCapReached(wrapup_cap_message(str(exc))) from exc
     runs = review_run_events(read_events(config.ledger_path))
@@ -549,10 +571,11 @@ def _run_wrapup_review(args: argparse.Namespace, config: Config, events: list[Ev
     return runs[-1]["run"]
 
 
-def _review_plan(args: argparse.Namespace) -> str:
+def _review_plan(args: argparse.Namespace, config: Config, base: Base) -> str:
     if args.from_file:
         return f"would ingest {args.from_file} as a review"
-    return f"would run `{shlex.join(claude_command(args.level or DEFAULT_LEVEL, None))}`"
+    committed_range = review_range(config.worktree, base, config.default_branch)
+    return f"would run `{shlex.join(claude_command(args.level or DEFAULT_LEVEL, committed_range))}`"
 
 
 def _wrapup_report_only(events: list[Event], config: Config, thresholds: Thresholds) -> dict:
@@ -579,13 +602,13 @@ def _wrapup(args: argparse.Namespace, config: Config, events: list[Event]) -> tu
         return 0, summary(SKIPPED, open_unmapped=plan.open_unmapped, reason=plan.reason)
     if args.dry_run:
         refusal = plan.would_refuse
-        step = _review_plan(args) if refusal is None else f"a real run would be refused: {refusal.message}"
+        step = _review_plan(args, config, plan.base) if refusal is None else f"a real run would be refused: {refusal.message}"
         print(f"[dry-run] wrapup: {plan.reason}; {step}; nothing run or written")
         return 0, summary(DRY_RUN, open_unmapped=plan.open_unmapped, reason=plan.reason,
                           would_refuse=None if refusal is None else dataclasses.asdict(refusal))
     print(f"wrapup: {plan.reason}; running a review")
     try:
-        run = _run_wrapup_review(args, config, events)
+        run = _run_wrapup_review(args, config, events, plan.base)
     except RoundCapReached as exc:
         if not args.json:
             raise

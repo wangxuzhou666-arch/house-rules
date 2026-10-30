@@ -8,7 +8,7 @@ allowed-tools: Read, Write, Bash(ratchet *), AskUserQuestion, Skill
 
 `ratchet` is the plugin's `bin/ratchet`. If the shell cannot find it, use `${CLAUDE_PLUGIN_ROOT}/bin/ratchet`. Arguments given to this skill: `$ARGUMENTS`.
 
-1. Read the arguments: the first word is the level (`low`, `medium`, `high`, `xhigh` or `max`; default `high`), anything after it is the target (a PR number, branch or path; default is the current diff).
+1. Read the arguments: the first word is the level (`low`, `medium`, `high`, `xhigh` or `max`; default `high`), anything after it is the target (a PR number, branch or path; with none, the review reads the whole branch, or on the default branch the commits since the start point or the last review).
 2. Run `ratchet review --level <level>`, adding `--target <target>` if given. It takes about 30 seconds at `high` and longer above that. If the repo has no rules yet, offer `/review-ratchet:setup` first.
    A change gets at most 3 review rounds (review, fix, re-review; `max_review_rounds` in `.ratchet.json`). `review` prints `review round <r>/<max> for <key>` first, and `ratchet count` ends with the rounds used.
 3. Show the findings table exactly as printed, and name the file where the raw review output was saved.

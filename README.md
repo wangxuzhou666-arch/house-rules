@@ -102,7 +102,7 @@ Without the plugin, run the command straight from the checkout (Python 3.10+, st
 With the plugin:
 
 1. [Install the plugin](#install).
-2. In your repo, run `/review-ratchet:setup` once. It previews and then runs `ratchet init`: a rules file (the bundled template is a draft to adjust), the compiled style digest, an `@import` line in `CLAUDE.md`, git hooks (each is run once to prove it is reached), `.gitignore` entries and, if you choose it, the automatic wrap-up. It ends with a ready `git add ... && git commit` line for the files it created: run it, because the pre-commit hook checks the staged copies.
+2. In your repo, run `/review-ratchet:setup` once. It previews and then runs `ratchet init`: a rules file (the bundled template is a draft to adjust), the compiled style digest, an `@import` line in `CLAUDE.md`, git hooks (each is run once to prove it is reached), `.gitignore` entries, a start point for the default branch (the commit its first wrap-up measures from) and, if you choose it, the automatic wrap-up. It ends with a ready `git add ... && git commit` line for the files it created: run it, because the pre-commit hook checks the staged copies.
 3. Commit as usual. When a turn ends after a commit and the work since the last review has reached a threshold (`wrapup_min_changed_lines`, default 200, or `wrapup_min_files`, default 5), Claude runs the wrap-up review in the background. It asks one question only when the review found a blind spot, a problem no rule covers, that you have not been asked about before. Below the threshold nothing runs. This needs Claude Code 2.1.163 or newer; see [Automatic wrap-up](docs/WRAPUP.md#automatic-wrap-up).
 4. Maintain the rules from those findings with `/review-ratchet:maintain`; the question offers to start it. The agent gathers code evidence, proposes scoped changes, and asks through the host's native question tool. Accepted changes update the rules and digest; rejection, deferral and requests for revision are also recorded. No custom UI or manual JSON copying is required. See [the workflow and assessment contract](docs/DECISION-CARDS.md).
 
@@ -112,7 +112,7 @@ Without the plugin nothing triggers automatically: run the commands yourself, or
 
 ```sh
 /path/to/review-ratchet/bin/ratchet init            # asks a few questions; --yes accepts the defaults, --dry-run only prints the plan
-/path/to/review-ratchet/bin/ratchet review          # runs claude -p "/code-review high", records the findings
+/path/to/review-ratchet/bin/ratchet review          # runs claude -p "/code-review high" (on the default branch, with the commit range to read), records the findings
 /path/to/review-ratchet/bin/ratchet wrapup          # counts the work since the last review; reviews once only if enough changed
 /path/to/review-ratchet/bin/ratchet count --by-rule # what is open, by clause
 ```
@@ -127,7 +127,7 @@ See [customization](docs/CUSTOMIZATION.md), [rule writing](docs/RULE-WRITING.md)
 the future [personal decision metrics](docs/DECISION-METRICS.md) direction.
 
 ```sh
-bin/ratchet init [--yes] [--dry-run] [--no-wrapup-auto]                    # set up this repo (config, rules file, digest, CLAUDE.md, hooks, .gitignore)
+bin/ratchet init [--yes] [--dry-run] [--no-wrapup-auto]                    # set up this repo (config, rules file, digest, CLAUDE.md, hooks, .gitignore, start point)
 bin/ratchet review [--level high] [--target T] [--from-file F] [--over-cap] # run /code-review, save the raw output, record the findings; 3 rounds per change, then exit 3
 bin/ratchet wrapup [--level high] [--base REF] [--from-file F] [--json] [--dry-run] # count what changed since the last review; review once if enough did (docs/WRAPUP.md); exit 3 at the round cap
 bin/ratchet ingest-code-review --source l1 --run R12 < review-output.txt   # JSON array, or text containing a ```json block

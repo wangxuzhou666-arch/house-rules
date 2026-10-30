@@ -16,6 +16,7 @@ from ratchet.git import run_git
 from ratchet.ledger import read_events
 from ratchet.review import REFUSE_CLAUDE, REFUSE_ROUND_CAP, round_key
 from ratchet.review_evidence import snippet_around
+from ratchet.start_point import START_POINTS_NAME, record_start_point
 from ratchet.state_tree import MAX_UNTRACKED_BYTES, OVERSIZE_STAND_IN, numstat_since, state_tree, tree_exists
 from ratchet.wrapup import (
     BASE_FLAG, BASE_MERGE_BASE, Changes, Thresholds, WrapupPlan, code_window, plan_wrapup, round_key_branch, run_blind_spots,
@@ -36,6 +37,9 @@ def blind_spot(summary: str, **overrides: object) -> dict:
     item = review_item(category="unmapped", severity="should-fix", summary=summary)
     item.update(overrides)
     return item
+
+
+IGNORE_STATE = ".ratchet/\n.style-findings.jsonl\n"  # what `ratchet init` git-ignores: a test's `git add -A` then leaves ratchet's files out
 
 
 class WrapupCase(RepoCase):
@@ -133,6 +137,10 @@ class WrapupCase(RepoCase):
     def round_on(self, branch: str, run: str, **overrides: object) -> dict:
         """A recorded review of `branch`. Only a review of the branch a wrap-up runs on can be its base."""
         return review_round(key=f"{branch}@0a1b2c3d4e5f", run=run, **overrides)
+
+    def set_start(self, commit: str, branch: str = "main") -> None:
+        """Record `commit` as the start point of `branch`, as `ratchet init` or the automatic wrap-up would."""
+        record_start_point(load_config(self.repo, None, None, self.repo), branch, commit)
 
     def objects(self) -> dict[str, int]:
         """Every file in the repo's object store with its size: what a command that writes an object changes."""
@@ -1388,6 +1396,293 @@ class RepeatedBlindSpotTest(WrapupCase):
         self.assertEqual(run_blind_spots([old, same, later], frozenset(), "r2").repeated, [same])  # a later run is not "earlier"
         alone = run_blind_spots([same, later], frozenset(), "r2")  # and it makes no repeat of its own when it is the only other run with the code
         self.assertEqual(([f["display_id"] for f in alone.new], alone.repeated), (["r2-1"], []))
+
+
+class StartPointBaseTest(WrapupCase):
+    """On the default branch, where the fork point is HEAD itself, the start point recorded there is where the work is measured
+    from, unless a flag or an earlier review of the branch decides."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.base = self.start({".gitignore": IGNORE_STATE})
+        self.set_start(self.base)
+
+    def test_commits_made_after_the_start_point_count_with_the_uncommitted_work(self) -> None:
+        self.commit_file("one.txt", 30)
+        self.put("two.txt", numbered(10))
+        data = self.measure()
+        self.assertEqual((data["base"], data["base_reason"], data["changed_lines"], data["changed_files"]), (self.base, "start-point", 40, 2))
+        _, out, _ = self.cli("wrapup", "--dry-run")
+        self.assertIn(f"wrapup: 40 changed line(s) in 2 file(s) since {self.base[:12]} (the start point recorded for main)\n", out)
+
+    def test_the_last_review_of_the_branch_wins_over_the_start_point(self) -> None:
+        first = self.commit_file("one.txt", 30)
+        self.commit_file("two.txt", 30)
+        self.append_raw(self.round_on("main", "r1", head=first))
+        data = self.measure()
+        self.assertEqual((data["base"], data["base_reason"], data["changed_lines"]), (first, "last-review", 30))
+
+    def test_a_review_with_no_usable_head_is_passed_over_for_the_start_point(self) -> None:
+        self.commit_file("one.txt", 30)
+        self.append_raw(self.round_on("main", "r1", head="a" * 40))  # a commit this clone does not have
+        data = self.measure()
+        self.assertEqual((data["base"], data["base_reason"], data["changed_lines"]), (self.base, "start-point", 30))
+
+    def test_an_explicit_base_wins_over_the_start_point(self) -> None:
+        first = self.commit_file("one.txt", 30)
+        self.commit_file("two.txt", 5)
+        data = self.measure("--base", first)
+        self.assertEqual((data["base"], data["base_reason"], data["changed_lines"]), (first, "--base", 5))
+
+    def test_a_feature_branch_is_measured_from_where_it_forked_and_not_from_the_start_point(self) -> None:
+        fork = self.commit_file("one.txt", 30)  # main moved on after the start point
+        git(self.repo, "checkout", "-q", "-b", "feature")
+        self.commit_file("two.txt", 7)
+        data = self.measure()
+        self.assertEqual((data["base"], data["base_reason"], data["changed_lines"]), (fork, "merge-base", 7))
+
+    def test_a_start_point_that_is_not_usable_counts_as_none(self) -> None:
+        git(self.repo, "checkout", "-q", "-b", "other")
+        elsewhere = self.commit_file("other.txt", 2)
+        git(self.repo, "checkout", "-q", "main")
+        head = self.commit_file("one.txt", 3)
+        unusable = {"a commit main does not descend from": elsewhere, "a commit this clone does not have": "a" * 40}
+        for why, commit in unusable.items():
+            with self.subTest(why):
+                self.set_start(commit)
+                data = self.measure()
+                self.assertEqual((data["base"], data["base_reason"]), (head, "merge-base"))
+
+    def test_a_start_point_recorded_for_another_branch_does_not_apply(self) -> None:
+        (self.repo / START_POINTS_NAME).write_text(json.dumps({"develop": self.base}), encoding="utf-8")
+        head = self.commit_file("one.txt", 3)
+        data = self.measure()
+        self.assertEqual((data["base"], data["base_reason"]), (head, "merge-base"))
+
+    def test_only_the_configured_default_branch_has_a_start_point(self) -> None:
+        self.write_config(rules_files=["rules.md"], default_branch="develop")
+        configured = self.commit_all("develop is the default branch")
+        git(self.repo, "checkout", "-q", "-b", "develop")
+        self.commit_file("one.txt", 30)
+        self.set_start(configured, "develop")
+        data = self.measure()
+        self.assertEqual((data["base"], data["base_reason"], data["changed_lines"]), (configured, "start-point", 30))
+        self.assertIn("(the start point recorded for develop)", self.cli("wrapup", "--dry-run")[1])
+        git(self.repo, "checkout", "-q", "main")  # main still has its start point, and is no longer the default branch
+        data = self.measure()
+        self.assertEqual((data["base"], data["base_reason"]), (configured, "merge-base"))
+
+    def test_a_damaged_start_points_file_stops_a_wrapup_on_the_default_branch_and_names_the_file(self) -> None:
+        damaged = {"not json": "{", "not branch names and full commits": json.dumps({"main": "abc123"})}
+        for why, text in damaged.items():
+            with self.subTest(why):
+                (self.repo / START_POINTS_NAME).write_text(text, encoding="utf-8")
+                code, _, err = self.cli("wrapup", "--dry-run")
+                self.assertEqual(code, 1)
+                self.assertIn("start-points.json", err)
+        git(self.repo, "checkout", "-q", "-b", "feature")  # the file is read only where a start point could apply
+        self.assertEqual(self.cli("wrapup", "--dry-run")[0], 0)
+
+    def test_measuring_writes_no_start_point(self) -> None:
+        path = self.repo / START_POINTS_NAME
+        before = path.read_bytes()
+        self.commit_file("one.txt", 5)
+        self.measure()
+        self.assertEqual(self.wrap()["status"], "skipped")
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(sorted(entry.name for entry in (self.repo / ".ratchet").iterdir()), ["start-points.json"])
+
+
+class ReviewRangeTest(WrapupCase):
+    """On the default branch a review of the work since the base is told which commits to read: `<base>..<HEAD>`."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.base = self.start({".gitignore": IGNORE_STATE})
+        self.set_start(self.base)
+        self.first = self.commit_file("one.txt", 250)
+        self.range = f"{self.base}..{self.first}"
+        self.claude = self.fake_claude(review_text())
+
+    def cli_with_claude(self, *argv: str, with_repo: bool = True) -> tuple[int, str, str]:
+        with mock.patch.dict(os.environ, {"RATCHET_CLAUDE_CMD": str(self.claude)}):
+            return self.cli(*argv, with_repo=with_repo)
+
+    def tree_of(self, commit: str) -> str:
+        return git(self.repo, "rev-parse", f"{commit}^{{tree}}")
+
+    def files_in(self, tree: str) -> list[str]:
+        return git(self.repo, "ls-tree", "-r", "--name-only", tree).splitlines()
+
+    def test_a_wrapup_dry_run_says_which_commits_the_review_would_read(self) -> None:
+        code, out, err = self.cli_with_claude("wrapup", "--dry-run")
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("[dry-run] wrapup: changed lines 250 >= wrapup_min_changed_lines 200; "
+                      f"would run `{self.claude} -p '/code-review high {self.range}'`; nothing run or written\n", out)
+        self.assertEqual(self.claude_calls(), [])
+
+    def test_a_review_dry_run_says_the_same_and_the_round_is_still_the_branch_and_its_fork_point(self) -> None:
+        code, out, err = self.cli_with_claude("review", "--dry-run")
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn(f"review round 1/3 for main@{self.first[:12]}\n", out)
+        self.assertIn(f"[dry-run] review: would run `{self.claude} -p '/code-review high {self.range}'` in {self.repo} (run r1); "
+                      "nothing run or written\n", out)
+
+    def test_a_real_wrapup_hands_the_range_to_claude_and_records_the_round_on_the_branch(self) -> None:
+        self.assertEqual(self.with_claude(self.claude)["status"], "reviewed")
+        self.assertEqual(self.claude_calls(), [["-p", f"/code-review high {self.range}"]])
+        (run,) = self.review_runs()
+        self.assertEqual((run["round_key"], run["head"]), (f"main@{self.first[:12]}", self.first))
+
+    def test_a_real_review_of_its_own_hands_the_same_range_to_claude(self) -> None:
+        code, _, err = self.cli_with_claude("review")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.claude_calls(), [["-p", f"/code-review high {self.range}"]])
+
+    def test_with_nothing_committed_since_the_base_there_is_no_range_and_the_working_tree_is_recorded(self) -> None:
+        self.set_start(self.first)  # the start point is HEAD: all the new work is uncommitted
+        self.more_work()
+        _, out, _ = self.cli_with_claude("wrapup", "--dry-run")
+        self.assertIn(f"would run `{self.claude} -p '/code-review high'`; nothing run or written\n", out)
+        self.with_claude(self.claude)
+        self.assertEqual(self.claude_calls(), [["-p", "/code-review high"]])
+        (run,) = self.review_runs()
+        self.assertNotEqual(run["tree"], self.tree_of(self.first))
+        self.assertIn("more.py", self.files_in(run["tree"]))
+
+    def test_an_explicit_base_starts_the_range_there_for_the_dry_run_and_the_real_run(self) -> None:
+        second = self.commit_file("two.txt", 250)
+        _, out, _ = self.cli_with_claude("wrapup", "--dry-run", "--base", self.first)
+        self.assertIn(f"would run `{self.claude} -p '/code-review high {self.first}..{second}'`", out)
+        self.assertEqual(self.with_claude(self.claude, "--base", self.first)["status"], "reviewed")
+        self.assertEqual(self.claude_calls(), [["-p", f"/code-review high {self.first}..{second}"]])  # not the start point's range
+
+    def test_a_configured_default_branch_is_where_a_range_is_given(self) -> None:
+        self.write_config(rules_files=["rules.md"], default_branch="develop")
+        configured = self.commit_all("develop is the default branch")
+        git(self.repo, "checkout", "-q", "-b", "develop")
+        self.set_start(configured, "develop")
+        second = self.commit_file("two.txt", 250)
+        for argv in (("wrapup", "--dry-run"), ("review", "--dry-run")):
+            with self.subTest(argv=argv):
+                _, out, _ = self.cli_with_claude(*argv)
+                self.assertIn(f"would run `{self.claude} -p '/code-review high {configured}..{second}'`", out)
+
+    def test_without_a_start_point_or_a_review_the_default_branch_gets_no_range(self) -> None:
+        (self.repo / START_POINTS_NAME).unlink()  # the fork point there is HEAD itself: there is no commit to start a range from
+        self.more_work()
+        for argv in (("wrapup", "--dry-run"), ("review", "--dry-run")):
+            with self.subTest(argv=argv):
+                _, out, _ = self.cli_with_claude(*argv)
+                self.assertIn(f"would run `{self.claude} -p '/code-review high'`", out)
+
+    def test_after_a_review_the_range_starts_at_the_head_that_review_began_at(self) -> None:
+        self.with_claude(self.claude)  # r1 reads base..first and records the tree of the working tree
+        second = self.commit_file("two.txt", 250)
+        data = self.measure()
+        self.assertEqual((data["base_reason"], data["base"]), ("last-review-tree", self.tree_of(self.first)))
+        _, out, _ = self.cli_with_claude("wrapup", "--dry-run")
+        self.assertIn(f"would run `{self.claude} -p '/code-review high {self.first}..{second}'`", out)  # a commit, not the tree
+
+    def test_after_a_range_review_the_base_is_said_to_be_the_head_that_review_found(self) -> None:
+        self.with_claude(self.claude)  # r1 reads base..first: committed work only, so its tree is the tree of first
+        self.commit_file("two.txt", 250)  # HEAD moves on; the note is about the head r1 started at
+        _, out, _ = self.cli_with_claude("wrapup", "--dry-run")
+        self.assertIn(f"since {self.tree_of(self.first)[:12]} (HEAD as review r1 found it)\n", out)
+        self.assertNotIn("the working tree as review", out)
+
+    def test_after_a_saved_review_of_a_clean_working_tree_the_base_is_said_to_be_the_head_that_review_found(self) -> None:
+        self.assertEqual(self.wrap("--from-file", str(self.write_review()))["status"], "reviewed")  # nothing uncommitted: the tree is first's
+        self.commit_file("two.txt", 250)
+        _, out, _ = self.cli_with_claude("wrapup", "--dry-run")
+        self.assertIn(f"since {self.tree_of(self.first)[:12]} (HEAD as review r1 found it)\n", out)
+
+    def test_after_a_review_of_uncommitted_work_the_base_is_said_to_be_the_working_tree_that_review_found(self) -> None:
+        self.set_start(self.first)  # nothing is committed since the start point, so the review reads the working tree
+        self.more_work()
+        self.with_claude(self.claude)
+        (run,) = self.review_runs()
+        self.assertNotEqual(run["tree"], self.tree_of(self.first))
+        self.commit_file("two.txt", 250)  # commits more.py too: the review's tree still holds work its head does not
+        _, out, _ = self.cli_with_claude("wrapup", "--dry-run")
+        self.assertIn(f"since {run['tree'][:12]} (the working tree as review r1 found it)\n", out)
+        self.assertNotIn("HEAD as review", out)
+
+    def test_on_a_feature_branch_the_review_reads_the_branch_diff_and_gets_no_range(self) -> None:
+        git(self.repo, "checkout", "-q", "-b", "feature")
+        self.commit_file("two.txt", 250)
+        for argv in (("wrapup", "--dry-run"), ("wrapup", "--dry-run", "--base", self.base), ("review", "--dry-run")):
+            with self.subTest(argv=argv):
+                _, out, _ = self.cli_with_claude(*argv)
+                self.assertIn(f"would run `{self.claude} -p '/code-review high'`", out)
+
+    def test_a_review_of_a_target_reads_the_target_and_gets_no_range(self) -> None:
+        _, out, _ = self.cli_with_claude("review", "--target", "feature/x", "--dry-run")
+        self.assertIn(f"[dry-run] review: would run `{self.claude} -p '/code-review high feature/x'` in {self.repo} (run r1)", out)
+        self.put("wip.py", numbered(30))
+        code, _, err = self.cli_with_claude("review", "--target", "feature/x")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.claude_calls(), [["-p", "/code-review high feature/x"]])
+        record = json.loads((self.repo / ".ratchet" / "reviews" / "r1.evidence.json").read_text(encoding="utf-8"))
+        self.assertEqual((record["committed_range"], record["basis"]), (None, "local_pre_review_target_unverified"))
+        self.assertIn("wip.py", record["files"])  # the local changes, as for any review that is not of a range
+
+    def test_a_damaged_start_points_file_stops_a_plain_review_on_the_default_branch_and_names_the_file(self) -> None:
+        damaged = {"not json": "{", "not branch names and full commits": json.dumps({"main": "abc123"})}
+        for why, text in damaged.items():
+            for argv in (("review",), ("review", "--dry-run")):
+                with self.subTest(why, argv=argv):
+                    (self.repo / START_POINTS_NAME).write_text(text, encoding="utf-8")
+                    code, _, err = self.cli_with_claude(*argv)
+                    self.assertEqual(code, 1)
+                    self.assertIn("start-points.json", err)
+        self.assertEqual((self.claude_calls(), self.review_runs()), ([], []))  # refused before claude runs: nothing was spent
+        code, _, err = self.cli_with_claude("review", "--target", "feature/x")  # the target is the scope: no range, no start point
+        self.assertEqual((code, err), (0, ""))
+        code, _, err = self.cli_with_claude("review", "--from-file", str(self.write_review()))  # a saved review reads no range
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(self.claude_calls(), [["-p", "/code-review high feature/x"]])
+        git(self.repo, "checkout", "-q", "-b", "feature")  # a start point applies on the default branch only, so the file is not read
+        self.assertEqual(self.cli_with_claude("review", "--dry-run")[0], 0)
+
+    def test_a_saved_review_gets_no_range_and_records_the_working_tree_it_found(self) -> None:
+        self.put("wip.py", numbered(30))
+        self.assertEqual(self.wrap("--from-file", str(self.write_review()))["status"], "reviewed")
+        (run,) = self.review_runs()
+        self.assertNotEqual(run["tree"], self.tree_of(self.first))
+        self.assertIn("wip.py", self.files_in(run["tree"]))
+
+    def test_a_range_review_records_the_tree_of_the_commit_it_read_and_adds_no_object(self) -> None:
+        self.put("wip.py", numbered(30))  # uncommitted: the range does not hold it
+        objects = self.objects()
+        self.with_claude(self.claude)
+        (run,) = self.review_runs()
+        self.assertEqual((run["head"], run["tree"]), (self.first, self.tree_of(self.first)))
+        self.assertEqual(self.objects(), objects)
+        data = self.measure()  # so the next wrap-up counts the work the review did not read
+        self.assertEqual((data["base_reason"], data["base"], data["changed_lines"], data["changed_files"]),
+                         ("last-review-tree", run["tree"], 30, 1))
+
+    def test_a_finding_of_a_range_review_is_cut_from_the_commit_though_the_file_was_edited_since(self) -> None:
+        self.put("one.txt", "inserted 1\ninserted 2\ninserted 3\n" + numbered(250))  # every committed line moves down by three
+        review = review_text(blind_spot("Retry has no limit", file="one.txt", line=5))
+        self.assertEqual(self.with_claude(self.fake_claude(review))["status"], "reviewed")
+        self.assertEqual(self.claude_calls(), [["-p", f"/code-review high {self.range}"]])
+        (finding,) = self.findings()
+        self.assertEqual((finding["snippet_source"], finding["snippet"]), ("review", "\n".join(f"line {number}" for number in range(2, 9))))
+
+    def test_a_linked_worktree_on_main_measures_from_the_start_point_the_main_worktree_holds(self) -> None:
+        git(self.repo, "checkout", "-q", "-b", "feature")  # main is free to be checked out in a linked worktree
+        linked = self.tmp / "linked"
+        git(self.repo, "worktree", "add", "-q", str(linked), "main")
+        second = self.commit_file("two.txt", 250, linked)
+        code, out, err = self.cli_with_claude("wrapup", "--dry-run", "--repo", str(linked), with_repo=False)
+        self.assertEqual(code, 0, err)
+        self.assertIn(f"since {self.base[:12]} (the start point recorded for main)", out)
+        self.assertIn(f"would run `{self.claude} -p '/code-review high {self.base}..{second}'`", out)
+        self.assertFalse((linked / ".ratchet").exists())
+        _, out, _ = self.cli_with_claude("wrapup", "--dry-run")  # the main worktree stands on feature: its fork point decides
+        self.assertIn(f"since {self.first[:12]} (where this branch forked from main)", out)
 
 
 if __name__ == "__main__":

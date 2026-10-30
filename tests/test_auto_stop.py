@@ -30,6 +30,7 @@ from ratchet.auto import PendingCommit
 from ratchet.cli import main
 from ratchet.hooks import _PYTHON_OK_CHECK
 from ratchet.review import Refusal, round_key
+from ratchet.start_point import START_POINTS_NAME
 
 SESSION = "0a1b2c3d-4e5f-6789-abcd-ef0123456789"
 OTHER_SESSION = "f0e1d2c3-b4a5-6789-0123-456789abcdef"
@@ -212,12 +213,13 @@ class StopCase(test_wrapup.WrapupCase):
         path = self.state / auto_stop.ANNOUNCED_NAME
         return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
-    def plant(self, worktree: Path | None = None, session: str = SESSION) -> None:
-        """A note made by hand: the commit it names need not exist, which suits the checks that never get as far as git."""
+    def plant(self, worktree: Path | None = None, session: str = SESSION, head: str = "0" * 40) -> None:
+        """A note made by hand: unless `head` is a commit of the repo, the commit it names need not exist, which suits the checks that
+        never get as far as git."""
         path = self.pending_file(session)
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
-            handle.write(PendingCommit(worktree or self.repo, "0" * 40, auto.utc_timestamp()).to_line())
+            handle.write(PendingCommit(worktree or self.repo, head, auto.utc_timestamp()).to_line())
 
     def assert_held_back_and_then_due(self, **later: object) -> None:
         """The pending file is still there; a Stop without the condition that held it back then asks for the wrap-up."""
@@ -523,6 +525,192 @@ class DueTest(StopCase):
         self.commit_work(other)
         self.set_config(other, wrapup_auto=False)
         self.assertEqual(self.context_lines(self.answer()), [due_line(self.repo)])
+
+
+# ---- where the count starts on the default branch -----------------------------------------------------------------
+
+class StartPointTest(StopCase):
+    """On the default branch the fork point is HEAD, so the commits a session makes there count only from a start point, and the Stop
+    records one when there is none: the parent of the first commit it was told about. The work is on main unless a test leaves it.
+    The repo init set up starts from a root commit, `set up ratchet`, that was made outside any session, so the hook never noted it."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.root_commit = git(self.repo, "rev-parse", "HEAD")
+
+    def recorded(self) -> dict[str, str] | None:
+        """The start points the main worktree holds on disk; None when there is no file."""
+        path = self.repo / START_POINTS_NAME
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+
+    def commit_unnoted(self, *, lines: int = 0) -> str:
+        """A commit made outside any session, which the post-commit hook does not note: empty, or adding a file of `lines` lines."""
+        if lines:
+            (self.repo / "by-hand.py").write_text(numbered(lines), encoding="utf-8")
+            git(self.repo, "add", "by-hand.py")
+        git(self.repo, "-c", "commit.gpgsign=false", "commit", "-q", "--no-verify", "--allow-empty", "-m", "by hand")
+        return git(self.repo, "rev-parse", "HEAD")
+
+    def leave_main(self) -> None:
+        """The main worktree steps onto `feature`: work committed there is off the default branch, and main is free for a linked one."""
+        git(self.repo, "checkout", "-q", "-b", "feature")
+
+    def linked_on_main(self) -> Path:
+        self.leave_main()
+        path = self.tmp / "linked-main"
+        git(self.repo, "worktree", "add", "-q", str(path), "main")
+        return path
+
+    # ---- which commit it starts from ------------------------------------------------------------------------------
+
+    def test_the_first_commit_noted_on_main_starts_the_count_from_its_parent(self) -> None:
+        self.commit_work()
+        self.assertEqual(self.context_lines(self.answer()), [due_line(self.repo)])
+        self.assertEqual(self.recorded(), {"main": self.root_commit})
+        self.assertEqual(self.hook_log(), [])
+
+    def test_with_several_commits_noted_the_start_is_the_parent_of_the_first(self) -> None:
+        self.commit_work(lines=120)
+        self.commit_work(lines=120)
+        self.assertEqual(self.context_lines(self.answer()), [due_line(self.repo, lines=240, files=2)])
+        self.assertEqual(self.recorded(), {"main": self.root_commit})
+        self.assertEqual(self.hook_log(), [])
+
+    def test_a_stop_that_finds_too_little_work_records_the_start_and_the_next_stop_counts_from_it(self) -> None:
+        self.commit_work(lines=120)
+        self.assert_silent()
+        self.assertEqual(self.recorded(), {"main": self.root_commit})
+        self.commit_work(lines=120)
+        self.assertEqual(self.context_lines(self.answer()), [due_line(self.repo, lines=240, files=2)])
+        self.assertEqual(self.recorded(), {"main": self.root_commit})
+        self.assertEqual(self.hook_log(), [])
+
+    def test_a_first_note_that_head_does_not_descend_from_is_passed_over(self) -> None:
+        self.commit_unnoted()  # the parent of the commit that is dropped: it is not the root commit, which is the start that is right
+        self.commit_work()
+        git(self.repo, "reset", "-q", "--hard", self.root_commit)  # drops both commits; the note of the second stays in the file
+        self.commit_work()
+        self.assertEqual(self.context_lines(self.answer()), [due_line(self.repo)])
+        self.assertEqual(self.recorded(), {"main": self.root_commit})
+        self.assertEqual(self.hook_log(), [])
+
+    def test_a_root_commit_noted_first_is_passed_over_for_the_commit_after_it(self) -> None:
+        self.plant(head=self.root_commit)
+        self.commit_work()
+        self.assertEqual(self.context_lines(self.answer()), [due_line(self.repo)])
+        self.assertEqual(self.recorded(), {"main": self.root_commit})
+        self.assertEqual(self.hook_log(), [])
+
+    def test_a_session_that_noted_only_the_root_commit_records_nothing_and_a_later_stop_does(self) -> None:
+        self.plant(head=self.root_commit)
+        self.assert_silent()
+        self.assertIsNone(self.recorded())
+        self.assertEqual(self.hook_log(), [])
+        self.commit_work()
+        self.assertEqual(self.context_lines(self.answer()), [due_line(self.repo)])
+        self.assertEqual(self.recorded(), {"main": self.root_commit})
+        self.assertEqual(self.hook_log(), [])
+
+    # ---- when it does not start one -------------------------------------------------------------------------------
+
+    def test_a_review_of_main_is_the_base_so_no_start_point_is_recorded(self) -> None:
+        self.append_raw(self.round_on("main", "r1", head=self.root_commit))
+        self.commit_work()
+        self.assertEqual(self.context_lines(self.answer()), [due_line(self.repo)])
+        self.assertIsNone(self.recorded())
+        self.assertEqual(self.hook_log(), [])
+
+    def test_a_review_whose_head_was_dropped_does_not_stop_the_start_being_recorded(self) -> None:
+        dropped = self.commit_unnoted()
+        git(self.repo, "reset", "-q", "--hard", self.root_commit)
+        self.append_raw(self.round_on("main", "r1", head=dropped))
+        self.commit_work()
+        self.assertEqual(self.context_lines(self.answer()), [due_line(self.repo)])
+        self.assertEqual(self.recorded(), {"main": self.root_commit})
+        self.assertEqual(self.hook_log(), [])
+
+    def test_a_start_point_that_is_usable_is_not_moved(self) -> None:
+        self.set_start(self.root_commit)
+        self.commit_unnoted(lines=30)  # a start point recorded after this commit would not count its 30 lines
+        self.commit_work()
+        self.assertEqual(self.context_lines(self.answer()), [due_line(self.repo, lines=280, files=2)])
+        self.assertEqual(self.recorded(), {"main": self.root_commit})
+        self.assertEqual(self.hook_log(), [])
+
+    def test_a_start_point_that_head_does_not_descend_from_is_replaced(self) -> None:
+        stale = self.commit_unnoted()
+        git(self.repo, "reset", "-q", "--hard", self.root_commit)
+        self.set_start(stale)
+        self.commit_work()
+        self.assertEqual(self.context_lines(self.answer()), [due_line(self.repo)])
+        self.assertEqual(self.recorded(), {"main": self.root_commit})
+        self.assertEqual(self.hook_log(), [])
+
+    def test_the_start_point_is_recorded_for_the_configured_default_branch(self) -> None:
+        self.set_config(default_branch="develop")
+        git(self.repo, "add", ".ratchet.json")
+        configured = self.commit_unnoted()
+        git(self.repo, "checkout", "-q", "-b", "develop")
+        self.commit_work()
+        self.assertEqual(self.context_lines(self.answer()), [due_line(self.repo)])
+        self.assertEqual(self.recorded(), {"develop": configured})
+        self.assertEqual(self.hook_log(), [])
+
+    def test_work_on_another_branch_records_no_start_point(self) -> None:
+        self.leave_main()
+        self.commit_work()
+        self.assertEqual(self.context_lines(self.answer()), [due_line(self.repo)])  # counted from where the branch forked
+        self.assertIsNone(self.recorded())
+        self.assertEqual(self.hook_log(), [])
+
+    def test_a_repo_that_does_not_ask_for_the_wrapup_any_more_records_no_start_point(self) -> None:
+        self.commit_work()
+        self.set_config(wrapup_auto=False)
+        self.assert_silent()
+        self.assertIsNone(self.recorded())
+        self.assertEqual(self.hook_log(), [])
+
+    def test_a_damaged_start_points_file_is_told_in_hook_log_and_the_other_repos_are_still_judged(self) -> None:
+        other = self.another_repo()
+        self.commit_work()
+        self.commit_work(other)
+        damaged = self.repo / START_POINTS_NAME
+        damaged.parent.mkdir(exist_ok=True)
+        damaged.write_text("{not json", encoding="utf-8")
+        self.assertEqual(self.context_lines(self.answer()), [due_line(other)])
+        [line] = self.hook_log()
+        self.assertRegex(line, HOOK_LOG_LINE + re.escape(str(self.repo)) + r": RatchetError: .*start-points\.json")
+
+    # ---- shared by the worktrees ----------------------------------------------------------------------------------
+
+    def test_a_commit_in_a_linked_worktree_on_main_records_the_start_in_the_main_worktrees_ratchet_dir(self) -> None:
+        linked = self.linked_on_main()
+        self.commit_work(linked)
+        self.assertEqual(self.context_lines(self.answer()), [due_line(linked)])
+        self.assertEqual(self.recorded(), {"main": self.root_commit})
+        self.assertFalse((linked / START_POINTS_NAME).exists())
+        self.assertEqual(self.hook_log(), [])
+
+    def test_a_worktree_counts_from_the_start_point_another_worktree_recorded(self) -> None:
+        self.commit_work(lines=120)
+        self.assert_silent()  # too little to review, but the main worktree has recorded where main started
+        linked = self.linked_on_main()
+        self.commit_work(linked, lines=130)
+        self.assertEqual(self.context_lines(self.answer()), [due_line(linked, lines=250, files=2)])
+        self.assertEqual(self.recorded(), {"main": self.root_commit})
+        self.assertEqual(self.hook_log(), [])
+
+    # ---- the pending file -----------------------------------------------------------------------------------------
+
+    def test_the_pending_file_is_read_once_so_a_damaged_line_is_told_once(self) -> None:
+        linked = self.linked()
+        self.commit_work()
+        self.commit_work(linked)
+        with self.pending_file().open("a", encoding="utf-8") as handle:
+            handle.write("not a record\n")
+        self.assertEqual(self.context_lines(self.answer()), [due_line(self.repo), due_line(linked)])  # two worktrees are judged
+        [line] = self.hook_log()
+        self.assertIn(":3: skipped a line", line)
 
 
 # ---- after a wrap-up ----------------------------------------------------------------------------------------------

@@ -2,7 +2,7 @@ import json
 import unittest
 
 import support  # noqa: F401  (puts the repo root on sys.path)
-from support import RepoCase, review_item
+from support import FIXTURES, RepoCase, review_item
 
 from ratchet.config import load_config
 from ratchet.errors import RatchetError
@@ -31,6 +31,12 @@ class ExtractTest(unittest.TestCase):
         text = ('```json\n{"example": true}\n```\n```json\n{broken\n```\n'
                 f"```json\n{self.ARRAY}\n```\n")
         self.assertEqual(len(extract_review_items(text)), 1)
+
+    def test_a_range_review_gives_its_fenced_findings_and_not_the_sentences_after_the_fence(self) -> None:
+        # What `/code-review high <base>..<head>` printed in a smoke run: one json fence, then prose about a bug outside the range.
+        items = extract_review_items((FIXTURES / "range_review.txt").read_text(encoding="utf-8"))
+        self.assertEqual([(item["file"], item["line"]) for item in items], [("stats.py", 4), ("stats.py", 4), ("stats.py", 1)])
+        self.assertNotIn("loop.py", json.dumps(items))
 
     def test_only_the_json_tagged_fence_counts(self) -> None:
         with self.assertRaisesRegex(RatchetError, "neither a JSON array"):

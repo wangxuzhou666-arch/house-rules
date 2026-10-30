@@ -99,7 +99,7 @@ claude --plugin-dir /path/to/review-ratchet
 使用插件：
 
 1. [安装插件](#安装)。
-2. 在你的仓库里运行一次 `/review-ratchet:setup`。它先预览，再运行 `ratchet init`：一个规则文件（内置模板只是待调整的草稿）、编译出的风格 digest、`CLAUDE.md` 里的一行 `@import`、git hooks（每个都会被实际运行一次，证明确实被触发）、`.gitignore` 条目，以及（由你选择是否开启的）自动收口。结尾会给出一行现成的 `git add ... && git commit`，对应它创建的那些文件：请执行它，因为 pre-commit hook 检查的是暂存的副本。
+2. 在你的仓库里运行一次 `/review-ratchet:setup`。它先预览，再运行 `ratchet init`：一个规则文件（内置模板只是待调整的草稿）、编译出的风格 digest、`CLAUDE.md` 里的一行 `@import`、git hooks（每个都会被实际运行一次，证明确实被触发）、`.gitignore` 条目、默认分支的 start point（它的第一次收口从这个提交开始度量），以及（由你选择是否开启的）自动收口。结尾会给出一行现成的 `git add ... && git commit`，对应它创建的那些文件：请执行它，因为 pre-commit hook 检查的是暂存的副本。
 3. 照常提交。当某个回合在一次提交之后结束、并且上次 review 之后的改动已达到阈值（`wrapup_min_changed_lines` 默认 200 行，或 `wrapup_min_files` 默认 5 个文件）时，Claude 会在后台跑一次收口 review。只有 review 发现了没有任何规则覆盖、而且你还没被问过的盲点时，才会问你一个问题。没到阈值，什么都不会运行。这需要 Claude Code 2.1.163 或更高版本；详见[自动收口](docs/WRAPUP.md#automatic-wrap-up)。
 4. 想根据这些发现维护规则，运行 `/review-ratchet:maintain`；那个问题会提议替你启动它。agent 会收集代码证据，提出限定范围的改动，并通过宿主原生的提问工具来问你。被接受的改动会更新规则和 digest；拒绝、暂缓和要求修改也都会被记录。不需要自定义 UI，也不需要手动复制 JSON。详见[工作流与评估契约](docs/DECISION-CARDS.md)。
 
@@ -109,7 +109,7 @@ claude --plugin-dir /path/to/review-ratchet
 
 ```sh
 /path/to/review-ratchet/bin/ratchet init            # 会问几个问题；--yes 接受默认值，--dry-run 只打印计划
-/path/to/review-ratchet/bin/ratchet review          # 运行 claude -p "/code-review high"，并记录发现
+/path/to/review-ratchet/bin/ratchet review          # 运行 claude -p "/code-review high"（在默认分支上会带上要读的提交范围），并记录发现
 /path/to/review-ratchet/bin/ratchet wrapup          # 统计上次 review 之后的改动；够多才 review 一次
 /path/to/review-ratchet/bin/ratchet count --by-rule # 按条款统计还有哪些未关闭
 ```
@@ -139,7 +139,7 @@ cp /path/to/review-ratchet/templates/CODING-STYLE.template.zh.md CODING-STYLE.md
 [规则编写](docs/RULE-WRITING.zh.md)，以及未来的[个人决策指标](docs/DECISION-METRICS.md)方向。
 
 ```sh
-bin/ratchet init [--yes] [--dry-run] [--no-wrapup-auto]                    # 初始化当前仓库（配置、规则文件、digest、CLAUDE.md、hooks、.gitignore）
+bin/ratchet init [--yes] [--dry-run] [--no-wrapup-auto]                    # 初始化当前仓库（配置、规则文件、digest、CLAUDE.md、hooks、.gitignore、start point）
 bin/ratchet review [--level high] [--target T] [--from-file F] [--over-cap] # 运行 /code-review，保存原始输出，记录发现；每个改动最多 3 轮，之后以退出码 3 退出
 bin/ratchet wrapup [--level high] [--base REF] [--from-file F] [--json] [--dry-run] # 统计上次 review 之后的改动；够多才 review 一次（见 docs/WRAPUP.md）；到轮次上限以退出码 3 退出
 bin/ratchet ingest-code-review --source l1 --run R12 < review-output.txt   # JSON 数组，或包含 ```json 代码块的文本

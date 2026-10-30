@@ -14,7 +14,7 @@ from .source_evidence import read_committed_source, read_outer_source, read_sour
 
 MAX_FILES = 100
 MAX_TEXT_BYTES = 2 * 1024 * 1024
-LOCAL_BASIS = "local_pre_review"  # the evidence is the local files as they were when a review of them began
+LOCAL_BASIS = "local_pre_review"  # the evidence is the local files as they were when a review of them began (for a commit range, as HEAD held them)
 SNIPPET_BEFORE, SNIPPET_AFTER = 3, 3  # lines of context either side of the flagged line
 MAX_SNIPPET_CHARS = 600
 TRUNCATED_MARK = "[snippet truncated]"  # the last line of a snippet that is less than the whole window
@@ -26,21 +26,39 @@ def is_local_state(config: Config, name: str) -> bool:
     return name.startswith(".ratchet/") or name == config.ledger_path.name
 
 
-def capture(config: Config, tree: Path, target: str | None) -> dict:
+def _read_for_evidence(tree: Path, name: str, from_commit: str | None) -> dict:
+    """`name` as the commit `from_commit` holds it, or as the working tree of `tree` holds it when there is no such commit."""
+    if from_commit is None:
+        return read_source(tree, name, None)
+    return read_committed_source(tree, from_commit, name)
+
+
+def capture(config: Config, tree: Path, target: str | None, committed_range: str | None = None) -> dict:
     """The evidence for a review about to start in `tree`, the worktree being reviewed: not always `config.root`, the main one.
 
-    The rules files are tracked files like the code, so they are the ones of `tree` too (`config.rules_files` are its own).
-    A layer outside the repo, shared with other repos, is the one file the config points to, whichever tree is reviewed.
+    A review of `committed_range` (`<start>..<HEAD>`) was told to read those commits, not the working tree. Its evidence is the
+    files the range changed, as HEAD holds them, whatever `tree` has uncommitted: the lines the reviewer names are the commit's,
+    and a file edited since would put the same code on other lines. Any other review reads the local changes, the files that
+    differ from HEAD and the untracked ones, as they are on disk.
+
+    The rules files are tracked files like the code, so they are the ones of `tree` too (`config.rules_files` are its own), read
+    from disk even for a range: the reviewer loads them from there. A layer outside the repo, shared with other repos, is the
+    one file the config points to, whichever tree is reviewed.
     """
     head = commit_sha(tree, "HEAD")
-    tracked = ["diff", "--name-only", "-z", "HEAD"] if head else ["ls-files", "-z"]
-    names = set(run_git(tracked, tree).stdout.split("\0"))
-    names.update(run_git(["ls-files", "--others", "--exclude-standard", "-z"], tree).stdout.split("\0"))
+    if committed_range is not None:
+        from_commit = head
+        names = set(run_git(["diff", "--name-only", "-z", committed_range], tree).stdout.split("\0"))
+    else:
+        from_commit = None
+        tracked = ["diff", "--name-only", "-z", "HEAD"] if head else ["ls-files", "-z"]
+        names = set(run_git(tracked, tree).stdout.split("\0"))
+        names.update(run_git(["ls-files", "--others", "--exclude-standard", "-z"], tree).stdout.split("\0"))
     names.discard("")
     names = sorted(n for n in names if not is_local_state(config, n))
     files, used = {}, 0
     for name in names[:MAX_FILES]:
-        source = read_source(tree, name, None)
+        source = _read_for_evidence(tree, name, from_commit)
         size = len(source.get("text", "").encode())
         if used + size > MAX_TEXT_BYTES:
             source.pop("text", None)
@@ -50,19 +68,23 @@ def capture(config: Config, tree: Path, target: str | None) -> dict:
         files[name] = source
     rules = [read_outer_source(path, rules_name(config, path)) if is_outer(config, path) else read_source(tree, str(path), None)
              for path in config.rules_files]
-    return {"v": 1, "captured_at": now_iso(), "head": head, "target": target,
+    return {"v": 1, "captured_at": now_iso(), "head": head, "target": target, "committed_range": committed_range,
             "basis": LOCAL_BASIS if target is None else f"{LOCAL_BASIS}_target_unverified",
             "files": files, "rules": rules, "omitted_files": names[MAX_FILES:]}
 
 
 def save(config: Config, tree: Path, run_id: str, snapshot: dict, raw: str) -> None:
-    """Write the evidence under the main worktree's `.ratchet/`; `tree` is where the snapshot's files are re-read to see if they held still."""
+    """Write the evidence under the main worktree's `.ratchet/`; `tree` is where the snapshot's files are re-read to see if they held still.
+
+    A range review's files are re-read from the commit they were captured at: the working tree is not what they were.
+    """
     name = f".ratchet/reviews/{run_id}.evidence.json"
     if read_local(config.root, name) is not None:
         raise RatchetError("review evidence already exists for this run; choose a new run ID")
+    from_commit = snapshot["head"] if snapshot["committed_range"] is not None else None
     stable = {}
     for file, source in snapshot["files"].items():
-        after = read_source(tree, file, None)
+        after = _read_for_evidence(tree, file, from_commit)
         stable[file] = (source["status"] == after["status"] == "available"
                         and source["sha256"] == after["sha256"])
     record = {**snapshot, "run_id": run_id, "raw_sha256": hashlib.sha256(raw.encode()).hexdigest(),
@@ -114,6 +136,10 @@ def snapshot_snippets(config: Config, tree: Path, snapshot: dict) -> Locator:
     snippet. The commit is no stand-in for a file `capture` did see change but could not keep (over the text budget,
     binary, deleted), for a changed file beyond MAX_FILES, for ratchet's own files, or for a review that began before
     the first commit: those have no snippet.
+
+    A review of a commit range read commits only, so for it the commit is the one source: `capture` saved the committed
+    text of the files the range changed, and any other file is the commit's as well, whatever the working tree has
+    uncommitted in it. A file that exists only in the working tree has no snippet.
 
     Only a review of the local changes qualifies. For a --target review `capture` marks the snapshot target-unverified:
     the review looked at something else (a PR, another branch), so the local files, and HEAD, may be other code than the

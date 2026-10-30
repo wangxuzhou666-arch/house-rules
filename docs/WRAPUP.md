@@ -20,9 +20,10 @@ The work is measured in the worktree wrapup runs in (`--repo`, else the current 
 | `base_reason` | base | when |
 |---|---|---|
 | `--base` | the commit `REF` names | `--base REF` was given. A ref that is not a commit is an error |
-| `last-review-tree` | the `tree` of the newest `review_run` of this branch that has a usable `head` | that `head` is a commit and an ancestor of HEAD (a review with `head` `none` or no `head` is passed over, and so is one whose `head` is not an ancestor: history a rebase rewrote, a commit this clone no longer has), and the `tree` object is still in the repo. The `tree` is the working tree as that review found it, uncommitted and untracked files included, so what the review read is not counted again whether or not it was committed since |
+| `last-review-tree` | the `tree` of the newest `review_run` of this branch that has a usable `head` | that `head` is a commit and an ancestor of HEAD (a review with `head` `none` or no `head` is passed over, and so is one whose `head` is not an ancestor: history a rebase rewrote, a commit this clone no longer has), and the `tree` object is still in the repo. The `tree` is the working tree as that review found it, uncommitted and untracked files included, so what the review read is not counted again whether or not it was committed since. The measure line describes it as `the working tree as review rN found it`, or as `HEAD as review rN found it` when it is the tree of the review's `head` commit: a review of a clean working tree, and every review of a commit range, which reads committed work only and records the tree of the commit HEAD was at when it started ([On the default branch](#on-the-default-branch)) |
 | `last-review` | the `head` of that same review | the fallback when it recorded no `tree` (an older ledger, or taking the tree failed) or the tree object is gone (`git gc` removes objects nothing refers to). The output says so on a `wrapup: note:` line: work the review left uncommitted counts again, as it did before trees were recorded |
-| `merge-base` | where HEAD forked from the default branch | the fork point a review round key uses: `default_branch` from the config, else origin's HEAD branch, else `main`, else `master`. On the default branch itself that is HEAD, so only uncommitted work counts |
+| `start-point` | the start point recorded for the default branch | HEAD is on the default branch, no review of the branch is usable (neither row above holds), and a usable start point is recorded for it ([The start point](#the-start-point)). On any other branch this row never applies |
+| `merge-base` | where HEAD forked from the default branch | the fork point a review round key uses: `default_branch` from the config, else origin's HEAD branch, else `main`, else `master`. On the default branch itself that is HEAD, so only uncommitted work counts, and the row is reached there only when no usable start point is recorded |
 | `head` | HEAD | none of the above exists. Only uncommitted work counts; pass `--base REF` to count committed work. A branch with no commit yet is measured from the empty tree: every file is new |
 
 **Only a review of the same branch is the last review.** The ledger is shared by every worktree of the repo, and a review's `tree` holds the uncommitted work of the worktree it ran in. The main worktree's review, taken as the base in a linked worktree, would count the main worktree's uncommitted work there as change. Two worktrees never have one branch checked out at once, so the branch tells their reviews apart. It is read from the review's `round_key`, `<branch>@<fork point>` ([Review rounds](LEDGER.md#review-rounds)): `feature@e72a47386034` is a review of `feature`, and the name ends at the last `@`, so a review of `feat@2` is not one of `feat`. Passed over, then, as if they were not in the ledger:
@@ -32,6 +33,39 @@ The work is measured in the worktree wrapup runs in (`--repo`, else the current 
 - every review, when HEAD is detached: it is on no branch, so none is its last review and the base is the fork point. `ratchet review` itself needs a branch to count rounds on, or `--target`, so a wrap-up that reaches its threshold there stops at the review with that message. This is deliberately the cautious side: a base too far back reviews once more than needed, a base from another branch counts work that is not this one's.
 
 A review of another branch made later does not hide an older review of this one: the newest review *of this branch* decides.
+
+### The start point
+
+On the default branch the fork point is HEAD itself, so a base taken from it counts uncommitted work only, and commits made on the branch would never add up to a threshold. Until a review of the branch exists, the work there is measured from its start point instead.
+
+The start point is kept in `.ratchet/start-points.json` of the main worktree: a flat object of branch name and full sha, `{"main": "<40 hex>"}`. The file is local and git-ignored with the rest of `.ratchet/`, and every linked worktree reads the same one.
+
+- **Usable.** The commit exists in this clone and is an ancestor of the default branch's tip. One that is not (history a rebase rewrote, a commit this clone no longer has) counts as absent, and a new one may be recorded in its place.
+- **It does not move.** A usable start point stays where it is, however much is committed after it. A usable review of the branch takes over as the base: it comes first in [the table](#the-base).
+- **Recorded by** the `start point` step of `ratchet init`, which takes the default branch as it stands then ([ONBOARDING.md](ONBOARDING.md#the-steps)), or, in a repository set up before that step existed, by the Stop hook ([The first wrap-up on the default branch](#the-first-wrap-up-on-the-default-branch)).
+- **A damaged file** (not a JSON object of branch names and full commit shas) is an error that names it, and the commands that need it stop: `wrapup` and `review` on the default branch, and `init`. Delete the file and run `ratchet init` again.
+
+### On the default branch
+
+On the default branch a plain `/code-review` has no branch to compare with, and on a clean tree the scope is the model's to choose ([What the critic reads](#what-the-critic-reads-probes-claude-code-21284)). So ratchet tells the review which commits to read. When the base has a commit and it is not HEAD, every review ratchet starts there without a `--target` of yours runs
+
+```
+claude -p '/code-review high <start sha>..<HEAD sha>'
+```
+
+with both shas in full. That is the review a wrap-up starts and a plain `ratchet review` alike: `ratchet review` takes the base a wrap-up would take without `--base`, so on the default branch it reads this range too, where it ran a bare `/code-review high` before. A dry run prints the whole prompt:
+
+```
+$ ratchet wrapup --dry-run
+wrapup: 266 changed line(s) in 4 file(s) since 8be23cec1070 (the start point recorded for main)
+[dry-run] wrapup: changed lines 266 >= wrapup_min_changed_lines 200; would run `claude -p '/code-review high 8be23cec1070f0495355e690d69bf8a76b3d3a0a..94d97b072c8d0bc506a179b395a2d75b7bc13e31'`; nothing run or written
+```
+
+- **The start of the range** is the base's commit: the start point, the commit `--base` names, or the `head` of the last review (the `last-review-tree` base is a tree, and the review's `head` stands in for it).
+- **No range** when the base is HEAD (nothing committed since), on any other branch (the review reads the branch's own diff), with `--from-file`, and with a `--target` of yours, which stays what the review is told.
+- **The round key** is the one a review gets without a range, `main@<12 hex of HEAD>`, as the fork point is HEAD there.
+- **What the review records.** A range holds committed work only. The review's `tree` is therefore that of the commit HEAD was at when it started, not the working tree ([`review_run`](LEDGER.md#review_run)), and taking it writes nothing, as the tree is an object of the commit already. Uncommitted work is not counted as read: the next wrap-up counts it again. The evidence the review saves ([Decision cards](DECISION-CARDS.md#collect-the-evidence)) is the committed code as well: the files the range changed, read from the commit HEAD was at when the review started. Snippets come from that commit too ([Code snippets](LEDGER.md#code-snippets)), so a file that has uncommitted edits is cut as the commit has it, which is what the critic read. Uncommitted and untracked files are not in the evidence, and the rules files are still read from disk, as the reviewer loads them from there.
+- **The next range starts at a review's head.** It begins at the `head` of the last review, not at its tree. Work that review read while it was uncommitted (a review without a range can) is not counted again by the measure, but once it is committed it lies in the next range, and the critic reads it again.
 
 ## What counts
 
@@ -61,11 +95,11 @@ Either one is enough, and "reached" includes the number itself (200 lines review
 
 ## The review
 
-Above a threshold wrapup runs `ratchet review` itself with the same defaults (level `high`, the same round cap, the same ingest), so the run is an ordinary `review_run` whose `head` is the next wrap-up's base. A refused round (the cap is reached) ends the wrap-up with exit code 3. wrapup has no `--over-cap`: that stays an explicit decision, `ratchet review --over-cap`. `--dry-run` says beforehand whether the review would be refused ([Dry run](#dry-run)).
+Above a threshold wrapup runs `ratchet review` itself with the same defaults (level `high`, the same round cap, the same ingest), so the run is an ordinary `review_run` whose `head` is the next wrap-up's base. On the default branch the review is told which commits to read ([On the default branch](#on-the-default-branch)). A refused round (the cap is reached) ends the wrap-up with exit code 3. wrapup has no `--over-cap`: that stays an explicit decision, `ratchet review --over-cap`. `--dry-run` says beforehand whether the review would be refused ([Dry run](#dry-run)).
 
 Afterwards it reads the ledger: the run's own open findings that no rule covers (`unmapped`, as `count --by-rule` counts them, legacy aliases applied) are the blind spots of this review; the count of every open `unmapped` finding follows. A finding that was merged into another on the same file and line (`also_matches`) is not listed.
 
-A review reads the whole branch, so a blind spot nobody fixed comes back under every new run id. One that was already dealt with is not asked about again: of the run's blind spots, those that repeat a known one are reported as repeats, and the rest are the **new** blind spots, the only ones the question is about. A blind spot is known when an earlier run has an `unmapped` finding that flags the same code in the same file (the exact rule is under [`--json`](#--json)) and that finding is
+A review of a branch other than the default branch reads the whole branch, so a blind spot nobody fixed comes back under every new run id. One that was already dealt with is not asked about again: of the run's blind spots, those that repeat a known one are reported as repeats, and the rest are the **new** blind spots, the only ones the question is about. A blind spot is known when an earlier run has an `unmapped` finding that flags the same code in the same file (the exact rule is under [`--json`](#--json)) and that finding is
 
 - still open: the question was asked about it, or will be; or
 - marked `false_positive` or `dismissed`: it was answered. (`fixed` does not make a blind spot known. The same code reported again may not be fixed after all, so that one is asked about.)
@@ -125,7 +159,7 @@ Stdout is exactly one JSON object; everything else, the review's own output incl
 | field | meaning |
 |---|---|
 | `status` | `skipped` (below both thresholds), `reviewed`, `capped` (the round cap refused the review; exit code 3), `dry-run` (`--dry-run`, and a review is due; `would_refuse` says whether it would start), or `reported` (`--report-only`) |
-| `base`, `base_reason` | the base and which rule chose it; both null for `reported`. `base` is a commit for every `base_reason` except `last-review-tree`, where it is a git tree id (the working tree as the last review found it), not a commit; null for a branch with no commit |
+| `base`, `base_reason` | the base and which rule chose it; both null for `reported`. `base` is a commit for every `base_reason` except `last-review-tree`, where it is a git tree id (the working tree, or HEAD, as the last review found it), not a commit; null for a branch with no commit |
 | `changed_lines`, `changed_files` | the counts; null for `reported` |
 | `thresholds` | `{"min_changed_lines": 200, "min_files": 5}` as configured |
 | `run` | the run id of this wrap-up's review; for `reported`, of the latest review run. Otherwise null |
@@ -146,7 +180,7 @@ wrapup: 270 changed line(s) in 3 file(s) since e72a47386034 (where this branch f
 [dry-run] wrapup: changed lines 270 >= wrapup_min_changed_lines 200; would run `claude -p '/code-review high'`; nothing run or written
 ```
 
-With `--from-file r.txt` the clause is `would ingest r.txt as a review`. When the review would be refused, the line is
+On the default branch the command carries the commit range the review would read ([On the default branch](#on-the-default-branch)). With `--from-file r.txt` the clause is `would ingest r.txt as a review`. When the review would be refused, the line is
 
 ```
 [dry-run] wrapup: <reason>; a real run would be refused: <message>; nothing run or written
@@ -190,7 +224,7 @@ Three parts work together. The git post-commit hook notes commits, the plugin's 
 
 1. **Commit.** The post-commit hook that `ratchet init` installs ends with `ratchet auto note`. In a Claude Code session whose repo has `wrapup_auto` on, it appends the commit to a local file for that session ([The commit note](ONBOARDING.md#the-commit-note)). It records and decides nothing, and it cannot fail a commit.
 2. **The turn ends.** The plugin registers one Stop hook ([`hooks/hooks.json`](../hooks/hooks.json); it runs `hooks/run.sh auto stop`, with a 30 second timeout). `run.sh` first looks, with shell builtins alone, for this session's file in the [state directory](#the-state-directory). A turn in which nothing was committed has none and ends there, in about 10 ms, without starting Python.
-3. **The decision.** Otherwise `run.sh` finds a Python 3.10 or newer and runs `ratchet auto stop`, which reads the hook's JSON from stdin. For each worktree a commit was noted in (once, however many commits) it makes the decision `ratchet wrapup --dry-run` makes ([Dry run](#dry-run)): measure the work since the last review, compare it with the thresholds, and, when a review is due, foresee whether it would be refused. A worktree below both thresholds ends here, and the hook says nothing.
+3. **The decision.** Otherwise `run.sh` finds a Python 3.10 or newer and runs `ratchet auto stop`, which reads the hook's JSON from stdin. For each worktree a commit was noted in (once, however many commits) it makes the decision `ratchet wrapup --dry-run` makes ([Dry run](#dry-run)): measure the work since the last review (on the default branch, while no review exists, since the start point, which the hook records first if there is none: [below](#the-first-wrap-up-on-the-default-branch)), compare it with the thresholds, and, when a review is due, foresee whether it would be refused. A worktree below both thresholds ends here, and the hook says nothing.
 4. **Claude goes on with the turn.** For a worktree whose review is due and would start, the hook answers with one line of `additionalContext`, shell-quoting a path that holds spaces:
 
    ```
@@ -200,6 +234,15 @@ Three parts work together. The git post-commit hook notes commits, the plugin's 
    The hook runs no review itself. The line goes to Claude, who takes it up in the same turn instead of ending it. Claude Code shows it as Stop hook feedback, not as a hook error.
 5. **The review.** The [`wrapup` skill](../skills/wrapup/SKILL.md) in automatic mode runs `ratchet wrapup --repo <worktree> --json` as a background command, as a review can take minutes and a foreground call is cut off at its timeout. It waits for the completion notice, without polling, and reads the JSON object at the end of the output file. `skipped`, `capped` and an error get one sentence and no question, and `/review-ratchet:setup` is not offered.
 6. **The question.** On `reviewed` the skill goes on as in [The question](#the-question): one popup, about the new blind spots only. No new blind spot means one sentence and no popup. `Now` starts [maintain](../skills/maintain/SKILL.md) on them: at most 3 proposals, each still decided by the user.
+
+### The first wrap-up on the default branch
+
+On the default branch, until a review of the branch exists, the wrap-up measures from the [start point](#the-start-point). The first automatic wrap-up on `main` counts everything that differs from it in the working tree: the commits made after it, the staged and unstaged changes and the untracked files, without ratchet's own state files ([What counts](#what-counts)). A review it starts reads the committed part as a range ([On the default branch](#on-the-default-branch)).
+
+The start point comes from one of two places:
+
+- **`ratchet init`** records it as the default branch stands when init runs ([ONBOARDING.md](ONBOARDING.md#the-steps)). In a repository with no commit yet it records nothing, and the first `ratchet init` after a commit does.
+- **The Stop hook** records it for a repository set up before init did. When it judges a worktree that is on the default branch and has neither a usable review nor a usable start point, it records the parent of the first noted commit that HEAD descends from and that has a parent, and measures from there. A root commit has no parent, so a note of it is passed over; a session that noted only the root records nothing, and a later Stop records it.
 
 ### Turning it on and off
 
@@ -223,7 +266,7 @@ Nothing is said and nothing runs in these cases:
 
 A task counts as over when its status is one of `completed`, `complete`, `done`, `finished`, `succeeded`, `failed`, `error`, `killed`, `stopped`, `cancelled`, `canceled`, `aborted`, `exited` or `terminated`, in any case. A task with no status, or one the hook does not know, counts as running. Other background tasks (a dev server, a monitor, a cloud session, an MCP task) may never end and never defer.
 
-A failure is silent too, because a Stop hook that failed at the end of every turn would be switched off. There is no Python 3.10 or newer, or no `bin/ratchet` in the plugin: `run.sh` exits 0 without a word. An exception becomes one line in `hook.log`, and so does input that is neither empty nor a JSON object. A worktree that cannot be judged (a damaged config, a deleted branch) is logged and skipped, and does not hide the others. `run.sh` also turns the exit code 2 of `ratchet` into 1, since a Stop hook that exits 2 makes Claude go on with the turn.
+A failure is silent too, because a Stop hook that failed at the end of every turn would be switched off. There is no Python 3.10 or newer, or no `bin/ratchet` in the plugin: `run.sh` exits 0 without a word. An exception becomes one line in `hook.log`, and so does input that is neither empty nor a JSON object. A worktree that cannot be judged (a damaged config or start-points file, a deleted branch) is logged and skipped, and does not hide the others. `run.sh` also turns the exit code 2 of `ratchet` into 1, since a Stop hook that exits 2 makes Claude go on with the turn.
 
 ### Refusals are announced once
 
@@ -284,20 +327,28 @@ Everything the automatic wrap-up keeps lives in one directory on this machine, o
 - The plugin must be enabled in a Claude Code that meets the versions above, in a session that is not headless (a headless one needs `RATCHET_AUTO_HEADLESS=1`).
 - Any failure of the note or the hook is a line in `hook.log`.
 
-## What the critic reads (probe, Claude Code 2.1.284, 2026-10-29)
+## What the critic reads (probes, Claude Code 2.1.284)
 
-Does the built-in `/code-review`, called without a target as `ratchet review` calls it, read only uncommitted changes, or the branch's commits too? Two real runs of `claude -p "/code-review high"` (stdin closed, from the repo root) in a throwaway repo, `main` with one clean commit and a `feature` branch:
+Does the built-in `/code-review`, called without a target as `ratchet review` calls it, read only uncommitted changes, or the branch's commits too? On 2026-10-29, two real runs of `claude -p "/code-review high"` (stdin closed, from the repo root) in a throwaway repo, `main` with one clean commit and a `feature` branch:
 
 1. Clean working tree; the only bug (a loop that never increments its counter) is the one commit on `feature`. Reported, at the right line.
 2. Bug A in the first of two commits on `feature` (the later commit is clean), bug B an uncommitted edit of a tracked file, bug C in a new untracked file. All three reported; the review names the commit, calls B an "uncommitted change" and C "untracked".
 
-So the default scope is the branch's commits since it forked from the default branch, plus uncommitted edits, plus untracked files: the set wrapup counts. No `--target` is needed, and snippets stay available. Not probed: a clean tree on the default branch itself. (An unplanned run in a repo whose only change was an untracked file of numbers on `main` answered "no code changes to review".)
+So on a branch other than the default one the default scope is the branch's commits since it forked from the default branch, plus uncommitted edits, plus untracked files: the set wrapup counts. No `--target` is needed there, and snippets stay available.
+
+The first probe did not cover the default branch itself, where the fork point is HEAD. On 2026-10-30 a second probe ran `claude -p` three times (stdin closed, from the repo root) in a throwaway repo: `main` with three clean commits and nothing uncommitted. c1 added a clamp helper, c2 a loop that never increments its counter, c3 a sum that skips the first element.
+
+1. No target (`/code-review high`). The files of all three commits were reviewed, the root commit's included.
+2. Target `<c1>..HEAD`. Only c2 and c3 were reviewed.
+3. Target `<c2>..HEAD`. Only c3 was reviewed. After the JSON the reviewer added a short note: the c2 bug was outside the range, and it had left it out.
+
+So on a clean default branch the review with no target took in every commit of the repo (here three, the root among them), and a commit range as the target held it to the commits in the range. That is why ratchet hands the review a range there ([On the default branch](#on-the-default-branch)). It is one run of each, on one version of Claude Code.
 
 ## Limits
 
 - **The snapshot is taken when the review starts.** Edits made while the review runs are measured by the next wrap-up. A tree is unreferenced objects: after two weeks `git gc` may remove it, and the wrap-up then falls back to the review's HEAD (said on a `note:` line).
 - **Reviews are matched by branch name.** A branch that is checked out in another worktree later (the first one let go of it) takes its reviews with it, and their trees hold the uncommitted work of the old worktree: counted as change in the new one. A branch that was renamed, or deleted and made again, starts with no review. A `--target` review records no tree, and is never taken as a base either, as its round key names no branch.
-- **The critic reads the whole branch, not the delta.** The thresholds decide when to review, not what is read. An unfixed finding comes back under the new run's id; `repeated_unmapped` takes the exact repeats of a known blind spot out of the question. A blind spot the user marked `false_positive` or `dismissed` and the next review reports again is a repeat; one marked `fixed` and reported again is new. A repeat needs the same code around the flagged line (the snippet's whole window, whitespace collapsed), so code edited within three lines of it is asked about again: that errs towards one question too many, never one blind spot too few. When neither finding has a window (no snippet, only blank lines) the line numbers are compared instead; when only one has, they are not the same code.
+- **On any other branch the critic reads the whole branch, not the delta.** The thresholds decide when to review, not what is read. An unfixed finding comes back under the new run's id; `repeated_unmapped` takes the exact repeats of a known blind spot out of the question. A blind spot the user marked `false_positive` or `dismissed` and the next review reports again is a repeat; one marked `fixed` and reported again is new. A repeat needs the same code around the flagged line (the snippet's whole window, whitespace collapsed), so code edited within three lines of it is asked about again: that errs towards one question too many, never one blind spot too few. When neither finding has a window (no snippet, only blank lines) the line numbers are compared instead; when only one has, they are not the same code. On the default branch the review is given the commits since the base instead ([On the default branch](#on-the-default-branch)).
 - Lines are added plus deleted, whitespace included, and a moved block counts twice.
 - **A dry run checks that `claude` can be found, not that the review will succeed.** `ratchet review --dry-run` previews the round cap and a missing `claude` the same way, but a rules file that does not load or a change with no round key is an error there (exit 1), as it is in a real run.
-- Heads in a ledger shared by several clones that are not in this history are skipped, so the fork point decides.
+- Heads in a ledger shared by several clones that are not in this history are skipped, and with no review left the base is the start point on the default branch, else the fork point.
