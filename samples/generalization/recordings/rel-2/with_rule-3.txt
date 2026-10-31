@@ -1,0 +1,52 @@
+```json
+[
+  {
+    "file": "code/item_index.py",
+    "line": 40,
+    "summary": "Bumping KEY_VERSION to 2 and filtering `seen` to v2 rows means every existing v1 row is ignored on re-import, so all old items are re-added as new unread rows.",
+    "failure_scenario": "A stored index has v1 rows with key 'https://a.com/feed|g1', some already read. Re-importing the same feed builds `seen` from v2 rows only, which is empty. It computes key 'a.com|g1', adds a fresh unread row and reports it as newly added. Read items come back as unread, and the stale v1 row stays in the file next to the new one. There is no migration or compatible read for the changed persistent key (REL.2)."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 57,
+    "summary": "mark_read now matches only rows with key_version == KEY_VERSION, so items stored under the v1 key can never be marked read.",
+    "failure_scenario": "A v1 row for feed 'https://a.com/feed' and guid 'g1' is unread. `mark_read(path, 'https://a.com/feed', 'g1')` computes 'a.com|g1', which matches no v1 row and fails the version check anyway. It returns False and the item stays in `unread_titles` forever. No old-identity check or fallback to the v1 key exists (REL.2)."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 17,
+    "summary": "The new key is built from the host only, dropping the feed path, so distinct feeds on the same host now collide.",
+    "failure_scenario": "Feeds 'https://blog.com/rss/news' and 'https://blog.com/rss/sports' both have an item with guid '1' (numeric guids are common). Both map to 'blog.com|1'. The second feed's item is treated as already seen and silently never imported. Before this change the full feed URL kept them apart."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 12,
+    "summary": "`feed_host` is copy-pasted from `reading_list.py`, and `item_key` duplicates `make_uid`.",
+    "failure_scenario": "The two modules now carry identical `feed_host` bodies and identical key formulas. If host normalization is fixed in one (for example stripping userinfo or a default port, or handling scheme-less URLs), the other drifts. The same feed then gets different identities in the two stores. Extract a shared helper."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 13,
+    "summary": "`feed_host` does not normalize the host beyond lowercasing, and it is not robust for URLs with userinfo, ports or a query-only form.",
+    "failure_scenario": "'https://user:pw@a.com/feed' yields the host 'user:pw@a.com', so credentials leak into the persisted key. 'https://a.com:443/feed' and 'https://a.com/feed' yield different keys, so the same feed is imported twice."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 21,
+    "summary": "`label` silently treats any label_style other than 1 as the new style, so rows with an unknown or corrupt style render with the v2 format.",
+    "failure_scenario": "A row with label_style 3 (written by a newer version) or 0 passes the FIELDS check in `load_rows`. `label()` formats it as 'feed#N', so the label is wrong with no error, and the file is not rejected under REL.3. Mapping explicit versions and raising or falling back with a log for unknown values would be safer."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 4,
+    "summary": "LABEL_STYLE is bumped to 2 but old v1 rows are neither migrated nor distinguished in `add_items`, so a single file mixes '-0001' and '#1' labels.",
+    "failure_scenario": "A feed has existing rows 'a.com-0001' and 'a.com-0002' (style 1). New items are appended as style 2, giving 'a.com#3'. The listing shows two formats for one feed, and any consumer that parsed the old zero-padded labels breaks on the new ones."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 22,
+    "summary": "Label formats are duplicated inline, and the new style drops zero padding, so labels no longer sort lexically.",
+    "failure_scenario": "Style-2 labels 'a.com#10' and 'a.com#9' sort as '#10' before '#9' in any string sort. The old ':04d' padding existed to avoid this. The formats are also hardcoded in `label` with no named constants."
+  }
+]
+```

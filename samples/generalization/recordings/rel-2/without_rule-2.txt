@@ -1,0 +1,60 @@
+```json
+[
+  {
+    "file": "code/item_index.py",
+    "line": 40,
+    "summary": "The KEY_VERSION bump with no migration makes every v1 row invisible to dedup. Re-importing a feed re-adds all items under v2 keys while the v1 rows stay in the file.",
+    "failure_scenario": "The index file holds v1 rows such as {key:'https://a.com/feed|g1', key_version:1, read:True}. import_items(path, 'https://a.com/feed', [('g1','T')]) filters `seen` to v2 rows, so it is empty. The new key 'a.com|g1' is not in `seen`, so a second row is appended with read=False. The item the user already read shows as unread again. unread_titles() then lists the old unread v1 rows and their new duplicates together. Every existing user gets the whole backlog re-imported once.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 57,
+    "summary": "mark_read only matches rows whose key_version equals the current version, so legacy v1 rows can never be marked read.",
+    "failure_scenario": "A v1 row for guid g1 is unread. mark_read(path, feed, 'g1') builds the v2 key 'a.com|g1', which cannot equal the v1 key, and the version check would also reject the row. It returns False and nothing is written. The row stays in unread_titles() forever, so the user can never clear it, and the caller cannot tell 'not found' from 'legacy row'.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 17,
+    "summary": "The new key drops the feed path and keeps only the host, so two different feeds on the same host that reuse a guid collide. The second feed's item is silently dropped as a duplicate.",
+    "failure_scenario": "Feeds 'https://github.com/x/releases.atom' and 'https://github.com/y/releases.atom' both use small or numeric guids such as '1' or '42'. Both produce the key 'github.com|1'. The second feed's item is skipped in import_items, so it is never listed. A mark_read on one feed also marks the other's row. The old key (full feed_url) kept the feeds apart.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 12,
+    "summary": "feed_host is copy-pasted verbatim into reading_list.py, and both versions are naive. They do not strip userinfo or port, and they accept scheme-less or odd URLs without complaint.",
+    "failure_scenario": "'https://user@Example.com:8443/feed' yields 'user@example.com:8443', and 'https://example.com/feed' yields 'example.com'. The same site then gets different keys and the same item is imported twice. If one copy is later fixed, the other drifts. urllib.parse.urlsplit(feed_url).hostname, in one shared helper, would fix both problems.",
+    "category": "p2-2",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 21,
+    "summary": "label() treats every label_style other than 1 as the new format. A corrupt or future style value silently gets the v2 format, with no validation.",
+    "failure_scenario": "A row with label_style=3, or 0 from a bad edit, renders as 'host#5' with no error. load_rows only checks that the key exists, not that its value is a known style. A later format change would mislabel those rows silently instead of raising ListFileError.",
+    "category": "p0f-1",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 21,
+    "summary": "Old rows keep label_style=1 and new rows get style 2, so one listing mixes 'host-0003' and 'host#4'. The bump to LABEL_STYLE=2 leaves existing rows in the old style with no migration or documented intent.",
+    "failure_scenario": "A list holds three legacy rows 'a.com-0001..0003'. After the upgrade, add_items appends 'a.com#4'. listing() prints both formats side by side, so the numbering looks inconsistent and sorting by label breaks ('a.com#4' sorts before 'a.com-0001' since '#' < '-'). Anything that parses labels back to (feed, number) must handle both formats.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 12,
+    "summary": "The change has no test or fixture covering a v1 to v2 upgrade of an existing index file, even though the behavior change affects every stored row.",
+    "failure_scenario": "The repo has no tests, so a regression such as the re-import duplication or the stuck unread rows is not caught. Reviewers must trace the migration behavior by hand.",
+    "category": "unmapped",
+    "severity": "nice"
+  }
+]
+```

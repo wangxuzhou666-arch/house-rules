@@ -1,0 +1,52 @@
+```json
+[
+  {
+    "file": "code/item_index.py",
+    "line": 40,
+    "summary": "Bumping KEY_VERSION to 2 with no migration leaves every v1 row orphaned. Import ignores them, so the whole backlog is re-imported as new v2 rows.",
+    "failure_scenario": "A file holds 500 v1 rows keyed 'https://feed/x|guid'. The next import_items filters 'seen' to v2 rows only, so it is empty. Every guid is added again under 'feed|guid' and returned in `added`, which the caller will treat as 500 new items. The file now holds duplicates of every item, and nothing converts or removes the v1 rows."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 57,
+    "summary": "mark_read only matches rows whose key_version is the current version, so legacy rows can never be marked read.",
+    "failure_scenario": "A user marks a pre-upgrade item as read. The v1 row has a different key and a different version, so the loop finds nothing and mark_read returns False. The row stays read=False. The v1 row is also never rewritten, so it stays orphaned forever."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 65,
+    "summary": "unread_titles has no key_version filter. Legacy v1 rows and their re-imported v2 copies are both listed as unread, and the v1 copy can never be cleared.",
+    "failure_scenario": "After the upgrade and a re-import, the unread list shows each old item twice. Marking one read clears only the v2 copy, so the v1 duplicate stays in the unread list permanently."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 17,
+    "summary": "item_key now uses only the host, dropping the path and scheme. Different feeds on the same host with the same guid collapse to one key, and the second feed's items are silently skipped.",
+    "failure_scenario": "Feeds 'https://blog.example.com/a.xml' and 'https://blog.example.com/b.xml' both have a guid '1' (a numeric guid is common). Both produce the key 'blog.example.com|1'. import_items treats the second feed's item as already seen and drops it. mark_read for one feed also marks the other feed's row as read."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 12,
+    "summary": "feed_host is an exact copy of the same function in reading_list.py. The two files must now stay in sync, and the parsing is fragile.",
+    "failure_scenario": "A fix to one copy, such as handling a userinfo@ prefix or a port, will not reach the other. The keys the two modules compute for the same feed then diverge. The naive split also returns '' for a URL like 'example.com' with no '//', which produces keys like '|guid' that collide across every feed. Move it to one shared helper, ideally using urllib.parse.urlsplit."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 4,
+    "summary": "KEY_VERSION is bumped from 1 to 2 with no load-time handling of the old version: no migration and no defined fallback. A row in the old shape is neither converted nor named as unsupported (REL.3).",
+    "failure_scenario": "On the first run after the upgrade the file holds only v1 rows. load_rows accepts them because FIELDS is satisfied, and import and mark_read each skip them silently. The result is duplicated data and a state that looks healthy, instead of a clear error or a one-time conversion."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 22,
+    "summary": "label() branches on the bare literal 1 and treats every other value as style 2, so an unknown or future label_style is silently rendered in the v2 format.",
+    "failure_scenario": "A row with label_style 3, or a corrupted value, renders as 'feed#N'. A row with label_style 0 or None does the same, with no error. Compare against named constants and raise on an unknown style, or add an explicit branch for each known style."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 4,
+    "summary": "LABEL_STYLE is bumped to 2 and old rows keep their v1 style. Numbering is shared across both styles, and the displayed label for the same row differs depending on when it was added.",
+    "failure_scenario": "The listing mixes 'host-0003' (old rows) and 'host#4' (new rows) for the same feed. Any consumer that matches or sorts on the label string sees two formats side by side, and there is no one-time re-label of existing rows."
+  }
+]
+```

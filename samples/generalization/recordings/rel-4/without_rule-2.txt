@@ -1,0 +1,84 @@
+```json
+[
+  {
+    "file": "code/sms_codes.py",
+    "line": 24,
+    "summary": "The per-phone limit is a non-atomic check-then-act: the count is read at line 24 and only written back at line 29, after the slow gateway call, with no lock.",
+    "failure_scenario": "Five concurrent send_code('+1555...') calls all read used=0 before any of them finishes deliver(). All five pass the limit check and send an SMS, and the counter ends at 1. This defeats the limit, which exists to stop SMS-pumping and cost abuse. code/mail_codes.py solves the same problem with a lock and an increment before sending, so the two modules are inconsistent.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 29,
+    "summary": "The counter is written as `used + 1` from a stale local value, so concurrent sends or a day rollover during deliver() overwrite or lose counts.",
+    "failure_scenario": "Two threads both read used=2 and both set sent[phone]=3. Two codes go out, but the counter shows one more send, not two. If the day rolls over while deliver() is running, line 29 writes a stale count into the freshly cleared dict, so the new day starts with a wrong count for that phone.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 27,
+    "summary": "The quota is consumed before the transport sends, and it is never released when transport.send raises.",
+    "failure_scenario": "The SMTP transport times out three times in a row. Each failed send_code() still increments sent[address]. The user receives no email, yet the fourth request raises TooManyRequests ('already received 3 codes today'), which locks them out for the rest of the day. The reserve step has no rollback path (REL.1: retain usable state on failure).",
+    "category": "rel-1",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 24,
+    "summary": "The limit is keyed on the raw address string, with no normalization of case or whitespace.",
+    "failure_scenario": "An attacker alternates 'Bob@x.com', 'bob@x.com' and ' bob@x.com ', which are the same mailbox. Each variant gets its own budget of 3, so the per-address limit is bypassed. The same applies to phone formats in sms_codes.py ('+1 555...' vs '+1555...') and to '+' sub-addresses in email.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 5,
+    "summary": "TooManyRequests is defined separately in both modules, and the rate-limiter logic is copy-pasted between CodeSender and CodeMailer.",
+    "failure_scenario": "A caller that does `except mail_codes.TooManyRequests` will not catch the one raised by sms_codes, because they are different classes. The limiter is already in two slightly different forms: the mail version is locked and the SMS version is not, so a fix to one will not reach the other. A shared exception and a small shared limiter would remove the drift.",
+    "category": "p2-2",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 17,
+    "summary": "`_used` reads like a pure getter but resets the day and clears the whole dict as a side effect.",
+    "failure_scenario": "A maintainer calls `_used()` in a new code path, such as a status endpoint, expecting a read-only lookup. It silently wipes every phone's counter at midnight. The name hides the mutation, and the rollover logic is buried in a helper that looks like it only returns a number.",
+    "category": "p2-4",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 29,
+    "summary": "send_code generates a code and returns it to the caller, but nothing stores it, ties it to the address, or gives it an expiry.",
+    "failure_scenario": "Verification has nothing to check the user's entered code against. Returning the plaintext code to the caller means any API handler that passes the return value into its response leaks the OTP to the requester, which defeats the verification. sms_codes.py has the same shape at line 23.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 16,
+    "summary": "The `sent` dict grows without bound between day rollovers, with one entry per distinct address, and nothing prunes it.",
+    "failure_scenario": "A bot requests codes for millions of distinct random addresses in one day. The dict holds all of them in process memory until midnight, and the same applies to sms_codes.py line 15. Requests that come before the limit trips are not capped by address count.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 26,
+    "summary": "The exception message embeds the full address or phone number, which is PII and a number the caller already knows.",
+    "failure_scenario": "Handlers and loggers that record str(exc) write raw email addresses and phone numbers into logs and error trackers. The 'N codes today' count also tells an attacker exactly how much budget is left.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 21,
+    "summary": "The day rollover compares `date.today()` in server-local time, so the window is a calendar day, not a rolling window, and a timezone or DST change can shift or repeat it.",
+    "failure_scenario": "An attacker sends 3 codes at 23:59 and 3 more at 00:00, getting 6 in two minutes. The injectable `today` default is naive-local `date.today`, so a server in a non-UTC zone resets the limit at a different instant than its clients expect.",
+    "category": "unmapped",
+    "severity": "nice"
+  }
+]
+```

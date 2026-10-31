@@ -1,0 +1,58 @@
+```json
+[
+  {
+    "file": "code/site_publisher.py",
+    "line": 8,
+    "summary": "publish() deletes the live directory before any page is rendered, so a failing render leaves the site wiped or half-written.",
+    "failure_scenario": "live_dir holds the current site. publish() is called with pages whose 3rd renderer raises. rmtree has already removed the old site and only pages 1-2 are written, so the exception propagates and live_dir is left partial with no rollback. Readers calling read_page or page_names see missing pages or FileNotFoundError during the whole rebuild window. Fix: render everything into a sibling temp dir first, then swap it in with a rename. This is the P0F.2 / REL.3 class of failure, where one bad input breaks every later run."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 25,
+    "summary": "rebuild() deletes the whole cache before re-rendering, so a render failure or a concurrent get() loses or breaks the cache.",
+    "failure_scenario": "rebuild(['a','b','c']) runs rmtree(root). render('b') then raises, so the old cache is gone and only 'a' is repopulated, with no rollback. Separately, a concurrent get('x') that passed path.exists() just before the rmtree hits FileNotFoundError at path.read_bytes() on line 21. The same happens when rmtree runs between part.write_bytes and part.replace. Fix: build into a new dir and swap, or re-render in place and delete only stale entries."
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 12,
+    "summary": "The page name is joined to live_dir unvalidated, so absolute paths or '..' segments write outside live_dir.",
+    "failure_scenario": "pages = {'../../etc/cron.d/x': ...} gives target = live_dir/'../../etc/cron.d/x', and write_text writes outside live_dir. An absolute name such as '/home/u/.ssh/authorized_keys' makes the pathlib join discard live_dir entirely. read_page(live_dir, '../secret') reads arbitrary files the same way. The caller's name is trusted at a public-site boundary with no check that target.resolve() stays under live_dir (P0F.1: validate input at the boundary)."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 12,
+    "summary": "The cache name is interpolated straight into the file path with no validation, so '/' or '..' in a name escapes root or fails.",
+    "failure_scenario": "get('../../x') reads and writes root/../../x.png, outside the cache, and rebuild() only clears root. get('a/b') calls root.mkdir but not the parent of the .part file, so write_bytes raises FileNotFoundError because root/a doesn't exist. If it did exist, cached_names() uses a non-recursive glob('*.png') and would never list 'a/b', so the listing disagrees with what get() cached."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 19,
+    "summary": "All writers of one name share a single fixed '.part' temp file, so the 'atomic' write is not safe under concurrency, and a failed render leaves the temp file behind.",
+    "failure_scenario": "Two threads call get('a') on a cold cache. Both write root/a.part, and the first part.replace(path) moves it away. The second thread's replace then raises FileNotFoundError, or it can replace with the other thread's half-written bytes if the writes interleave. If render() raises or the process dies after write_bytes, a stale a.part stays on disk and is never cleaned. Fix: use a unique temp name (tempfile.NamedTemporaryFile in root, or a pid/uuid suffix) and unlink it on failure."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 20,
+    "summary": "get() trusts any existing .png as valid, with no validation or invalidation, so a corrupt or stale entry is served forever.",
+    "failure_scenario": "An entry is left corrupt, empty or stale, for example when render returns b'' or the source changes. path.exists() is true, so get() returns the bad bytes on every call until someone runs the destructive rebuild(). There is no per-name invalidate, and nothing checks that render returned non-empty output (P0F.1 / P0F.2)."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 28,
+    "summary": "rebuild() returns len(names), which is not the number of entries cached when names has duplicates.",
+    "failure_scenario": "rebuild(['a','a','b']) renders 'a' once and caches two files, but returns 3. Callers that use the return value as a cached-entry count or for reporting get the wrong number. The cache-hit path also silently skips the second 'a'."
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 7,
+    "summary": "publish() assumes live_dir is a directory, so a plain file or a symlink at that path makes the cleanup crash.",
+    "failure_scenario": "live_dir is an existing regular file, or a symlink to a directory. live_dir.exists() is true and shutil.rmtree raises NotADirectoryError or refuses the symlink. This happens after the caller has begun a publish, with no explicit named error. The destructive-first ordering also makes the failure unrecoverable."
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 16,
+    "summary": "A duplicated rmtree-then-regenerate pattern is hand-rolled in both new modules, and only preview_cache uses the temp-file-and-replace atomic write.",
+    "failure_scenario": "preview_cache.get writes to .part and then replace()s it for atomicity, but site_publisher.publish uses a bare write_text, so a crash mid-write leaves a truncated page that read_page serves. Both modules also rebuild by rmtree-then-regenerate. The inconsistent safety and duplicated destructive logic invite divergent fixes. Share one atomic-write and atomic-dir-swap helper."
+  }
+]
+```

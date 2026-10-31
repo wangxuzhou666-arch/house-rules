@@ -1,0 +1,58 @@
+```json
+[
+  {
+    "file": "code/sms_codes.py",
+    "line": 29,
+    "summary": "The per-phone cap is counted only after `gateway.deliver` succeeds, so the cap is not enforced on failing or timing-out sends (violates REL.4).",
+    "failure_scenario": "The gateway raises or times out after accepting the message. `self.sent[phone] = used + 1` never runs. A caller can retry indefinitely against the paid SMS gateway for one phone. Messages that were actually sent but errored client-side are also never counted. mail_codes.py counts each attempt as it starts, which is the intended behavior. Fix: increment before delivering."
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 24,
+    "summary": "Check-then-act race: `_used` reads the count, then `deliver` runs, then the count is written, with no lock. Concurrent requests for the same phone all see the same `used`.",
+    "failure_scenario": "Three or more concurrent `send_code('+1555...')` calls with used=2 all pass the `used >= limit` check and all send. Each then writes `sent[phone] = 3`, so more than 3 codes go out and the counter under-counts. This allows SMS pumping and cost abuse. mail_codes.py solves this with a lock around reserve."
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 18,
+    "summary": "`_used` is named like a getter but mutates state, resetting `day` and clearing `sent`. Resetting the shared dict is also unsynchronized.",
+    "failure_scenario": "A reader sees `_used(phone)` as a pure query. In fact it wipes every phone's counter on a date change. Under concurrency, one thread's `clear()` can interleave with another thread's read-then-write, so a stale `used + 1` is written back after the clear."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 33,
+    "summary": "The rate-limit key is the raw `address` string, with no normalization of case, whitespace or plus-tags. The same applies to `phone` in sms_codes.py (`+1 555…` vs `555…` vs `+1555…`).",
+    "failure_scenario": "A user or attacker requests 3 codes for `Bob@x.com`, then 3 more for `bob@x.com` or `bob@x.com ` (trailing space). Each variant gets its own quota and reaches the same mailbox, bypassing the limit. The same happens with different phone formats."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 31,
+    "summary": "The code is generated and sent but never stored or hashed, and no verify or expiry exists. `send_code` instead returns the plaintext secret to the caller.",
+    "failure_scenario": "A handler that returns `send_code(...)` in its HTTP response (an easy mistake with this signature) leaks the OTP to the requester, which defeats verification. Nothing in the class lets the code be checked later, so every caller must build its own unsafe storage."
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 6,
+    "summary": "Duplicated implementation: `TooManyRequests`, the daily-reset counter and the code generation are copy-pasted between sms_codes.py and mail_codes.py, with only the transport call and the lock differing.",
+    "failure_scenario": "The two copies have already diverged. mail_codes.py is thread-safe and counts at attempt start, while sms_codes.py is racy and counts on success. Fixes to one will not reach the other. There are also two distinct `TooManyRequests` classes, so `except TooManyRequests` imported from one module will not catch the other's. Extract a shared rate limiter and a single exception."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 28,
+    "summary": "The exception message embeds the full address (and the phone number in sms_codes.py) and the exact count, which goes into logs and error responses as PII.",
+    "failure_scenario": "A global error handler serializes `str(exc)` into the API response or logs. This leaks the target's email or phone back to the caller, and confirms that an account or contact exists and how many codes it has received."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 17,
+    "summary": "The daily reset uses `date.today`, the server's local calendar day, as a fixed-window counter. It never prunes entries within a day, and the state is in-process memory only.",
+    "failure_scenario": "At 23:59 an attacker requests 3 codes and at 00:00 requests 3 more, so 6 codes go out within 2 minutes. With multiple workers or after a restart, each process has its own `sent` dict, so the effective limit is N times the cap or resets on every deploy."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 32,
+    "summary": "`transport.send` failures are not handled after quota is reserved. The user's quota is burned with no code delivered, and no rollback or distinction is made.",
+    "failure_scenario": "The mail transport has a transient SMTP error. `_reserve` has already incremented, so after 3 transient failures the legitimate user is locked out for the day with `TooManyRequests` and never received a code. Counting at attempt start is what REL.4 requires, so this is a product-level tradeoff to document, not a flaw to undo."
+  }
+]
+```

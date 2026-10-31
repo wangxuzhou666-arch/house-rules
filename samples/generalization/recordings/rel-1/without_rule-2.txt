@@ -1,0 +1,76 @@
+```json
+[
+  {
+    "file": "code/site_publisher.py",
+    "line": 8,
+    "summary": "publish() deletes the live directory before any page is rendered, so a failing render leaves the site destroyed or half-written.",
+    "failure_scenario": "pages = {'index.html': ok, 'about.html': lambda: 1/0}. rmtree(live_dir) has already run and index.html is written when about.html raises. The exception propagates and live_dir holds a partial site with no rollback. Readers also see a missing or empty directory for the whole render window. An empty `pages` mapping silently wipes the site. Fix: render into a sibling staging dir, then swap it in with os.replace/rename, so the live dir only changes after every page succeeds.",
+    "category": "unmapped",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 12,
+    "summary": "Page names are joined onto live_dir without validation, so '..' or absolute names write outside live_dir.",
+    "failure_scenario": "pages = {'../../etc/cron.d/x': ...} gives target = live_dir/'../../etc/cron.d/x', and write_text writes outside live_dir after parent.mkdir creates the missing directories. An absolute name such as '/tmp/x' makes `live_dir / name` discard live_dir entirely, so the write lands at that absolute path. read_page at line 19 has the same traversal on the read side and can return arbitrary files. Fix: resolve the target and check it is inside live_dir (is_relative_to) at this boundary.",
+    "category": "p0f-1",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 25,
+    "summary": "rebuild() deletes the whole cache before re-rendering, so a render failure leaves the cache destroyed or partial.",
+    "failure_scenario": "Cache holds 500 previews and rebuild(names) is called. rmtree removes all of them, then render raises on the 3rd name, the exception propagates, and 497 previews are lost with no fallback. rebuild([]) also wipes everything and returns 0. A concurrent get() reading a path that rmtree has just removed raises FileNotFoundError between exists() and read_bytes(). Fix: build into a staging directory and swap it in only on success.",
+    "category": "unmapped",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 18,
+    "summary": "The shared '<name>.part' temp file is not unique per writer, so concurrent get() calls on the same name race and one crashes.",
+    "failure_scenario": "Two threads or processes call get('a') on a cold cache. Both write a.part. The first part.replace(path) moves it, and the second's part.replace raises FileNotFoundError (or the two interleave their writes). A crash mid-render also leaves a stale a.part that is never cleaned up. Fix: use a unique temp name (tempfile.NamedTemporaryFile in self.root, or a pid/uuid suffix) and clean up on failure.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 12,
+    "summary": "The cache name is interpolated into a filesystem path with no validation, allowing traversal and failures on names containing '/'.",
+    "failure_scenario": "get('../../secret') resolves to root/../../secret.png, so the cache writes outside root, and rebuild/get can overwrite arbitrary .png files. get('sub/x') skips mkdir for the 'sub' subdirectory (only self.root is created), so part.write_bytes raises FileNotFoundError. Names containing '/' also never round-trip through cached_names, whose glob('*.png') is non-recursive. Fix: reject names containing separators or '..' at the boundary.",
+    "category": "p0f-1",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 28,
+    "summary": "rebuild() returns len(names), which overcounts when names has duplicates and does not reflect what was actually rendered.",
+    "failure_scenario": "rebuild(['a', 'a', 'b']) renders 'a' once (the second get is a cache hit) but returns 3, while cached_names() has 2 entries. A caller using the return value as the rebuilt count or for verification is misled.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 19,
+    "summary": "The renderer's output is persisted without validation, so an empty or bad render is cached permanently.",
+    "failure_scenario": "render(name) returns b'' (for example a failed or flaky renderer). The empty file is written and renamed to <name>.png, path.exists() is true from then on, and every later get() returns b'' until someone calls rebuild(). Fix: reject empty output before the replace, or make the failure explicit.",
+    "category": "p0f-2",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 22,
+    "summary": "page_names() returns str(relative_to) paths, which use backslashes on Windows, so they do not match the posix-style keys given to publish().",
+    "failure_scenario": "publish() was called with {'blog/post.html': ...}. On Windows page_names returns 'blog\\post.html', which differs from the publish return value and from the caller's mapping keys. Fix: use path.relative_to(live_dir).as_posix().",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 18,
+    "summary": "The write-to-.part-then-replace pattern and the rmtree-then-rebuild order carry no explanatory comments.",
+    "failure_scenario": "The .part/replace step is an ordering and atomicity decision that a future maintainer could easily 'simplify' into a direct write, which reintroduces torn reads. The same applies to the destructive rmtree-first order in site_publisher.publish. Neither non-obvious decision is documented.",
+    "category": "p3-2",
+    "severity": "nice"
+  }
+]
+```

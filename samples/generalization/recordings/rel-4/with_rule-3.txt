@@ -1,0 +1,52 @@
+```json
+[
+  {
+    "file": "code/sms_codes.py",
+    "line": 29,
+    "summary": "The per-phone cap is counted only after `gateway.deliver` succeeds, so failed or slow attempts never count toward the limit (REL.4).",
+    "failure_scenario": "The gateway times out or raises for a phone. `self.sent[phone]` is never incremented. A caller can retry indefinitely and trigger unlimited gateway calls. If the gateway delivered the SMS but then raised or timed out, the user also gets unlimited real messages with no counted use. `mail_codes.py` reserves the slot before sending and avoids this. Severity: should-fix (REL.4)."
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 24,
+    "summary": "Check and increment are separate, unlocked steps, and the increment writes `used + 1` from a stale local read. Concurrent requests for one phone all pass the limit check.",
+    "failure_scenario": "With a limit of 3 and N parallel `send_code('+1555...')` calls (a threaded web server), every thread reads `used=0`, passes the check and sends an SMS. The cap is bypassed, and the final count is 1 instead of N, so the loss of updates stays hidden. This costs real money and enables SMS pumping. `mail_codes.py` guards the same logic with `threading.Lock`; this sibling file does not."
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 17,
+    "summary": "`_used` is named like a getter but mutates state: it resets the day and clears the whole counter dict, with no lock around it.",
+    "failure_scenario": "A read-only-looking call clears `self.sent` for every phone on day rollover. In a threaded server, one thread's `clear()` can race another thread's read-modify-write of `self.sent[phone]`, giving inconsistent counts. A caller who only wants to check usage silently resets all users' counters. Mail's `_reserve` is at least honestly named."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 24,
+    "summary": "The limit is keyed on the raw address string with no normalization, so case or whitespace variants of one mailbox each get a fresh quota.",
+    "failure_scenario": "A caller requests codes for `Alice@x.com`, `alice@x.com`, ` alice@x.com` and `ALICE@X.COM`. Each is a separate key with its own 3-code allowance, all delivered to the same mailbox, so the per-address limit is bypassed. The same applies in `sms_codes.py` to phone formats such as `+1 555 0100` versus `+15550100`."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 22,
+    "summary": "The daily reset clears all counters at the first call after a local-date change and uses naive `date.today`, so the limit is not a real per-day cap.",
+    "failure_scenario": "A caller sends 3 codes at 23:59 and 3 more at 00:00, getting 6 within a minute. The server's local timezone or a DST or clock change shifts the boundary. The counters also live only in process memory, so a restart or a multi-worker deployment gives each process its own full quota. The same logic is in `sms_codes.py`."
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 5,
+    "summary": "The two files duplicate the `TooManyRequests` exception, the day-rollover logic, the counter dict and the code generation. Each defines its own incompatible exception class with the same name.",
+    "failure_scenario": "A handler written as `except mail_codes.TooManyRequests` does not catch the SMS one. Bug fixes, such as the missing lock or the counting-order difference between the two copies, must be made twice, and the copies have already drifted apart. A shared limiter plus one exception type is the simpler form. The cap-and-reset logic is only duplicated twice, so P2.2's third-repetition rule does not yet require extraction, but the drift already shows the cost."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 27,
+    "summary": "`self.sent` records reserved attempts, not sent messages, and the exception text says 'received'. The name and message are misleading.",
+    "failure_scenario": "If `transport.send` raises after `_reserve`, the slot is consumed and the user is told they 'already received 3 codes today' when none was delivered. This reserve-first behavior is correct for REL.4, but the counter is named `sent` and the message claims delivery. This is a naming problem (P2.4), not a logic error."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 26,
+    "summary": "The raw address or phone number is put in the exception message, so it can end up in logs and error responses.",
+    "failure_scenario": "`TooManyRequests(f\"{address} already received {used} codes today\")` is logged or returned by a top-level handler or API error body. The user's email or phone number (PII) is written to logs and echoed to whoever triggered the error. The same pattern is in `sms_codes.py` line 26."
+  }
+]
+```

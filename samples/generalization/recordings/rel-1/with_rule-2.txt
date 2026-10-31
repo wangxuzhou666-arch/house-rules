@@ -1,0 +1,68 @@
+```json
+[
+  {
+    "file": "code/site_publisher.py",
+    "line": 8,
+    "summary": "publish() deletes the live directory before any page has been rendered, so a render failure leaves the site empty or half-written (REL.1).",
+    "failure_scenario": "A render() callable raises on the third page, or the disk fills mid-write. rmtree has already removed the previous good site, so live_dir now holds only pages 1-2 or nothing, and readers get FileNotFoundError or a partial site. The fix is to render and write into a sibling temp directory and swap it in only after every page succeeds (os.replace on a path, or rename old to .bak, then new to live, then remove .bak). On failure, keep the old directory.",
+    "category": "rel-1",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 25,
+    "summary": "rebuild() deletes the whole cache before re-rendering, so any render error leaves the cache partially or fully empty and the previous usable previews are lost (REL.1).",
+    "failure_scenario": "rebuild(['a','b','c']) removes all cached PNGs, then render('b') raises. 'a' is the only entry rebuilt, and 'b', 'c' and every other previously cached name are gone. Concurrent get() callers also see the cache vanish and trigger re-renders. The fix is to render into a fresh sibling directory and swap it in after success, or to overwrite entries per name and prune stale ones at the end.",
+    "category": "rel-1",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 17,
+    "summary": "get() uses one fixed temp path `name.part` with a check-then-write race, and the `.part` file is never cleaned up if render() or write fails.",
+    "failure_scenario": "Two threads call get('x') at the same time. Both see no file, both write x.part, and one replace() moves the file away while the other is mid-write or replaces it with interleaved content. The loser's replace() can raise FileNotFoundError. If render() raises after a partial write_bytes, a stale x.part stays behind. The fix is a unique temp name (tempfile.NamedTemporaryFile in the same directory) and a try/finally that unlinks it.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 15,
+    "summary": "The cache path is built straight from `name` with no sanitising, so names containing '/' or '..' write outside the cache root, and the `.part` suffix handling breaks on names with dots.",
+    "failure_scenario": "get('../../etc/foo') makes root/../../etc/foo.png and writes outside root. rebuild() can also create files outside the directory it later rmtrees. A name like 'v1.2' gives path.with_suffix('.part') = 'v1.part', so 'v1.2' and 'v1.3' share one temp file and corrupt each other. The fix is to append '.part' to the full filename (path.with_name(path.name + '.part')) and reject names that contain separators.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 12,
+    "summary": "Page names are used as relative paths with no containment check, and pages are written with no atomicity.",
+    "failure_scenario": "A page name like '../secrets.html' or an absolute path ('/etc/x') makes `live_dir / name` escape live_dir, since pathlib discards the left side for an absolute right operand, so publish writes outside the live directory. Separately, a reader calling read_page while publish is running can see a truncated file, because write_text is not atomic. The fix is to resolve the target and check it is under live_dir, and to write via a temp file plus replace.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 8,
+    "summary": "publish() and read_page() race: rmtree/mkdir makes the live site vanish for readers during the whole render time.",
+    "failure_scenario": "While publish() renders slowly, page_names() returns [] and read_page() raises FileNotFoundError. Anything serving from live_dir returns 404/500 for the duration of every publish. This is the same root cause as the non-atomic swap above, but it shows up as an availability problem on every publish, not only on failure.",
+    "category": "rel-1",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 29,
+    "summary": "cached_names() uses stem and glob('*.png') on a `.png` suffix scheme, so it is not symmetric with names containing dots and returns wrong names.",
+    "failure_scenario": "A name like 'a.b' is stored as 'a.b.png'. Path('a.b.png').stem is 'a.b', which is fine, but a name like 'x.part' or a stray 'x.part.png' is listed as a real cache entry. Names containing '/' are stored in a subdirectory and glob('*.png') misses them, so cached_names() disagrees with get(). It is minor, but it is part of the same unvalidated-name problem.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 28,
+    "summary": "A non-atomic exists() check before reading, plus rmtree on a shared root, lets rebuild() race with get(); the return value of rebuild() is len(names) rather than the number actually rendered (duplicates are counted).",
+    "failure_scenario": "rebuild(['a','a']) returns 2 but renders once, since the second get hits the cache just written. A concurrent get() between rmtree and mkdir hits FileNotFoundError on part.write_bytes if another thread's rmtree removes the directory after the mkdir call. The fix is to dedupe names and to count only actual renders.",
+    "category": "unmapped",
+    "severity": "nice"
+  }
+]
+```

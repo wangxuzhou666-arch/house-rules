@@ -1,0 +1,76 @@
+```json
+[
+  {
+    "file": "code/sms_codes.py",
+    "line": 28,
+    "summary": "The per-phone cap is counted only after `gateway.deliver` succeeds (`self.sent[phone] = used + 1` on the last line before return). A failed delivery never counts toward the cap.",
+    "failure_scenario": "The gateway times out or raises on every call, or it delivers the SMS and then raises on the response. `sent` is never incremented, so an attacker or a retry loop can trigger unlimited gateway calls and real SMS charges for one phone. This is the case REL.4 forbids (counting on success only). `mail_codes.py` reserves the slot before sending, so the two files now disagree.",
+    "category": "rel-4",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 22,
+    "summary": "The check (`_used`) and the increment (`self.sent[phone] = used + 1`) are separate steps with no lock, and the increment writes back a stale `used` read before the slow network call.",
+    "failure_scenario": "With the default limit of 3, five concurrent `send_code('+1555...')` calls (e.g. from a threaded web server) all read `used=0`, all pass the check, and all send an SMS. Each then writes `sent[phone] = 1`. The cap is bypassed entirely, and the last writer overwrites the others. `mail_codes.py` guards this with `threading.Lock` in `_reserve`, so the SMS copy is the unsafe variant.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 1,
+    "summary": "`sms_codes.py` is a near-line-for-line copy of `mail_codes.py`. It repeats the `TooManyRequests` exception, the day-rollover reset, the per-key counter, and the code generation, with only small differences.",
+    "failure_scenario": "The two copies have already drifted: one has a lock and the other doesn't, and one reserves the slot up front while the other counts at the end. A fix to one will miss the other. There are also two unrelated `TooManyRequests` classes, so a caller doing `except mail_codes.TooManyRequests` won't catch the SMS error. A shared rate limiter plus a one-line transport adapter would remove the duplication. The reuse is the gap; P2.2 (abstract on the third repetition) is only a loose fit, so this is listed as unmapped.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 22,
+    "summary": "The limit key is the raw `address` string, with no normalization of case, whitespace or plus-suffix. The same applies to `phone` in `sms_codes.py`.",
+    "failure_scenario": "The limit is 3 per address per day. A caller requests codes for `Bob@x.com`, `bob@x.com` and ` bob@x.com` (or `+1 555 123 4567` and `+15551234567`). Each form gets its own counter, and the same mailbox or phone receives more than 3 codes. This defeats the abuse and cost control the cap exists for.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 33,
+    "summary": "`send_code` returns the plaintext one-time code to its caller, and nothing stores or verifies it. The class reserves a quota slot and sends the mail but has no verify path.",
+    "failure_scenario": "A handler that returns `send_code(...)` in its response, or logs it, hands the verification code to the requester, so anyone can verify an email or phone they don't own. Callers must also invent their own storage and expiry, because the class has none. The same applies to `sms_codes.py` line 30.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 17,
+    "summary": "`_used` reads like a getter but mutates state (it resets the day and clears `sent`), and `today()` is called twice per rollover.",
+    "failure_scenario": "A caller or a later edit that adds a read-only `_used` call, such as a metrics or status check, silently triggers the daily reset. A midnight race between the two `today()` calls makes `self.day` jump a day ahead of the comparison. In `mail_codes.py` the same double call sits inside `_reserve`, where the lock hides the problem.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 16,
+    "summary": "The `sent` dict only shrinks at the daily reset, so it grows by one entry per distinct address (or phone) for the whole day. Rollover also happens lazily, only when the next request arrives.",
+    "failure_scenario": "Bulk requests with random addresses add a permanent entry each until midnight, so memory grows without limit. This is cheap for an attacker because the cap applies per address, not globally. There is also no global or per-IP bound.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 26,
+    "summary": "The `TooManyRequests` message embeds the raw email address (the phone number in `sms_codes.py`). The address is not validated at the boundary before it reaches `transport.send`.",
+    "failure_scenario": "Handlers and middleware commonly log exception text, so the PII ends up in logs. An address containing CR/LF may allow header injection, depending on what the transport does. `address` goes straight to `transport.send` with no format check.",
+    "category": "p0f-1",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 31,
+    "summary": "The slot is reserved before `transport.send`, and a failed send is neither rolled back nor logged. The failure propagates straight to the caller.",
+    "failure_scenario": "The mail transport is briefly down. Three failed attempts exhaust the user's daily quota, and the user then gets `TooManyRequests` without ever receiving a code. This is acceptable under REL.4 (count each attempt as it starts), but the choice is undocumented. It is the opposite of the SMS file and should be stated in a comment.",
+    "category": "p3-2",
+    "severity": "nice"
+  }
+]
+```

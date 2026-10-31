@@ -1,0 +1,52 @@
+```json
+[
+  {
+    "file": "code/sms_codes.py",
+    "line": 24,
+    "summary": "Check-then-act on the per-phone limit has no lock, and the counter is written only after `deliver`. Concurrent requests all read the same `used` and all pass the limit check.",
+    "failure_scenario": "A threaded server gets 10 parallel send_code('+1555...') calls. Each reads used=0 on line 24 and passes line 25, then calls gateway.deliver. All 10 SMS go out, which defeats the limit of 3 and runs up gateway cost (SMS pumping). The last writer sets sent[phone]=1, so the counter under-counts even afterwards. `mail_codes.py` locks this exact pattern, so the two implementations disagree on a thread-safety guarantee the limiter needs."
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 29,
+    "summary": "The counter increments only after `gateway.deliver` returns. If deliver raises after the SMS was handed off (timeout or ambiguous failure), the attempt is never counted, so an attacker can retry past the limit.",
+    "failure_scenario": "The gateway times out after queuing the SMS and raises. `sent[phone]` is not incremented, so the caller retries indefinitely. Each attempt may deliver a real SMS, and the limit is never reached."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 32,
+    "summary": "The quota slot is reserved in `_reserve` before `transport.send`, and it is never released if the send raises. A transient transport failure silently burns the user's daily quota.",
+    "failure_scenario": "The SMTP server is briefly down, so transport.send raises. The user retries 3 times and gets 3 failures. They are now locked out with TooManyRequests ('already received 3 codes today') although no code was ever delivered. Nothing rolls back sent[address] or logs the failed send."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 27,
+    "summary": "The rate-limit key is the raw `address` string with no normalization. Case and whitespace variants of the same mailbox, or plus-aliases, count as separate keys.",
+    "failure_scenario": "The limit is 3. An attacker sends codes to 'Bob@x.com', 'bob@x.com', ' bob@x.com' and so on. Each is a distinct dict key with its own counter, so the real mailbox receives unlimited codes (mail-bombing). The same applies to phone formats in sms_codes.py ('+1 555...', '1555...', '+1555...')."
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 17,
+    "summary": "`_used` is named like a getter but resets the day and clears the whole counter dict as a side effect. It also returns a snapshot that `send_code` writes back later (`used + 1`), so a day rollover between read and write can resurrect or lose counts.",
+    "failure_scenario": "Request A reads used=2 just before midnight. Request B at 00:00:01 clears the dict and sets sent[phone]=1. A's deliver finishes and writes sent[phone]=3, so the new day starts with a stale count and the user is wrongly throttled. The hidden mutation in a function named `_used` also makes the logic hard to follow."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 8,
+    "summary": "The two new modules copy-paste the same limiter: `TooManyRequests`, day rollover, the counter dict, the code generation. They differ only in transport and lock handling, so the thread-safety bug exists in only one copy.",
+    "failure_scenario": "Two distinct `TooManyRequests` classes exist (`mail_codes.TooManyRequests` and `sms_codes.TooManyRequests`). A caller doing `except mail_codes.TooManyRequests` will not catch the SMS one. Any fix to the limiter has to be made twice, and the copies have already drifted (lock vs. no lock, reserve-before vs. increment-after). Extract a shared limiter and exception, or at least a shared exception."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 15,
+    "summary": "The daily window is keyed on `date.today()`, which is the server's local date, not a rolling window or UTC. The `sent` dict also keeps one entry per distinct address for the whole day and is never pruned except at rollover.",
+    "failure_scenario": "A user hits the limit at 23:59 and gets a fresh 3 codes at 00:00, so 6 codes arrive within 2 minutes. A DST or timezone change on the host shifts the reset point. Flooding with unique random addresses grows `sent` without bound until midnight (memory growth)."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 33,
+    "summary": "`send_code` returns the plaintext verification code to the caller. Nothing stores it, hashes it or gives it an expiry, so the module cannot verify the code. The raw code is also exposed to whatever layer called it.",
+    "failure_scenario": "If the API handler echoes or logs the return value, the OTP leaks to the requester and bypasses email ownership proof. Callers must also build their own storage and expiry, with no way to bind the code to the address. The same applies to `sms_codes.py` line 30."
+  }
+]
+```

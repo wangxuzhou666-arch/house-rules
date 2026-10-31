@@ -1,0 +1,84 @@
+```json
+[
+  {
+    "file": "code/site_publisher.py",
+    "line": 8,
+    "summary": "publish() deletes the live directory before any page has rendered, so a render failure leaves the live site empty or partial.",
+    "failure_scenario": "The third page's render() raises, or the disk fills. The old live_dir is already rmtree'd and only pages 1 and 2 exist, so the site serves 404s or a half-updated mix until someone reruns publish. The same happens if pages is an empty mapping, which wipes the site. The fix is to render into a sibling temp dir and swap it in only after every page succeeds. This breaks P0F.2 because the failure path is neither explicit nor safe, and it is also a reliability bug.",
+    "category": "p0f-2",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 25,
+    "summary": "rebuild() rmtree's the whole cache before re-rendering anything, so a render failure destroys the cache and leaves it partly populated.",
+    "failure_scenario": "A cache with 500 previews is rebuilt with 500 names, and render() raises on name 200. All 500 old entries are gone and only 199 new ones exist. Every later get() has to re-render, and callers that needed the old previews lose them. The fix is to build into a temp dir and swap it in, or to overwrite entries individually.",
+    "category": "p0f-2",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 12,
+    "summary": "Page names are joined onto live_dir with no containment check, so '..' segments or absolute names write outside live_dir.",
+    "failure_scenario": "pages = {'../../etc/cron.d/x': ...} gives target = live_dir/'../../etc/cron.d/x', and write_text writes outside the site root. An absolute name such as '/tmp/x' replaces the base entirely, because pathlib discards live_dir. read_page() has the same hole when it reads. If the names come from user or content input, this is arbitrary file write and read. Validate at the boundary by resolving the path and checking it is under live_dir.",
+    "category": "p0f-1",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 15,
+    "summary": "The cache key is used unvalidated as a filename, so names containing '/' or '..' escape the root or hit a missing subdirectory.",
+    "failure_scenario": "get('../secret') writes and reads root/../secret.png outside the cache. get('a/b') only mkdirs root, so part.write_bytes raises FileNotFoundError because root/a does not exist. Even valid names like 'a/b' would be missed by cached_names(), which uses a non-recursive glob. Validate the name at the boundary, or sanitize it to a flat key.",
+    "category": "p0f-1",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 18,
+    "summary": "The temp file name is deterministic per key, so concurrent get() calls for the same name race on a shared .part file.",
+    "failure_scenario": "Threads A and B both see the path missing and both write root/x.part. A's replace() moves the file, then B's replace() raises FileNotFoundError, or B's write truncates and interleaves with A's before the replace, publishing a corrupted PNG. Separately, rebuild()'s rmtree can delete the directory between exists() and read_bytes(). Use a unique temp name (tempfile.NamedTemporaryFile in root, or a pid/uuid suffix) and read the result with try/except FileNotFoundError.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 19,
+    "summary": "A failure between write_bytes and replace leaves a stale .part file that is never cleaned up.",
+    "failure_scenario": "write_bytes fails midway (disk full) or the process is killed before replace(). root/x.part is left behind with a truncated partial render. Nothing deletes it: cached_names ignores it and get overwrites it only for the same name. Orphans accumulate. Wrap the write and replace in try/finally that unlinks the part file.",
+    "category": "p0f-2",
+    "severity": "nice"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 31,
+    "summary": "The is_dir() guard in cached_names() is unnecessary because Path.glob on a nonexistent directory already yields nothing.",
+    "failure_scenario": "The branch protects against an error that does not happen: Path.glob and rglob on a missing directory return an empty iterator, so sorted(...) already returns []. The extra defensive branch adds code and a code path for no behavior. The same applies to page_names in code/site_publisher.py line 24. If a root path exists but is a file, the guard silently hides a misconfiguration instead of failing.",
+    "category": "p0f-3",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 28,
+    "summary": "rebuild() returns len(names), which overcounts when names contains duplicates and misreports how many entries were rendered.",
+    "failure_scenario": "rebuild(['a', 'a', 'b']) renders 'a' once, because the second get() is a cache hit, and renders 'b' once. It returns 3 although only 2 entries were produced and cached_names() has 2 entries. A caller that checks the count against cached_names() sees a mismatch. Return the number of distinct names, or the number actually rendered.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 7,
+    "summary": "The live directory is replaced non-atomically, so readers see a missing or partially written site during every publish.",
+    "failure_scenario": "While publish() runs, a request to read_page('index.html') hits the window after rmtree and before write_text, and gets FileNotFoundError, a 404 from the web server, or a mix of old and new pages. Writing into a staging directory and renaming it over live_dir (or swapping a symlink) closes that window. Also, if live_dir is a symlink, rmtree raises OSError instead of replacing it.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 27,
+    "summary": "page_names() uses rglob and returns OS-specific separators, which are inconsistent with the keys given to publish() on Windows.",
+    "failure_scenario": "publish() accepts 'blog/post.html' and returns it unchanged. page_names() returns str(Path), so on Windows it gives 'blog\\post.html', and comparing or looking up names across the two functions fails. Use relative_to(...).as_posix().",
+    "category": "unmapped",
+    "severity": "nice"
+  }
+]
+```

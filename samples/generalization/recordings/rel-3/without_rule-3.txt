@@ -1,0 +1,76 @@
+```json
+[
+  {
+    "file": "code/access_tail.py",
+    "line": 17,
+    "summary": "load_position returns whatever JSON parses without checking its shape or types, so a valid but wrong-shaped position file crashes read_new_lines.",
+    "failure_scenario": "The position file contains `{}`, `[]`, `null`, `{\"inode\": 5}`, or `{\"offset\": \"12\"}`. `position[\"offset\"]` then raises KeyError or TypeError. A negative offset makes `handle.seek(start)` raise, and `start > st_size` does not catch it. The reader fails on every run, because the bad file is never overwritten. The sibling module `load_checkpoint` validates shape and degrades to 0 with a warning, so this one is inconsistent. A file with invalid UTF-8 raises UnicodeDecodeError, which is also not handled (P0F.1 and P0F.2: validate at the boundary and degrade explicitly).",
+    "category": "p0f-1",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 29,
+    "summary": "The inode comes from `log_path.stat()` but the data is read from a separately opened handle, so the saved inode can describe a different file than the one read (TOCTOU).",
+    "failure_scenario": "Rotation happens between `stat()` and `open()`. The code stats the old file (inode A) and reads the new file (inode B) from the old offset, skipping its first N bytes. It then saves inode A with an offset into B. On the next run the inode is B, which mismatches the saved A, so the offset resets to 0 and the whole new file is re-read and duplicated. The reverse ordering can lose lines. Calling `os.fstat(handle.fileno())` on the opened handle fixes it.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 28,
+    "summary": "A missing log file during rotation raises an unhandled FileNotFoundError, and the position reset on inode change or truncation is silent.",
+    "failure_scenario": "Logrotate renames the log and the new one does not exist yet. `log_path.stat()` raises and the tailer dies, even though the cron or poll loop should just retry. Separately, an inode mismatch or `start > st_size` resets to 0 with no log line, while a corrupt position file does log a warning. That is inconsistent with P0F.2: log the degrade and name the fallback. Operators cannot tell a re-read from the start apart from normal operation.",
+    "category": "p0f-2",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 36,
+    "summary": "The position is persisted before the lines are returned to the caller, so a crash while processing them loses those lines permanently (at-most-once delivery).",
+    "failure_scenario": "`save_position` runs, then the caller parses the lines and crashes or fails to write to its sink. On restart the offset is already past those lines, so they are never re-delivered. batch_log_reader's `save_checkpoint` has the same ordering. Loss is silent. REL.1 says to keep the usable state until the replacement is validated. Commit the offset only after the caller has consumed the lines, or return the new position and let the caller commit it.",
+    "category": "rel-1",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 37,
+    "summary": "`decode(...).splitlines()` splits on more than `\\n` (\\x0b, \\x0c, \\x1c-\\x1e, \\x85, \\u2028, \\u2029, lone \\r), so one log line can become several, and malformed bytes are silently replaced.",
+    "failure_scenario": "An access-log line contains a form feed or U+2028, for example inside a user-agent or query string. It is returned as two or more entries, and the consumer parses half-lines. The byte offset counts true newline-terminated lines but the returned list does not, so the two disagree. Using `decode(...).split(\"\\n\")` after trimming the trailing newline keeps the unit consistent.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 34,
+    "summary": "Resetting `done` to 0 when the checkpoint exceeds the row count is silent, and a line-count checkpoint cannot detect rotation when the new file is longer.",
+    "failure_scenario": "The log is rotated and the new file is shorter than the checkpoint. `done` silently becomes 0 with no warning, unlike the other degrade paths in this module. If the new file already has more lines than the saved count, the first `done` new lines are skipped without any signal and never processed. The checkpoint stores no file identity (inode or head hash), so it is the wrong anchor for rotation (P0F.2 and REL.2).",
+    "category": "p0f-2",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 30,
+    "summary": "The whole log is read into memory with `readlines()` on every call, only to slice off the tail.",
+    "failure_scenario": "A multi-GB access log is loaded fully into memory on each poll, even when 0 new lines were added. That causes high RSS or OOM and O(file size) work per run instead of O(new bytes). Seeking or iterating lazily with `itertools.islice` avoids it. access_tail.py avoids this by using a byte offset.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 28,
+    "summary": "`save_checkpoint` and `read_new_lines` duplicate access_tail.py's `save_position` and `read_new_lines` (atomic write via `.part` plus `os.replace`, load with a degrade-to-fresh path, the same incomplete-last-line trimming). The `.part` naming can also collide.",
+    "failure_scenario": "Two near-identical state-file implementations will drift: this module validates shape and access_tail.py does not, which is already a bug. `path.with_suffix(\".part\")` maps both `a.json` and `a.state` to `a.part`. Two readers sharing a directory and stem would clobber each other's temp file. This is the third repetition of the pattern and should become one shared helper (P2.2).",
+    "category": "p2-2",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 21,
+    "summary": "Non-obvious decisions have no comments: the `.part` plus `os.replace` atomic write, trimming to the last newline, and the reset when the offset exceeds the file size.",
+    "failure_scenario": "A maintainer sees `chunk[: chunk.rfind(b\"\\n\") + 1]` and the temp-file dance and 'simplifies' them. That breaks partial-line handling and crash safety. In both files these ordering and pitfall decisions are exactly what P3.2 asks to be commented.",
+    "category": "p3-2",
+    "severity": "nice"
+  }
+]
+```

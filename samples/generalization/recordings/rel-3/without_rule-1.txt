@@ -1,0 +1,84 @@
+```json
+[
+  {
+    "file": "code/access_tail.py",
+    "line": 25,
+    "summary": "A log path that vanishes or is replaced by rotation crashes the reader, and stat/open on the path are separate steps, so the saved inode can belong to a different file than the bytes read.",
+    "failure_scenario": "logrotate renames access.log between `log_path.stat()` (inode A) and `log_path.open()`. The new file (inode B) is read from offset `start`, but the saved position records inode A with an offset into B. On the next run the inode matches A's stale record, or the offset is wrong, and lines are skipped or re-read. If the log is briefly missing during rotation, `stat()` raises an uncaught FileNotFoundError. Fix: open first and use `os.fstat(handle.fileno())`.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 12,
+    "summary": "load_position trusts the shape of the decoded JSON, unlike batch_log_reader.load_checkpoint, which validates it. Valid JSON that is not a dict with int `inode` and `offset` crashes read_new_lines. A non-UTF-8 position file raises UnicodeDecodeError, which is not caught.",
+    "failure_scenario": "The position file contains `[]`, `null`, `{}` or `{\"inode\": 1, \"offset\": \"x\"}`, or a negative offset. `position[\"offset\"]` raises TypeError or KeyError, and `handle.seek(negative)` raises. The tailer then fails on every run until someone deletes the file, because nothing resets it. A truncated or garbled position file with invalid UTF-8 bytes fails the same way. This breaks the stated 'read from the start' fallback and is an uncaught failure at the boundary.",
+    "category": "p0f-1",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 11,
+    "summary": "The `try` in load_position wraps both `read_text` and `json.loads`. Only one of them can raise each handled exception, so the guarded region is wider than the line expected to fail. batch_log_reader splits the two correctly.",
+    "failure_scenario": "FileNotFoundError can only come from `read_text` and JSONDecodeError only from `json.loads`, yet both share one try block. If a later edit adds a call inside it, that call's FileNotFoundError or JSONDecodeError is silently treated as 'no position' or 'bad JSON'.",
+    "category": "p0e-1",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 26,
+    "summary": "Rotation and truncation are detected and handled silently. The inode-mismatch reset and the `start > st_size` reset restart from byte 0 with no log line. Truncation followed by regrowth past the old offset is not detected at all.",
+    "failure_scenario": "A log is truncated with `: > access.log` and, between runs, grows beyond the saved offset. The inode is unchanged and `start <= st_size`, so the reader resumes mid-file and silently drops everything before the old offset. When the inode changes or the size shrinks, the fallback to offset 0 is invisible to operators, which violates 'degrade explicitly: log it and name the fallback'.",
+    "category": "p0f-2",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 34,
+    "summary": "The checkpoint is only a line count, with no inode or identity check. A rotated or replaced log that already has more lines than the checkpoint is treated as the old file, so its first lines are skipped. The `done > len(rows)` reset to 0 is also silent.",
+    "failure_scenario": "The checkpoint says lines=100. The log rotates and the new file reaches 150 lines before the next run. `done (100) <= len(rows) (150)` passes, so lines 1-100 of the new file are never returned, which is silent data loss. In the shrink case the code resets to 0 and re-emits the whole file without any warning.",
+    "category": "p0f-2",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 33,
+    "summary": "The whole log is read into memory with `readlines()` on every call just to count and slice lines. Cost grows with total file size, not with new lines.",
+    "failure_scenario": "A multi-GB access log polled every few seconds gets fully read and split each run, which causes memory spikes and I/O waste. Only the few new lines are needed, as access_tail.py shows by seeking to a saved offset.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 38,
+    "summary": "The checkpoint is saved before the lines are returned to the caller. A caller crash, or an exception while handling the batch, loses those lines permanently (at-most-once). access_tail.py has the same pattern.",
+    "failure_scenario": "`save_checkpoint(..., len(rows))` succeeds, then the caller's parse or DB write on the returned lines raises. The next run starts from the new checkpoint and those lines are never processed. The checkpoint should be committed only after the caller has handled the batch, or the function should return the new position for the caller to commit.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 33,
+    "summary": "`str.splitlines()` splits on more than `\\n`: `\\r`, `\\x0b`, `\\x0c`, `\\x1c`-`\\x1e`, `\\x85`, `\\u2028` and `\\u2029`. The offset, however, advances by newline-terminated bytes only, so a record containing one of these characters is split into several 'lines'.",
+    "failure_scenario": "An access-log request line contains a raw form feed or U+2028, for example in a User-Agent that was not escaped. The reader returns two fragments for one log record, and downstream parsing of the second fragment fails or miscounts. Use `.split('\\n')` on the complete bytes' decoded text instead.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 12,
+    "summary": "A checkpoint file that is not valid UTF-8 raises UnicodeDecodeError, a ValueError subclass that is not caught. PermissionError and other OSErrors also propagate. Only FileNotFoundError and JSONDecodeError are handled.",
+    "failure_scenario": "A corrupted checkpoint contains stray bytes after a partial disk write. `read_text(encoding=\"utf-8\")` raises UnicodeDecodeError and the reader never recovers, although the code comments say it falls back to reading from the start.",
+    "category": "p0e-2",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 24,
+    "summary": "Generic names (`info`, `chunk`, `fresh`, `data`) are not qualified, and the near-identical load, save and read_new_lines logic is duplicated across the two modules, with the same function name `read_new_lines` and different semantics.",
+    "failure_scenario": "`info = log_path.stat()` in access_tail.py and `data = json.loads(raw)` in batch_log_reader.py are unqualified generic names (should be `log_stat`, `checkpoint_json`). Two same-named `read_new_lines` functions with different checkpoint formats, offset-based versus line-count-based, invite a caller importing the wrong one and feeding it an incompatible state file.",
+    "category": "p2-4",
+    "severity": "should-fix"
+  }
+]
+```

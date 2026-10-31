@@ -1,0 +1,68 @@
+```json
+[
+  {
+    "file": "code/item_index.py",
+    "line": 40,
+    "category": "rel-2",
+    "severity": "should-fix",
+    "summary": "The key format changed with no migration. `seen` now ignores every row whose `key_version` is not 2, so all stored v1 items are treated as new.",
+    "failure_scenario": "The file holds v1 rows such as {key: 'https://a.com/feed|g1', read: True}. The first `import_items` call after upgrade builds `seen` without them. It appends a fresh v2 row {key: 'a.com|g1', read: False} for every item already stored. Items the user already read come back as unread, and `added` reports them as new. `unread_titles` now lists each item twice if a v1 copy was unread. The old rows are never converted or removed."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 57,
+    "category": "rel-2",
+    "severity": "should-fix",
+    "summary": "`mark_read` only matches rows with `key_version == KEY_VERSION`, so it can never find legacy v1 rows, and nothing converts them.",
+    "failure_scenario": "A user has a v1 row for item g1 and calls `mark_read(path, feed_url, 'g1')`. The key is built in the v2 format and compared only against v2 rows. It returns False and the item stays unread forever. The old-identity check the clause asks for is missing: there is no fallback that rebuilds the v1 key `f'{feed_url}|{guid}'` and compares it."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 17,
+    "category": "unmapped",
+    "severity": "should-fix",
+    "summary": "The new key uses only the host and drops the feed path, so different feeds on one host share an identity.",
+    "failure_scenario": "`https://example.com/blog/rss.xml` and `https://example.com/news/rss.xml` both reduce to `example.com`. If both feeds use guid '1', they produce the same key `example.com|1`. The second feed's item is silently skipped as already seen. The same happens with feeds on different ports or schemes, and `mark_read` on one feed marks the other feed's item as read."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 12,
+    "category": "unmapped",
+    "severity": "should-fix",
+    "summary": "`feed_host` does not parse the URL properly, so userinfo, port, query-only URLs and a missing scheme all give odd hosts.",
+    "failure_scenario": "`http://user:pw@Example.com:8080/feed` gives `user:pw@example.com:8080`, so credentials end up in the persisted key. A bare 'example.com/feed' with no scheme is handled by the `[-1]` fallback, but `https://example.com?x=1` returns 'example.com?x=1'. The same feed with and without a port yields two different identities. `urllib.parse.urlsplit(url).hostname` would handle all of these."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 12,
+    "category": "p2-2",
+    "severity": "should-fix",
+    "summary": "`feed_host` is copy-pasted into both modules, and `make_uid` / `item_key` plus the `load_rows` and `save_rows` pairs also duplicate each other.",
+    "failure_scenario": "The two modules now hold identical host-extraction logic. A fix to one, such as handling ports or userinfo, will not reach the other. Their stored identities then drift apart and the same feed gets different identities in the two files. This is a second repetition of the code, not a third, but the two copies are already identical."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 21,
+    "category": "p0f-2",
+    "severity": "blocker",
+    "summary": "`label` treats any `label_style` other than 1 as style 2, so an unknown or corrupt style is rendered silently with no error.",
+    "failure_scenario": "A row written by a newer version with `label_style` 3, or a corrupt value like 0 or '1', falls into the final `return` and prints `host#N`. The wrong format is shown with no log and no error. The rows are also never upgraded. Old style-1 rows keep printing `host-0001` while new ones print `host#2`, so `listing` shows a mix of formats within one feed. A label that should have been rejected or logged is passed off as normal."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 4,
+    "category": "rel-2",
+    "severity": "should-fix",
+    "summary": "`LABEL_STYLE` is bumped to 2 but old rows are not migrated, and the label text changes from zero-padded `host-0001` to `host#1`.",
+    "failure_scenario": "Style-1 rows keep their old label and only new rows get the new one, so one feed shows two numbering formats side by side. Any user, script or note that stored a label like `example.com-0001` can no longer match the new `example.com#1`. Anything that parses labels by the padded width breaks. The change from `-` to `#` is an identity change visible to users, and the diff gives no compatibility path."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 27,
+    "category": "rel-3",
+    "severity": "should-fix",
+    "summary": "`load_rows` only checks that the field names exist, not the value types. A row with a wrong-typed `key_version` or `read` passes validation and fails later.",
+    "failure_scenario": "A hand-edited or partial row has `key_version: null` or `\"2\"`. The shape check passes. The new `row['key_version'] == KEY_VERSION` comparison is then quietly False, so the row is treated as legacy and re-imported as a duplicate. A `read` value of the string 'false' is truthy and hides the item from `unread_titles`. The same file shape problem should take the named `IndexFileError` path instead."
+  }
+]
+```

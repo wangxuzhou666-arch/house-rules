@@ -1,0 +1,84 @@
+```json
+[
+  {
+    "file": "code/access_tail.py",
+    "line": 12,
+    "summary": "load_position returns whatever valid JSON it parses with no shape check, so a valid-but-wrong file (a list, null, a dict missing keys, a negative or non-int offset) crashes read_new_lines.",
+    "failure_scenario": "The position file contains `[]`, `null` or `{}`. json.loads succeeds, so none of the handlers fire. Line 29 then raises TypeError or KeyError on `position[\"offset\"]`. A stored offset of -5 reaches `handle.seek(-5)` and raises ValueError, and a string offset raises TypeError at `start > info.st_size`. The tailer fails on every run until someone deletes the file by hand. batch_log_reader.load_checkpoint already validates shape and falls back with a warning, so the two files are inconsistent.",
+    "category": "p0f-2",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 28,
+    "summary": "The file is stat()ed by path and then opened by path, so a rotation between the two calls pairs the old inode with an offset from the new file.",
+    "failure_scenario": "logrotate swaps the file after `log_path.stat()` at line 28 and before `log_path.open()` at line 32. The code reads the new file from `start`, which is a valid offset into the old file. That skips the first `start` bytes of the new file, and line 36 saves the old inode with the new file's offset. The next run sees an inode mismatch and re-reads the new file from 0, producing duplicate lines. Taking `os.fstat(handle.fileno())` on the opened handle closes the race.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 36,
+    "summary": "The position is committed before the caller has processed the returned lines, giving at-most-once delivery: a crash after the save loses those lines permanently.",
+    "failure_scenario": "read_new_lines saves the new offset and returns 10,000 lines. The consumer crashes or raises while parsing line 3,000. On restart the offset is already past all 10,000 lines, so the unprocessed ones are never seen again. The same pattern is at batch_log_reader.py:40.",
+    "category": "rel-1",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 30,
+    "summary": "Resets from the start (inode mismatch at line 29, size shrink at line 30) happen silently, with no log.",
+    "failure_scenario": "The log is rotated or truncated, so the whole new file is re-read from offset 0. Nothing is logged at either reset. Operators cannot tell a rotation from a lost position file, or why the output suddenly contains duplicate or old lines. The same file logs a warning for the corrupt-JSON fallback, so this is inconsistent. It is the same rule as batch_log_reader.py:38-39.",
+    "category": "p0f-2",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 12,
+    "summary": "read_text and json.loads share one try block, and a non-UTF-8 position file raises an uncaught UnicodeDecodeError.",
+    "failure_scenario": "A corrupt or partially written position file with invalid UTF-8 makes read_text raise UnicodeDecodeError, which is not a JSONDecodeError, so it escapes load_position. Putting both calls in one try also breaks the 'only the line you expect to fail inside try' rule. batch_log_reader.load_checkpoint separates the read from the parse, but its own read_text at line 11 has the same uncaught UnicodeDecodeError.",
+    "category": "p0e-1",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 38,
+    "summary": "The line-count checkpoint cannot detect rotation or truncate-and-regrow; it only resets when the new file is shorter than the old count.",
+    "failure_scenario": "The checkpoint says 1,000 lines done. The log is rotated and the new file has 1,500 lines by the next run. Since 1,000 <= 1,500, the first 1,000 lines of the new file are skipped silently and never processed. Only a new file shorter than the old count is detected, and that case also resets without logging.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 34,
+    "summary": "Each run reads the whole file into memory with readlines() and then slices off the already-done lines, so cost is O(file size) rather than O(new lines).",
+    "failure_scenario": "A multi-GB access log with 5 new lines since the last run still loads and splits every line each time. This costs memory and I/O proportional to the whole log. A byte offset, as in access_tail.py, or itertools.islice over the handle would avoid it.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 37,
+    "summary": "str.splitlines() splits on more than \\n (\\r, \\x0b, \\x0c, \\x1c-\\x1e, \\x85, \\u2028, \\u2029), but the offset logic only counts complete \\n-terminated lines.",
+    "failure_scenario": "An access-log request path or user-agent contains an embedded \\x0c or \\u2028 (attacker-controlled input). One log line is returned as two or more entries, which corrupts downstream parsing. Splitting the bytes on b\"\\n\" before decoding keeps the lines aligned with the offset accounting.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 26,
+    "summary": "Both new modules define their own near-identical atomic-write helper (save_checkpoint, save_position) and the same read_new_lines name, with only the payload differing.",
+    "failure_scenario": "Both write the .part file and os.replace it, and neither fsyncs. A crash after replace can leave an empty or garbage state file, which resets to the start and replays everything. A fix in one copy will not reach the other. Both also share a `.part` temp name derived by with_suffix. Two state files with the same stem (e.g. a.json and a.txt) would collide on a.part. The identical function name read_new_lines with different semantics, a line-count versus a byte-offset checkpoint, invites misuse.",
+    "category": "p2-2",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 34,
+    "summary": "handle.read() pulls everything after the saved offset into memory in a single call.",
+    "failure_scenario": "After a long downtime or a first run with a missing position file, the whole multi-GB log is read into one bytes object and then decoded and split into a list, which can exhaust memory. Reading in bounded chunks and advancing the offset per chunk would cap it.",
+    "category": "unmapped",
+    "severity": "nice"
+  }
+]
+```

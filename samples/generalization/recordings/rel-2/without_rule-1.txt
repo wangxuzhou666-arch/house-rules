@@ -1,0 +1,52 @@
+```json
+[
+  {
+    "file": "code/item_index.py",
+    "line": 57,
+    "summary": "mark_read now ignores every row whose key_version is not 2, but nothing migrates old v1 rows (the old full-URL key format), so existing rows can never be marked read.",
+    "failure_scenario": "An existing index file holds {key: 'https://ex.com/feed.xml|g1', key_version: 1, read: false}. mark_read(path, 'https://ex.com/feed.xml', 'g1') computes the v2 key 'ex.com|g1', finds no matching row, and returns False. The v1 row stays unread permanently and shows up in unread_titles forever. The version bump only partly protects old data: it blocks matching, but it does nothing to carry the old rows forward. This also breaks REL.1 (keep usable state until the replacement is ready), because the old state is left behind rather than upgraded."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 40,
+    "summary": "The seen set drops v1 rows, so re-importing a feed re-adds every item that is already stored under a v1 key, creating duplicates.",
+    "failure_scenario": "The file has v1 rows for guids g1 and g2, and g1 has already been read. import_items runs again with the same feed and the same items. seen is empty because the v1 rows are filtered out, so both items are appended as v2 rows with read=False. The already-read g1 comes back as unread, and unread_titles lists the same title twice (the stale v1 row plus the new v2 row, for any item that was unread)."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 17,
+    "summary": "Key identity was narrowed from the full feed URL to host only, so different feeds on the same host that share a guid now collide.",
+    "failure_scenario": "https://blog.example.com/a.xml and https://blog.example.com/b.xml both publish guid '1' (sequential ids are common). Both map to the key 'blog.example.com|1'. Importing feed B skips its item 1 as already seen, so the item is silently lost. mark_read on feed B's item marks feed A's row as read."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 13,
+    "summary": "feed_host does no real URL parsing, so the host it returns can carry a port, userinfo, query or fragment, or a scheme-less value can be mangled.",
+    "failure_scenario": "'https://ex.com?x=1' gives host 'ex.com?x=1', which differs from 'https://ex.com/'. 'https://user@ex.com/feed' gives 'user@ex.com'. 'https://ex.com:443/f' and 'https://ex.com/f' give different hosts for the same feed. The same feed then gets different keys depending on how its URL is spelled, and duplicates or missed read-marks follow. urllib.parse.urlsplit(...).hostname handles all of these."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 12,
+    "summary": "feed_host is copy-pasted identically in item_index.py and reading_list.py, and make_uid and item_key are the same function under different names.",
+    "failure_scenario": "A fix to host parsing (for example the port or userinfo issue above) has to be made in two places. If only one is fixed, the two modules compute different identities for the same feed. This violates P2.2: abstract on the third repetition, and this is already the second copy of whole functions, load_rows and save_rows included."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 21,
+    "summary": "label() treats any label_style other than 1 as the new style, so an unknown or corrupt label_style value silently gets the style-2 format.",
+    "failure_scenario": "A row with label_style 3 (written by a newer version) or 0 or None is rendered as 'feed#N' without any error. If a style 3 is added later, old code mislabels it quietly. The check should be an explicit `== 2` with a named error for unknown values (P0F.2 and P1.3)."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 48,
+    "summary": "Numbering is per feed host, but the label style change means old and new labels mix in one listing, and different feeds on the same host share one number sequence and one uid space.",
+    "failure_scenario": "listing() now shows 'ex.com-0001 Old' next to 'ex.com#2 New' for the same feed, so labels look inconsistent and the sort and visual alignment of the zero-padded style are lost. Two feeds on one host also share the same number counter, and their guids can collide in uid, as in the item_index finding."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 49,
+    "summary": "import_items rewrites the whole file every call, even when nothing was added.",
+    "failure_scenario": "Re-importing an unchanged feed polls an already-complete index, yet it still serializes and replaces the file on every call. That is needless I/O, and it can bump the file's mtime and trip file watchers or sync tools. Guarding with `if added:` avoids it."
+  }
+]
+```

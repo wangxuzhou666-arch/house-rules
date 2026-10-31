@@ -1,0 +1,84 @@
+```json
+[
+  {
+    "file": "code/access_tail.py",
+    "line": 12,
+    "summary": "load_position only handles a missing file or a JSON syntax error. Valid JSON with the wrong shape (null, a list, missing keys, a string or negative offset) is returned as-is and crashes read_new_lines.",
+    "failure_scenario": "The position file contains `null`, `[]`, `{}` or `{\"inode\":1,\"offset\":-5}`. read_new_lines then fails on `position[\"offset\"]` with TypeError or KeyError, or `handle.seek(-5)` raises OSError. A UTF-8 decode failure in read_text raises UnicodeDecodeError, which is not a JSONDecodeError, so it also escapes. The bad file is never replaced, because save_position is never reached, so every later run fails. batch_log_reader.load_checkpoint already validates the shape; this module does not.",
+    "category": "rel-3",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 11,
+    "summary": "load_checkpoint catches JSONDecodeError but not UnicodeDecodeError from read_text(encoding='utf-8'). A checkpoint file with non-UTF-8 bytes bypasses the 'start from the beginning' fallback.",
+    "failure_scenario": "A torn or garbage write leaves invalid UTF-8 in the checkpoint. read_text raises UnicodeDecodeError, which is a ValueError and not a JSONDecodeError. It propagates out of read_new_lines before save_checkpoint runs, so the corrupt file stays and every run fails. This is the REL.3 failure the shape check was added to prevent, still open for a different bad-file form.",
+    "category": "rel-3",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 36,
+    "summary": "The position is saved before the caller has processed the returned lines. A crash or exception in the caller permanently loses those lines (at-most-once delivery).",
+    "failure_scenario": "read_new_lines reads 1000 new lines and persists the new offset. The caller then crashes while parsing or shipping them. On restart the saved offset is already past those lines and they are never re-read. The state is advanced before the work it records has succeeded; the commit should move to after the caller finishes. The same pattern is in batch_log_reader.py line 40.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 40,
+    "summary": "save_checkpoint(len(rows)) runs before the lines are returned and processed, so the checkpoint advances even if the caller then fails.",
+    "failure_scenario": "The caller gets rows[done:] and fails halfway through handling them. The checkpoint already says all rows are done, so the unprocessed rows are skipped on the next run.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 28,
+    "summary": "log_path.stat() is called separately from log_path.open(). If the log rotates between the two calls, the inode saved belongs to a different file than the one that was read.",
+    "failure_scenario": "stat sees old inode A, then rotation swaps in new file B, then open reads B from offset `start`. The saved state is (inode A, offset into B). On the next run the inode is now B, so it does not match A and start becomes 0. The whole of B is re-read and duplicated. Using os.fstat(handle.fileno()) on the opened handle removes the race.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 38,
+    "summary": "The line-count checkpoint is the only rotation detection, and it only resets when the file is shorter than the count. A rotated or replaced file that is already as long as, or longer than, the old count silently skips its first `done` lines.",
+    "failure_scenario": "The checkpoint says 500 lines done. The log is rotated and the new file reaches 600 lines before the next run. done (500) is not greater than 600, so rows[500:] is returned and the first 500 lines of the new file are never seen. An in-place rewrite of the file has the same effect. There is no inode or content identity check.",
+    "category": "rel-2",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 34,
+    "summary": "readlines() loads the whole log into memory and re-parses it from line 0 on every call, even when only a few new lines were appended.",
+    "failure_scenario": "On a multi-GB access log, each run allocates every line as a Python str and decodes the whole file to return a few new rows. Memory use and runtime grow with total file size instead of the size of the new data. access_tail.py avoids this with seek.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 37,
+    "summary": "str.splitlines() after decoding also splits on \\r, \\x0b, \\x0c, \\x1c-\\x1e, \\x85, \\u2028 and \\u2029, not only on the \\n that the byte-level 'complete line' logic used.",
+    "failure_scenario": "An access-log request line or user-agent containing \\u2028, \\x85 or a stray \\r gets split into two list entries. The caller sees fragments of one record as separate lines. Splitting the bytes on b'\\n' before decoding keeps the line boundary consistent with the offset logic.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 21,
+    "summary": "The atomic-write helper (write to a .part sibling, then os.replace) is copy-pasted with slight variation from batch_log_reader.save_checkpoint. read_new_lines and the JSON load/fallback logic are likewise duplicated across the two modules.",
+    "failure_scenario": "Fixes such as fsync before replace or cleaning up a stale .part have to be made twice and can drift. Because with_suffix('.part') replaces the suffix, state files named a.json and a.txt in one directory both map to a.part and can clobber each other.",
+    "category": "p2-2",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 28,
+    "summary": "The generic variable name `info` (the stat result) is used instead of a qualified name such as `log_stat`. The name `chunk` has the same problem.",
+    "failure_scenario": "`info.st_ino` and `info.st_size` read as vague. The name does not say what is described, which makes the rotation and truncation logic harder to follow.",
+    "category": "p2-4",
+    "severity": "should-fix"
+  }
+]
+```
