@@ -199,9 +199,12 @@ def reservation_lock(root: Path, wait: float | None = None) -> Iterator[None]:
                     raise RatchetError(f"another process is counting automatic reviews ({path} stayed locked for {waited:g}s); "
                                        "run it again") from None
                 time.sleep(LOCK_POLL_SECONDS)
+            except OSError as exc:  # after BlockingIOError, its subclass: ENOLCK or EINTR on a network file system, EBADF
+                raise RatchetError(f"cannot lock {path}: {exc}") from exc
             else:
                 break
         try:
             yield
         finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
+            with contextlib.suppress(OSError):  # closing the file lets go of the lock all the same; this must not hide the block's result
+                fcntl.flock(handle, fcntl.LOCK_UN)

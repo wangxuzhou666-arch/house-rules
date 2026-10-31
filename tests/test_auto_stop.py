@@ -1337,6 +1337,21 @@ class DailyCapTest(StopCase):
         self.assert_asks_for(self.answer())
         self.assertEqual(len(book_entries(self.repo)), 1)
 
+    def test_a_lock_the_file_system_refuses_is_logged_as_a_named_error_and_the_commits_wait_for_the_stop_after(self) -> None:
+        self.begin()
+        self.commit_work()
+        refused = OSError(errno.ENOLCK, os.strerror(errno.ENOLCK))
+        with mock.patch.dict(os.environ, {"RATCHET_CLAUDE_CMD": str(self.claude)}), mock.patch("fcntl.flock", side_effect=refused), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(auto_stop.stop_hook(io.StringIO(stop_input())), 0)
+        self.assertEqual(out.getvalue(), "")  # nobody was asked, and nobody was told
+        [line] = self.hook_log()
+        self.assertRegex(line, HOOK_LOG_LINE + re.escape(f"{self.repo}: RatchetError: cannot lock {self.repo / LOCK_NAME}: ") + ".*")
+        self.assertEqual(self.book_bytes(), None)
+        self.assertEqual(len(read_lines(self.pending_file())), 1)  # put back for the Stop after
+        self.assert_asks_for(self.answer())
+        self.assertEqual(len(book_entries(self.repo)), 1)
+
 
 # ---- two stops at once, and a hook that fails ---------------------------------------------------------------------
 

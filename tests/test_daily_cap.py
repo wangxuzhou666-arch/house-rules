@@ -7,6 +7,7 @@ day old, so that the real clock cannot move one across the edge while the test r
 pure functions, with a `now` the test chooses.
 """
 import contextlib
+import errno
 import json
 import os
 import re
@@ -693,6 +694,16 @@ class AutoWrapupTest(CappedCase):
             code, _, err = self.cli("wrapup", "--auto", "--json")
         self.assertEqual(code, 1)
         self.assertIn("ratchet: error: another process is counting automatic reviews", err)
+        self.assertEqual((self.claude_calls(), self.book_bytes()), ([], before))
+
+    def test_a_lock_the_file_system_refuses_stops_the_review_with_a_named_error_and_no_traceback(self) -> None:
+        self.set_limit(3)
+        before = self.book_bytes()
+        with mock.patch("fcntl.flock", side_effect=OSError(errno.ENOLCK, os.strerror(errno.ENOLCK))):
+            code, _, err = self.cli("wrapup", "--auto", "--json")
+        self.assertEqual(code, 1)
+        self.assertIn(f"ratchet: error: cannot lock {self.repo / LOCK_NAME}: [Errno {errno.ENOLCK}] {os.strerror(errno.ENOLCK)}", err)
+        self.assertNotIn("Traceback", err)
         self.assertEqual((self.claude_calls(), self.book_bytes()), ([], before))
 
 

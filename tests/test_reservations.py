@@ -5,6 +5,8 @@ Nothing here reaches git or claude. The times are fixed instants a test chooses 
 the real clock, and they are told apart by what they do and not by when. What the CLI and the Stop hook do with the book is tested in
 test_daily_cap.py and test_auto_stop.py.
 """
+import errno
+import fcntl
 import json
 import os
 import signal
@@ -414,6 +416,32 @@ class LockTest(RootCase):
         with self.assertRaises(KeyError), reservation_lock(self.root, wait=0.5):
             raise KeyError("a bug in the block")
         with reservation_lock(self.root, wait=0.5):
+            pass
+
+    def test_a_lock_the_file_system_refuses_is_a_named_error_and_not_a_plain_os_error(self) -> None:
+        refused = OSError(errno.ENOLCK, os.strerror(errno.ENOLCK))  # as a network file system answers when it cannot take the lock
+        with mock.patch("fcntl.flock", side_effect=refused):
+            with self.assertRaises(RatchetError) as caught, reservation_lock(self.root):
+                self.fail("the lock was refused")
+        self.assertEqual(str(caught.exception), f"cannot lock {self.root / LOCK_NAME}: [Errno {errno.ENOLCK}] {os.strerror(errno.ENOLCK)}")
+        self.assertIs(caught.exception.__cause__, refused)
+        with reservation_lock(self.root, wait=0.5):  # the file was closed on the way out, so nothing is left locked
+            pass
+
+    def test_an_error_when_the_lock_is_let_go_does_not_replace_the_result_of_the_block(self) -> None:
+        real_flock = fcntl.flock
+
+        def flock_that_cannot_unlock(handle: object, operation: int) -> None:
+            if operation == fcntl.LOCK_UN:
+                raise OSError(errno.EIO, os.strerror(errno.EIO))
+            real_flock(handle, operation)
+
+        with mock.patch("fcntl.flock", side_effect=flock_that_cannot_unlock):
+            with reservation_lock(self.root):
+                pass
+            with self.assertRaises(KeyError), reservation_lock(self.root, wait=0.5):
+                raise KeyError("a bug in the block")
+        with reservation_lock(self.root, wait=0.5):  # closing the file let go of it
             pass
 
     def test_a_lock_held_by_a_process_that_is_killed_is_free_at_once(self) -> None:
