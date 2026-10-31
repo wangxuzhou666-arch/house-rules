@@ -607,7 +607,7 @@ class RollbackTest(ProposalCase):
     def test_a_receipt_from_before_worktrees_were_told_apart_belongs_to_the_main_worktree(self) -> None:
         batch_id = self.applied_in(self.repo)
         receipt = self.receipt(batch_id)
-        del receipt["worktree"]
+        del receipt["worktree"], receipt["main_worktree"]  # neither field existed
         self.write_receipt(batch_id, receipt)
         for name in ("rules.md", DIGEST, REVIEWER, CHANGELOG):
             (self.tree / name).write_text(self.main_text(name), encoding="utf-8")
@@ -616,6 +616,42 @@ class RollbackTest(ProposalCase):
         self.assertIn(f"applied in {self.repo}", err)
         self.assertEqual(self.run_in(self.repo, "rollback-proposals", "--batch", batch_id)[0], 0)
         self.assertEqual(self.main_text("rules.md"), STYLE_RULES)
+
+    def test_the_main_worktrees_batch_follows_the_repo_when_it_is_moved_and_a_linked_worktree_still_may_not_undo_it(self) -> None:
+        batch_id = self.applied_in(self.repo)
+        old_repo = str(self.repo)
+        self.move_repo()
+        git(self.repo, "worktree", "repair", str(self.tree))  # the linked worktree must find the main one again
+        self.assertEqual(self.receipt(batch_id)["worktree"], old_repo)
+        for name in ("rules.md", DIGEST, REVIEWER, CHANGELOG):  # as if the change had been merged into the linked branch
+            (self.tree / name).write_text(self.main_text(name), encoding="utf-8")
+        code, _, err = self.run_in(self.tree, "rollback-proposals", "--batch", batch_id)
+        self.assertEqual(code, 1)
+        self.assertIn(f"applied in {self.repo}", err)  # the main worktree where it is now, not where it was
+        self.assertEqual(self.receipt(batch_id)["status"], "applied")
+        self.assertEqual(self.run_in(self.repo, "rollback-proposals", "--batch", batch_id)[0], 0)
+        self.assertEqual(self.main_text("rules.md"), STYLE_RULES)
+
+    def test_a_batch_applied_in_a_linked_worktree_is_still_the_linked_worktrees_when_the_repo_is_moved(self) -> None:
+        batch_id = self.applied_in(self.tree)
+        self.move_repo()
+        git(self.repo, "worktree", "repair", str(self.tree))
+        code, _, err = self.run_in(self.repo, "rollback-proposals", "--batch", batch_id)
+        self.assertEqual(code, 1)
+        self.assertIn(f"applied in {self.tree}", err)
+        self.assertEqual(self.run_in(self.tree, "rollback-proposals", "--batch", batch_id)[0], 0)
+        self.assertEqual(self.tree_text("rules.md"), STYLE_RULES)
+
+    def test_a_receipt_that_does_not_say_whether_it_was_the_main_worktree_follows_the_repo_only_when_the_batch_was_made_there(self) -> None:
+        batch_id = self.applied_in(self.tree)
+        receipt = self.receipt(batch_id)
+        del receipt["main_worktree"]
+        self.write_receipt(batch_id, receipt)
+        self.move_repo()
+        git(self.repo, "worktree", "repair", str(self.tree))
+        code, _, err = self.run_in(self.repo, "rollback-proposals", "--batch", batch_id)
+        self.assertEqual(code, 1)  # its path is the linked worktree's, not the path the batch was made under
+        self.assertIn(f"applied in {self.tree}", err)
 
     def test_a_later_edit_in_the_worktree_still_blocks_its_rollback(self) -> None:
         batch_id = self.applied_in(self.tree)

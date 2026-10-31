@@ -11,7 +11,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from .config import Config
-from .decision_context import assess, build_context
+from .decision_context import assess, build_context, relocate
 from .errors import HouseRulesError
 from .ledger import read_events
 from .proposal_store import encoded, fingerprint, read_json, read_local
@@ -91,7 +91,7 @@ def verify_context(config: Config, events: list[dict], batch: dict) -> None:
         locations = {item["finding"]["id"]: (item["source"]["line_start"], item["source"]["line_end"])
                      for item in saved["findings"] if item["source"]["location_basis"] == "selected_current_range"
                      and item["source"]["status"] == "available"}
-    if build_context(config, events, ids, locations) != saved:
+    if build_context(config, events, ids, locations) != relocate(saved, config.root):
         raise HouseRulesError("decision evidence or source code changed; prepare and confirm a fresh batch")
 
 

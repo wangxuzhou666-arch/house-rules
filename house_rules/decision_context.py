@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 from .config import Config, is_outer, rules_name
@@ -58,6 +59,43 @@ def build_context(config: Config, events: list[dict], ids: list[str] | None = No
                          "source": source, "review_source": reviewed, "raw_review": raw})
     context = {"v": 1, "repo": str(config.root), "rules": rules, "findings": findings}
     return {**context, "context_id": fingerprint(context)}
+
+
+_SOURCE_KEYS = ("source", "review_source", "raw_review")  # the parts of a finding's card that are a source read from disk
+
+
+def relocate(context: dict, root: Path) -> dict:
+    """`context`, built while the repo was somewhere else, as it reads from the repo at `root`.
+
+    Its `repo`, the `absolute_path` of each source and any path inside the `reason` an unavailable one gives are where the repo
+    was when the context was built. A repo that was moved or renamed changes only that, so a path under the old place is
+    rebased onto `root`, and the `context_id` is made again from the result. A path outside the repo (an outer layer, another
+    worktree) stays as saved: a batch prepared in one worktree is still not applied in another.
+    """
+    old, new = context["repo"], str(root)
+    if old == new:
+        return context
+
+    def rebased(path: str) -> str:
+        return new + path[len(old):] if path == old or path.startswith(old + os.sep) else path
+
+    def moved(source: dict) -> dict:
+        found = {}
+        for key, value in source.items():
+            if key == "absolute_path" and isinstance(value, str):
+                found[key] = rebased(value)
+            elif key == "reason" and isinstance(value, str):
+                found[key] = value.replace(old, new)
+            else:
+                found[key] = value
+        return found
+
+    body = {key: value for key, value in context.items() if key != "context_id"}
+    body["repo"] = new
+    body["rules"] = [moved(source) for source in context["rules"]]
+    body["findings"] = [{key: moved(value) if key in _SOURCE_KEYS else value for key, value in item.items()}
+                        for item in context["findings"]]
+    return {**body, "context_id": fingerprint(body)}
 
 
 def _text(value: object, label: str) -> str:

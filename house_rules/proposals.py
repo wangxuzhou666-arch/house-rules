@@ -331,12 +331,17 @@ def create_batch(config: Config, events: list[dict], drafts: list, *, dry_run: b
 
 
 def _load_batch(config: Config, batch_id: str) -> dict:
+    """A batch from this repo's own state directory: that is what ties it to the repo, so the `repo` it records (where the repo was
+    when the batch was made, kept for provenance) is no part of the check. Comparing it would refuse every batch once the repo
+    is moved or renamed, and editing it to follow the move would change the fingerprint and so the ID. What is checked is that
+    the batch is the one its ID names: the folder, the `id` field and the fingerprint of everything else agree.
+    A batch that is stale (rules, configuration or evidence moved on) is refused where it is applied, not here."""
     if not isinstance(batch_id, str) or not _BATCH_ID.fullmatch(batch_id):
         raise HouseRulesError("batch ID must be a SHA-256 hex string")
     batch = read_json(config.root, f"{STATE}/{batch_id}/batch.json")
     unsigned = {k: v for k, v in batch.items() if k != "id"}
-    if batch.get("id") != batch_id or fingerprint(unsigned) != batch_id or batch.get("repo") != str(config.root):
-        raise HouseRulesError("proposal batch changed or belongs to another repo")
+    if batch.get("id") != batch_id or fingerprint(unsigned) != batch_id:
+        raise HouseRulesError("proposal batch changed: its content does not match its ID")
     return batch
 
 
@@ -471,13 +476,27 @@ def _revision_files(config: Config, batch: dict, payload: dict, accepted: list[d
             CHANGELOG: log.rstrip() + "\n\n" + entry}
 
 
-def _require_applied_here(config: Config, receipt: dict, then: str) -> None:
+def _applied_in_main(batch: dict, receipt: dict) -> bool:
+    """Whether the batch was applied in the main worktree. The receipt says so (`main_worktree`). One from before it did names only
+    a path, which is the main worktree's when it is the path the batch was made under (a receipt with no path at all is the main
+    worktree's too, which `_require_applied_here` settles)."""
+    if "main_worktree" in receipt:
+        return receipt["main_worktree"] is True
+    return receipt.get("worktree") == batch.get("repo")
+
+
+def _require_applied_here(config: Config, batch: dict, receipt: dict, then: str) -> None:
     """A batch is applied in one worktree. The receipt is shared, but the bytes in its `changes` are that worktree's: undoing
     them anywhere else would write one worktree's files into another and leave the receipt saying the first is undone.
 
     A receipt from before worktrees were told apart was written in the main worktree, whichever one ran the command.
+    The main worktree is the one at the root now: the path it had when the batch was applied is only where the repo was, and
+    a linked worktree is still told by its path.
     """
-    applied_in = receipt.get("worktree", str(config.root))
+    if _applied_in_main(batch, receipt):
+        applied_in = str(config.root)
+    else:
+        applied_in = receipt.get("worktree", str(config.root))
     if applied_in != str(config.worktree):
         raise HouseRulesError(f"batch was applied in {applied_in}, not in this worktree ({config.worktree}); {then}")
 
@@ -494,7 +513,7 @@ def apply_batch(config: Config, events: list[dict], payload: dict, *, dry_run: b
             receipt = read_json(config.root, receipt_name)
             if receipt["decision_hash"] != fingerprint(payload) or receipt["status"] != "applied":
                 raise HouseRulesError("batch already decided or rolled back; create a new batch")
-            _require_applied_here(config, receipt, "the change is in that worktree's files: commit it there and merge that commit here")
+            _require_applied_here(config, batch, receipt, "the change is in that worktree's files: commit it there and merge that commit here")
             if any(_read(config, n) != pair[1] for n, pair in receipt["changes"].items()):
                 raise HouseRulesError("batch was applied but outputs have since changed")
             return {"status": "already_applied", "batch_id": batch_id, "changed": []}
@@ -514,6 +533,7 @@ def apply_batch(config: Config, events: list[dict], payload: dict, *, dry_run: b
             after.update(_revision_files(config, batch, payload, accepted, applied_at))
         changes = {n: (batch["baseline"][n], text) for n, text in after.items()}
         receipt = {"v": 1, "status": "applied", "batch_id": batch_id, "ts": applied_at, "worktree": str(config.worktree),
+                   "main_worktree": config.worktree == config.root,
                    "confirmed_by": payload["confirmed_by"], "decision_hash": fingerprint(payload),
                    "decisions": decisions, "changes": changes}
         if "native" in batch:
@@ -527,14 +547,14 @@ def apply_batch(config: Config, events: list[dict], payload: dict, *, dry_run: b
 
 
 def rollback_batch(config: Config, batch_id: str, *, dry_run: bool = False) -> list[str]:
-    _load_batch(config, batch_id)
+    batch = _load_batch(config, batch_id)
     receipt_name = f"{STATE}/{batch_id}/receipt.json"
     with nullcontext() if dry_run else mutation_lock(config.root):
         ensure_idle(config.root, config.worktree)
         receipt = read_json(config.root, receipt_name)
         if receipt["status"] != "applied":
             raise HouseRulesError("batch is not currently applied")
-        _require_applied_here(config, receipt, f"run rollback-proposals --batch {batch_id} there")
+        _require_applied_here(config, batch, receipt, f"run rollback-proposals --batch {batch_id} there")
         changes = receipt["changes"]
         for name, (_, after) in changes.items():
             if _read(config, name) != after:

@@ -491,5 +491,120 @@ class ChangelogTest(ProposalFixture):
         self.assertEqual([name for name, _ in entries(grown)], [name for name, _ in entries(changelog)] + ["rewrite P1.1"])
 
 
+class MovedRepoTest(ProposalFixture):
+    """Batches written under one path, the repo then moved to another directory and name: a batch lives in the repo's own state
+    directory, which moved with it, so the path it was made under is not what says whether it is this repo's."""
+
+    def moved(self) -> None:
+        self.move_repo()
+        self.config = load_config(self.repo, None, None, self.repo)
+
+    def decisions_in(self, batch: dict, choice: str = "accept") -> str:
+        return json.dumps(self.decision(batch, choice))
+
+    def test_a_batch_that_waits_for_its_decisions_is_applied_after_the_repo_is_moved(self):
+        batch = self.batch()
+        old_repo = str(self.repo)
+        self.moved()
+        saved = (self.repo / STATE / batch["id"] / "batch.json").read_bytes()
+        out = self.cli_ok("apply-proposals", "--input", "-", stdin=self.decisions_in(batch))
+        self.assertIn('"status": "applied"', out)
+        self.assertIn("convey boolean meaning", (self.repo / "rules.md").read_text())
+        self.assertEqual((self.repo / STATE / batch["id"] / "batch.json").read_bytes(), saved)  # not rewritten
+        self.assertEqual(json.loads(saved)["repo"], old_repo)
+        self.assertEqual(batch["id"], fingerprint({k: v for k, v in json.loads(saved).items() if k != "id"}))  # and its id is the same
+
+    def test_an_applied_batch_is_rolled_back_and_applied_again_after_the_repo_is_moved(self):
+        batch = self.batch()
+        self.apply(batch)
+        self.moved()
+        out = self.cli_ok("apply-proposals", "--input", "-", stdin=self.decisions_in(batch))
+        self.assertIn('"status": "already_applied"', out)
+        self.assertIn('"status": "preview"', self.cli_ok("rollback-proposals", "--batch", batch["id"], "--dry-run"))
+        self.assertIn("convey boolean meaning", (self.repo / "rules.md").read_text())
+        self.assertIn('"status": "rolled_back"', self.cli_ok("rollback-proposals", "--batch", batch["id"]))
+        self.assertEqual((self.repo / "rules.md").read_text(), RULES)
+        self.cli_ok("compile", "--check")
+
+    def test_an_interrupted_write_is_recovered_after_the_repo_is_moved(self):
+        batch = self.batch()
+        original = replace_local
+        def failing(root, name, text):
+            if name == "CODING-STYLE.digest.md":
+                raise OSError("synthetic disk failure")
+            return original(root, name, text)
+        with mock.patch("house_rules.proposal_store.replace_local", side_effect=failing):
+            with self.assertRaisesRegex(HouseRulesError, "interrupted"):
+                self.apply(batch)
+        self.assertTrue(json.loads((self.repo / JOURNAL).read_text())["main"])
+        self.moved()
+        code, _, err = self.cli("apply-proposals", "--input", "-", stdin=self.decisions_in(batch))
+        self.assertEqual(code, 1)
+        self.assertIn("interrupted proposal transaction; run house-rules recover-proposals first", err)  # here, not "in <the old path>"
+        self.assertIn("restored", self.cli_ok("recover-proposals"))
+        self.assertEqual((self.repo / "rules.md").read_text(), RULES)
+        self.assertFalse((self.repo / JOURNAL).exists())
+        self.assertIn('"status": "applied"', self.cli_ok("apply-proposals", "--input", "-", stdin=self.decisions_in(batch)))
+
+    def test_a_journal_that_names_only_a_path_is_still_told_by_that_path_after_a_move(self):
+        replace_local(self.repo, JOURNAL, encoded({"v": 1, "tree": str(self.repo), "changes": {"rules.md": [RULES, "partial"]}}))
+        self.moved()
+        code, _, err = self.cli("recover-proposals")
+        self.assertEqual(code, 1)  # nothing says it was the main worktree's: it is not guessed
+        self.assertIn("was writing files in", err)
+
+    def test_a_batch_whose_content_was_edited_is_still_refused_after_the_repo_is_moved(self):
+        batch = self.batch()
+        self.moved()
+        path = self.repo / STATE / batch["id"] / "batch.json"
+        saved = json.loads(path.read_text())
+        for name, edited in {"the text to write": {**saved, "proposals": [{**saved["proposals"][0], "after": "different"}]},
+                             "the repo, as a hand migration would": {**saved, "repo": str(self.repo)}}.items():
+            with self.subTest(edited=name):
+                path.write_text(encoded(edited))
+                code, _, err = self.cli("apply-proposals", "--input", "-", stdin=self.decisions_in(batch))
+                self.assertEqual(code, 1)
+                self.assertIn("proposal batch changed", err)
+                self.assertNotIn("another repo", err)
+                self.assertEqual((self.repo / "rules.md").read_text(), RULES)
+        code, _, err = self.cli("rollback-proposals", "--batch", batch["id"])
+        self.assertEqual(code, 1)
+        self.assertIn("proposal batch changed", err)
+
+    def test_a_batch_is_stale_after_the_repo_is_moved_when_the_rules_changed(self):
+        batch = self.batch()
+        self.moved()
+        (self.repo / "rules.md").write_text(RULES + "\nChanged after the move\n")
+        code, _, err = self.cli("apply-proposals", "--input", "-", stdin=self.decisions_in(batch))
+        self.assertEqual(code, 1)
+        self.assertIn("rules, consumers or configuration changed; create a fresh proposal batch", err)
+        self.assertFalse((self.repo / STATE / batch["id"] / "receipt.json").exists())
+
+    def test_a_batch_is_stale_after_the_repo_is_moved_when_the_configuration_changed(self):
+        batch = self.batch()
+        self.moved()
+        self.write_config(rules_files=["rules.md"], inject_targets=["reviewer.md"], digest_max_chars=120)
+        code, _, err = self.cli("apply-proposals", "--input", "-", stdin=self.decisions_in(batch))
+        self.assertEqual(code, 1)
+        self.assertIn("rules, consumers or configuration changed", err)
+
+    def test_a_batch_is_stale_after_the_repo_is_moved_when_the_evidence_changed(self):
+        batch = self.batch()
+        self.moved()
+        self.append_raw({"v": 1, "kind": "outcome", "id": self.finding["id"], "ts": "2026-01-08T11:00:00",
+                         "outcome": "false_positive", "outcome_by": "human", "evidence": "test"})
+        code, _, err = self.cli("apply-proposals", "--input", "-", stdin=self.decisions_in(batch))
+        self.assertEqual(code, 1)
+        self.assertIn("evidence changed", err)
+
+    def test_a_batch_prepared_before_the_move_can_be_prepared_for_again_with_a_new_id(self):
+        first = self.batch()
+        self.moved()
+        again = create_batch(self.config, self.events(), self.drafts())
+        self.assertNotEqual(again["id"], first["id"])  # the repo field is the new path, so the same drafts give another id
+        self.assertEqual(again["repo"], str(self.repo))
+        self.assertTrue((self.repo / STATE / first["id"] / "batch.json").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

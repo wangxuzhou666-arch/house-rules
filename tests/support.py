@@ -212,6 +212,16 @@ class RepoCase(unittest.TestCase):
         git(self.repo, "init", "-q", "-b", "main")
         self.ledger = self.repo / ".style-findings.jsonl"
 
+    def move_repo(self, name: str = "moved-repo", parent: str = "elsewhere") -> Path:
+        """Move the repo to another directory under another name, as `mv` does: everything in it, `.house-rules/` and the ledger
+        included, now lives there and nothing is left at the old path. `self.repo` and `self.ledger` follow it; a config made before
+        the move still names the old path, so a test loads a new one."""
+        target = self.tmp / parent / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self.repo.rename(target)
+        self.repo, self.ledger = target, target / self.ledger.name
+        return target
+
     def write_rules(self, text: str = SAMPLE_RULES, name: str = "rules.md") -> Path:
         path = self.repo / name
         path.write_text(text, encoding="utf-8")

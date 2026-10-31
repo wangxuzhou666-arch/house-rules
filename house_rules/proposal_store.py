@@ -125,7 +125,10 @@ def mutation_lock(root: Path):
 
 def journal_tree(root: Path, journal: dict) -> str:
     """The worktree an interrupted transaction was writing tracked files in. A journal from before worktrees were told
-    apart has no `tree`: it was written in the main worktree."""
+    apart has no `tree`: it was written in the main worktree. One that says it was (`main`) names the main worktree where
+    it is now, not the path it had when the write began, so a repo that was moved can still recover it."""
+    if journal.get("main") is True:
+        return str(root)
     return journal.get("tree", str(root))
 
 
@@ -149,7 +152,7 @@ def transact(root: Path, tree: Path, changes: dict[str, tuple[str | None, str | 
     for name, (before, _) in changes.items():
         if read_local(base_of(root, tree, name), name) != before:
             raise HouseRulesError(f"file changed during proposal planning: {name}")
-    replace_local(root, JOURNAL, encoded({"v": 1, "tree": str(tree), "changes": changes}))
+    replace_local(root, JOURNAL, encoded({"v": 1, "tree": str(tree), "main": tree == root, "changes": changes}))
     try:
         for name, (before, after) in changes.items():
             base = base_of(root, tree, name)

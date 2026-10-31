@@ -4,11 +4,13 @@ from unittest import mock
 
 from support import RepoCase, review_finding
 from house_rules.config import load_config
-from house_rules.decision_context import build_context
+from house_rules.decision_context import build_context, relocate
 from house_rules.errors import HouseRulesError
 from house_rules.native_decisions import apply_answers, prepare, summary
-from house_rules.proposal_store import read_json
+from house_rules.proposal_store import encoded, read_json
 from house_rules.proposals import CHANGELOG, STATE, apply_batch, rollback_batch
+from house_rules.review import save_review
+from house_rules.review_evidence import capture, save
 
 APPLIED_AT = "2026-10-29T12:00:00"
 
@@ -247,3 +249,170 @@ class NativeDecisionsTest(RepoCase):
         result = json.loads(self.cli_ok("decision-summary"))
         self.assertEqual(result["groups"]["initial"]["no_change"], {"defer": 1})
         self.assertNotIn("accuracy", result)
+
+    # ---- a repo that was moved or renamed after its batches were written ----
+
+    def moved(self) -> None:
+        """Move the repo to another place and name; `self.config` is then the one a command run there would load."""
+        self.move_repo()
+        self.config = load_config(self.repo, None, None, self.repo)
+
+    def batch_files(self) -> dict:
+        return {path.relative_to(self.repo): path.read_bytes() for path in (self.repo / STATE).rglob("*") if path.is_file()}
+
+    def answers_file(self, batch: dict, choice: str = "accept"):
+        path = self.tmp / f"answers-{batch['id'][:8]}-{choice}.json"
+        path.write_text(json.dumps(self.answer(batch, choice)))
+        return str(path)
+
+    def applied_and_pending(self) -> tuple[dict, dict]:
+        """A batch that adds REL.1 and is applied, and a keep prepared after it that is still waiting for its answer."""
+        applied = self.batch()
+        apply_answers(self.config, self.events(), self.answer(applied))
+        return applied, self.batch("keep")
+
+    def test_every_command_that_loads_a_batch_works_after_the_repo_is_moved(self):
+        applied, pending = self.applied_and_pending()
+        old_repo = str(self.repo)
+        self.moved()
+        before = self.batch_files()
+        counts = json.loads(self.cli_ok("decision-summary"))
+        self.assertEqual((counts["batches"], counts["rolled_back_batches"]), (2, 0))
+        self.assertEqual(counts["groups"]["initial"]["change"], {"accept": 1})
+        self.assertEqual(counts["groups"]["initial"]["no_change"], {"pending": 1})
+        self.assertEqual(self.batch_files(), before)  # read as they are: no rewrite, no new batch, no new id
+        self.assertEqual(read_json(self.repo, f"{STATE}/{applied['id']}/batch.json")["repo"], old_repo)
+        revised = prepare(self.config, self.events(), self.assessment("keep"), parent=pending["id"])  # --parent-batch
+        self.assertEqual(revised["native"]["parent_batch"], pending["id"])
+        self.assertEqual(json.loads(self.cli_ok("apply-decisions", "--input", self.answers_file(pending, "defer")))["status"], "applied")
+        dry = json.loads(self.cli_ok("rollback-proposals", "--batch", applied["id"], "--dry-run"))
+        self.assertEqual(dry["status"], "preview")
+        self.assertIn("[REL.1]", (self.repo / "rules.md").read_text())
+        self.assertEqual(json.loads(self.cli_ok("rollback-proposals", "--batch", applied["id"]))["status"], "rolled_back")
+        self.assertNotIn("[REL.1]", (self.repo / "rules.md").read_text())
+        self.assertEqual(json.loads(self.cli_ok("decision-summary"))["rolled_back_batches"], 1)
+
+    def test_a_pending_native_batch_is_applied_after_the_repo_is_moved(self):
+        batch = self.batch()
+        self.moved()
+        result = json.loads(self.cli_ok("apply-decisions", "--input", self.answers_file(batch)))
+        self.assertEqual(result["status"], "applied")
+        self.assertIn("[REL.1]", (self.repo / "rules.md").read_text())
+        receipt = read_json(self.repo, f"{STATE}/{batch['id']}/receipt.json")
+        self.assertEqual(receipt["context_id"], batch["native"]["context"]["context_id"])  # the context it was shown, as saved
+        self.assertEqual(json.loads(self.cli_ok("apply-decisions", "--input", self.answers_file(batch)))["status"], "already_applied")
+
+    def test_a_receipt_from_before_it_said_which_worktree_is_main_still_follows_the_moved_repo(self):
+        batch = self.batch()
+        apply_answers(self.config, self.events(), self.answer(batch))
+        path = self.repo / STATE / batch["id"] / "receipt.json"
+        receipt = json.loads(path.read_text())
+        self.assertTrue(receipt.pop("main_worktree"))
+        self.assertEqual(receipt["worktree"], str(self.repo))
+        path.write_text(encoded(receipt))
+        self.moved()
+        self.assertEqual(json.loads(self.cli_ok("rollback-proposals", "--batch", batch["id"]))["status"], "rolled_back")
+        self.assertEqual(read_json(self.repo, f"{STATE}/{batch['id']}/receipt.json")["worktree"], receipt["worktree"])  # the old path stays as it was written
+
+    def test_a_batch_made_before_one_move_and_applied_before_the_next_follows_the_repo_both_times(self):
+        batch = self.batch()
+        old_repo = str(self.repo)
+        self.moved()
+        self.assertEqual(json.loads(self.cli_ok("apply-decisions", "--input", self.answers_file(batch)))["status"], "applied")
+        receipt = read_json(self.repo, f"{STATE}/{batch['id']}/receipt.json")
+        self.assertEqual((receipt["worktree"], receipt["main_worktree"]), (str(self.repo), True))
+        self.assertNotEqual(receipt["worktree"], old_repo)  # not the path the batch was made under
+        self.move_repo(name="moved-again", parent="further")
+        self.assertEqual(json.loads(self.cli_ok("rollback-proposals", "--batch", batch["id"]))["status"], "rolled_back")
+
+    def test_the_review_evidence_a_batch_was_shown_is_read_at_the_new_place(self):
+        save_review(self.repo, "R1", "raw review")
+        save(self.config, self.repo, "R1", capture(self.config, self.repo, None), "raw review")
+        batch = self.batch("keep")
+        shown = batch["native"]["context"]["findings"][0]
+        self.assertEqual((shown["review_source"]["status"], shown["raw_review"]["status"]), ("available", "available"))
+        self.moved()
+        self.assertEqual(json.loads(self.cli_ok("apply-decisions", "--input", self.answers_file(batch, "defer")))["status"], "applied")
+
+    def test_a_batch_whose_content_was_edited_is_still_refused_after_the_repo_is_moved(self):
+        batch = self.batch()
+        self.moved()
+        path = self.repo / STATE / batch["id"] / "batch.json"
+        saved = json.loads(path.read_text())
+        for name, edited in {"a proposal": {**saved, "proposals": []}, "the native part": {**saved, "native": {**saved["native"], "nonce": "x"}},
+                             "the repo, as a hand migration would": {**saved, "repo": str(self.repo)},
+                             "the id": {**saved, "id": "0" * 64}}.items():
+            with self.subTest(edited=name):
+                path.write_text(encoded(edited))
+                for argv in (["decision-summary"], ["apply-decisions", "--input", self.answers_file(batch)]):
+                    code, _, err = self.cli(*argv)
+                    self.assertEqual(code, 1)
+                    self.assertIn("proposal batch changed", err)
+                    self.assertNotIn("another repo", err)
+        path.write_text(encoded(saved))
+        self.assertEqual(self.cli("decision-summary")[0], 0)
+
+    def test_a_batch_copied_under_another_batch_id_is_refused(self):
+        batch = self.batch()
+        folder = self.repo / STATE / batch["id"]
+        copy = self.repo / STATE / ("f" * 64)
+        copy.mkdir()
+        (copy / "batch.json").write_bytes((folder / "batch.json").read_bytes())
+        code, _, err = self.cli("decision-summary")
+        self.assertEqual(code, 1)
+        self.assertIn("proposal batch changed", err)
+
+    def test_a_pending_batch_is_stale_after_a_move_when_the_rules_changed(self):
+        batch = self.batch()
+        self.moved()
+        (self.repo / "rules.md").write_text((self.repo / "rules.md").read_text() + "\nChanged after the move\n")
+        code, _, err = self.cli("apply-decisions", "--input", self.answers_file(batch))
+        self.assertEqual(code, 1)
+        self.assertIn("rules, consumers or configuration changed; create a fresh proposal batch", err)
+        self.assertFalse((self.repo / STATE / batch["id"] / "receipt.json").exists())
+
+    def test_a_pending_batch_is_stale_after_a_move_when_the_configuration_changed(self):
+        batch = self.batch()
+        self.moved()
+        self.write_config(rules_files=["rules.md"], digest_max_chars=120)
+        code, _, err = self.cli("apply-decisions", "--input", self.answers_file(batch))
+        self.assertEqual(code, 1)
+        self.assertIn("rules, consumers or configuration changed", err)
+
+    def test_a_pending_batch_is_stale_after_a_move_when_the_code_it_was_shown_changed(self):
+        batch = self.batch()
+        self.moved()
+        (self.repo / "source.py").write_text("different code\n")
+        code, _, err = self.cli("apply-decisions", "--input", self.answers_file(batch))
+        self.assertEqual(code, 1)
+        self.assertIn("decision evidence or source code changed", err)
+
+    def test_a_pending_batch_is_stale_after_a_move_when_the_evidence_changed(self):
+        batch = self.batch()
+        self.moved()
+        self.append_raw({"v": 1, "kind": "outcome", "id": self.finding["id"], "ts": "2026-01-08T11:00:00",
+                         "outcome": "false_positive", "outcome_by": "human", "evidence": "test"})
+        code, _, err = self.cli("apply-decisions", "--input", self.answers_file(batch))
+        self.assertEqual(code, 1)
+        self.assertIn("evidence changed", err)
+
+    def test_a_source_that_was_unavailable_when_the_batch_was_made_does_not_make_it_stale_by_a_move(self):
+        (self.repo / "source.py").unlink()  # the reason it was unavailable names the file by its path
+        batch = self.batch("keep")
+        self.assertEqual(batch["native"]["context"]["findings"][0]["source"]["status"], "unavailable")
+        self.assertIn(str(self.repo), batch["native"]["context"]["findings"][0]["source"]["reason"])
+        self.moved()
+        self.assertEqual(json.loads(self.cli_ok("apply-decisions", "--input", self.answers_file(batch, "defer")))["status"], "applied")
+
+    def test_a_move_does_not_let_another_worktrees_context_pass(self):
+        batch = self.batch()
+        self.moved()
+        saved = relocate(batch["native"]["context"], self.repo)
+        self.assertEqual(saved["repo"], str(self.repo))
+        self.assertEqual(saved["rules"][0]["absolute_path"], str(self.repo / "rules.md"))
+        old_repo = batch["native"]["context"]["repo"]
+        for outside_path in (str(self.tmp / "linked" / "rules.md"), old_repo + "-linked/rules.md"):  # not under the old repo: not rebased
+            with self.subTest(path=outside_path):
+                outside = copy.deepcopy(batch["native"]["context"])
+                outside["rules"][0]["absolute_path"] = outside_path
+                self.assertEqual(relocate(outside, self.repo)["rules"][0]["absolute_path"], outside_path)
