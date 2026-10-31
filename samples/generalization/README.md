@@ -19,6 +19,7 @@ samples/generalization/
     <condition>-<n>.txt              the reviewer's raw output for run n (its last attempt)
     <condition>-<n>.json             provenance: command, reviewer version, hashes of the code and base files, sha256 of the digest
     <condition>-<n>.attempt1.txt/.json   the failed first attempt, only for a run that was repeated
+    <condition>-<n>[.attempt1].stderr.txt   the reviewer's stderr of a failed attempt, for diagnosis on the recording machine only (git-ignored, never committed)
     <condition>.digest.md            the exact digest text the runs of that condition were made with (one per condition)
   results.json, results.md           what --replay computes from the recordings (written once something is recorded)
 ```
@@ -46,5 +47,5 @@ python3.12 samples/generalization/run_check.py --live --yes-spend 24    # record
 ```
 
 - `--replay` (the default) scores the recordings against [CRITERIA.md](CRITERIA.md), prints the table, the runs that needed a repeat and any notes, and writes `results.json` and `results.md`. It refuses (exit 1) a recording whose raw output, digest snapshot, code files or base files have been changed since it was made.
-- `--live` runs the reviewer. Without `--yes-spend N` it only prints the plan. `N` must equal the number of planned calls (cases x 2 conditions x 3 runs = 24); the plan line also gives the maximum number of repeats on top, which `N` covers. A call that fails, or whose output has no findings array, is repeated once at once; both attempts are kept (see Failed runs in CRITERIA.md). Existing recordings are never overwritten: delete them, or add `--skip-existing` to record only the runs that have none.
+- `--live` runs the reviewer. Without `--yes-spend N` it only prints the plan. `N` must equal the number of planned calls (cases x 2 conditions x 3 runs = 24); the plan line also gives the maximum number of repeats on top, which `N` covers. A call that fails, or whose output has no findings array, is repeated once at once; both attempts are kept (see Failed runs in CRITERIA.md). The reviewer's stderr is not recorded: it names the recording machine's settings and local paths, so no provenance file holds any of it. For a failed attempt only, the last 5 lines go to the console and all of it to the `.stderr.txt` file above; a run that worked leaves nothing of it. Existing recordings are never overwritten: delete them, or add `--skip-existing` to record only the runs that have none.
 - `--case ID` (repeatable) and `--runs N` select part of the check; results files are not written for a partial selection.

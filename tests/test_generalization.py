@@ -107,7 +107,7 @@ class CheckCase(unittest.TestCase):
                 "reviewer_version": "2.1.0 (Claude Code)", "reviewer_version_error": None, "code_sha256": code, "base_sha256": base,
                 "digest_sha256": hashlib.sha256(digest.encode()).hexdigest(),
                 "clause_removed": meta["clause"] if condition == "without_rule" else None, "exit_code": exit_code, "error": None,
-                "stderr_tail": "", "model_id": None, "raw_sha256": hashlib.sha256(text.encode()).hexdigest(),
+                "model_id": None, "raw_sha256": hashlib.sha256(text.encode()).hexdigest(),
                 "status": "ok" if exit_code == 0 else "failed", "failure": None}
         prov.update(overrides)
         raw_path, prov_path = self.layout.recording(case_id, condition, run, failed_first_attempt=failed_first_attempt)
@@ -444,6 +444,14 @@ class ProvenanceTest(CheckCase):
     def test_matching_provenance_is_scored(self) -> None:
         self.assertEqual(self.check("--case", "fix-1")[0], 0)
 
+    def test_provenance_with_a_stderr_tail_key_and_without_one_are_scored_alike(self) -> None:
+        before = self.check("--case", "fix-1")
+        _, prov_path = self.layout.recording("fix-1", "with_rule", 1)
+        prov = json.loads(prov_path.read_text())
+        self.assertNotIn("stderr_tail", prov)  # what --live writes now
+        prov_path.write_text(json.dumps({**prov, "stderr_tail": "kept by an older version"}, indent=2) + "\n")
+        self.assertEqual(self.check("--case", "fix-1"), before)
+
     def test_a_changed_code_file_refuses_the_replay(self) -> None:
         path = self.layout.cases_dir / "fix-1" / VIOLATION_1
         path.write_text(path.read_text() + "# edited after the recording\n")
@@ -729,8 +737,10 @@ review_range = args[-1].split()[-1]
 base, head = review_range.split("..")
 digest = git("show", base + ":CODING-STYLE.digest.md")
 changed = sorted(git("diff", "--name-only", review_range).split())
+if plan.get("stderr_line"):
+    sys.stderr.write(plan["stderr_line"] + "\n")  # what a real reviewer says about its settings, on any run
 with open(log_path, "a") as log:
-    log.write(json.dumps({"n": number, "args": args, "cwd": os.getcwd(), "child": os.environ.get("HOUSE_RULES_REVIEW_CHILD"),
+    log.write(json.dumps({"n": number, "args": args, "stderr_line": plan.get("stderr_line"), "cwd": os.getcwd(), "child": os.environ.get("HOUSE_RULES_REVIEW_CHILD"),
                           "session": os.environ.get("CLAUDE_CODE_SESSION_ID"), "changed": changed,
                           "base_files": sorted(git("ls-tree", "-r", "--name-only", base).split()),
                           "claude_md": git("show", base + ":CLAUDE.md"), "digest": digest,
@@ -739,7 +749,7 @@ with open(log_path, "a") as log:
                           "commits": git("rev-list", "--count", review_range).strip()}) + "\n")
 if number in plan.get("fail_calls", []):
     sys.stdout.write("partial output")
-    sys.stderr.write("quota exceeded\n")
+    sys.stderr.write("".join(f"note {i}\n" for i in range(1, 8)) + "quota exceeded\n")
     sys.exit(1)
 if number in plan.get("prose_calls", []):
     sys.stdout.write("No findings, nothing to report.\n")
@@ -823,6 +833,23 @@ sys.stdout.write(plan.get("preface", "Reviewed the diff.") + "\n\n```json\n" + j
             self.assertFalse(Path(call["cwd"]).is_relative_to(self.root))
             self.assertFalse(Path(call["cwd"]).exists(), "the scratch repo is removed afterwards")
 
+    def test_the_stderr_of_a_run_that_worked_is_kept_nowhere(self) -> None:
+        secret = "/home/someone/secret-project"
+        warning = f"Permission allow rule (settings.json): Bash(find {secret}* -type f) has a wildcard before the rest of the command"
+        self.set_plan(stderr_line=warning)
+        code, out, err = self.check("--live", "--yes-spend", "12")
+        self.assertEqual((code, err), (0, ""))  # nothing is shown on the console for a run that worked
+        self.assertEqual({call["stderr_line"] for call in self.calls()}, {warning})  # the reviewer did say it, on every call
+        files = [path for path in self.layout.recordings_dir.rglob("*") if path.is_file()]
+        self.assertEqual(len(files), 12 * 2 + 4)  # raw and provenance of every run, a snapshot of every case and condition, nothing else
+        self.assertEqual([path.name for path in files if "stderr" in path.name], [])
+        for path in files:
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn(secret, text, path.name)
+            if path.suffix == ".json":
+                self.assertNotIn("stderr", text, path.name)  # no key for it either
+        self.assertNotIn(secret, out)
+
     def test_the_child_marker_is_set_and_the_session_id_is_gone(self) -> None:
         self.assertEqual(os.environ["CLAUDE_CODE_SESSION_ID"], "session-of-the-caller")
         self.assertEqual(self.check("--live", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")[0], 0)
@@ -876,15 +903,19 @@ sys.stdout.write(plan.get("preface", "Reviewed the diff.") + "\n\n```json\n" + j
 
     def test_a_failed_call_is_repeated_once_and_both_attempts_are_kept(self) -> None:
         self.set_plan(fail_calls=[2])  # the second call is the with_rule review of fix-1 (see plan_jobs)
-        code, out, _ = self.check("--live", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")
+        code, out, err = self.check("--live", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")
         self.assertEqual(code, 0)
         self.assertEqual([self.condition_of(call) for call in self.calls()], ["without_rule", "with_rule", "with_rule"])  # the repeat is at once
         self.assertIn("recorded 2 run(s): 1 needed a repeat, 0 still failed", out)
         first_raw, first_prov = self.layout.recording("fix-1", "with_rule", 1, failed_first_attempt=True)
         first = json.loads(first_prov.read_text())
         self.assertEqual(first_raw.read_text(), "partial output")
-        self.assertEqual((first["status"], first["exit_code"], first["stderr_tail"], first["attempt"]), ("failed", 1, "quota exceeded", 1))
+        self.assertEqual((first["status"], first["exit_code"], first["attempt"]), ("failed", 1, 1))
         self.assertIn("exited with 1", first["failure"])
+        self.assertNotIn("stderr_tail", first)  # the provenance holds no stderr, of a failed run either
+        self.assertNotIn("quota exceeded", first_prov.read_text())
+        self.assert_failed_stderr_shown_and_kept(err, "with_rule-1.attempt1.stderr.txt", attempt=1)
+        self.assertEqual(sorted(path.name for path in self.layout.recordings_dir.glob("fix-1/*.stderr.txt")), ["with_rule-1.attempt1.stderr.txt"])
         last_raw, last_prov = self.layout.recording("fix-1", "with_rule", 1)
         last = json.loads(last_prov.read_text())
         self.assertEqual((last["status"], last["attempt"], last["exit_code"]), ("ok", 2, 0))
@@ -894,10 +925,26 @@ sys.stdout.write(plan.get("preface", "Reviewed the diff.") + "\n\n```json\n" + j
         self.assertEqual((run["status"], run["attempts"], run["violation_labels"]), ("ok", 2, ["rel-1"]))
         self.assertIn("exited with 1", run["first_attempt_failure"])
 
+    def assert_failed_stderr_shown_and_kept(self, err: str, file_name: str, *, attempt: int) -> None:
+        """The console got the last 5 lines of the stderr of the failed call, and `file_name` next to the recording holds all 8."""
+        self.assertIn(f"fix-1/with_rule-1 attempt {attempt} failed", err)
+        self.assertIn(file_name, err)
+        for line in ("note 4", "note 5", "note 6", "note 7", "quota exceeded"):
+            self.assertIn(line, err)
+        self.assertNotIn("note 3", err)  # only the end of it goes to the console
+        side = (self.layout.recordings_dir / "fix-1" / file_name).read_text()
+        self.assertEqual(side, "".join(f"note {i}\n" for i in range(1, 8)) + "quota exceeded\n")  # the file has all of it
+
     def test_a_run_that_fails_twice_stays_failed_and_makes_the_case_incomplete(self) -> None:
         self.set_plan(fail_calls=[2, 3])
-        code, out, _ = self.check("--live", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")
+        code, out, err = self.check("--live", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")
         self.assertEqual(code, 1)
+        self.assertEqual(sorted(path.name for path in self.layout.recordings_dir.glob("fix-1/*.stderr.txt")),
+                         ["with_rule-1.attempt1.stderr.txt", "with_rule-1.stderr.txt"])  # one for each failed attempt
+        self.assertIn("attempt 1 failed", err)
+        self.assertIn("attempt 2 failed", err)
+        for path in self.layout.recordings_dir.glob("fix-1/*.json"):
+            self.assertNotIn("quota exceeded", path.read_text())
         self.assertEqual(len(self.calls()), 3)
         self.assertIn("recorded 2 run(s): 1 needed a repeat, 1 still failed", out)
         for failed_first_attempt in (True, False):
@@ -928,6 +975,7 @@ sys.stdout.write(plan.get("preface", "Reviewed the diff.") + "\n\n```json\n" + j
         raw_path, prov_path = self.layout.recording("fix-1", first.condition, 1, failed_first_attempt=True)
         self.assertEqual(raw_path.read_text(), "No findings, nothing to report.\n")
         self.assertEqual(json.loads(prov_path.read_text())["status"], "failed")
+        self.assertEqual(list(self.layout.recordings_dir.glob("*/*.stderr.txt")), [])  # it said nothing on stderr: no empty file
         calls_so_far = len(self.calls())
         self.set_plan(violations={})  # a review that finds nothing prints an empty array: a run with 0 findings
         self.assertEqual(self.check("--live", "--case", "fix-2", "--runs", "1", "--yes-spend", "2")[0], 0)

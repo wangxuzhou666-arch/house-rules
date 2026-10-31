@@ -13,6 +13,8 @@ Layout, all under samples/generalization/:
   recordings/<id>/<condition>-<n>.txt     the reviewer's raw stdout (the last attempt of that run)
   recordings/<id>/<condition>-<n>.json    provenance: which code, base files and digest produced that text, with which command
   recordings/<id>/<condition>-<n>.attempt1.txt/.json    the failed first attempt of a run that was repeated (both are kept)
+  recordings/<id>/<condition>-<n>[.attempt1].stderr.txt    the reviewer's stderr of a FAILED attempt, for diagnosis on this machine only:
+                                          it names the recording machine's settings and paths, so it is git-ignored and no provenance holds it
   recordings/<id>/<condition>.digest.md   the exact digest text those runs were made with: replay checks against this, not the repo's
   results.json, results.md                what --replay computes from them (no clock in either)
 
@@ -67,7 +69,7 @@ RECORDING_VERSION = 1
 MAX_ATTEMPTS = 2  # CRITERIA.md: a run slot is repeated at most once, and only because its first attempt failed
 SESSION_ID_ENV = "CLAUDE_CODE_SESSION_ID"  # a headless review must not look like a continuation of the caller's session
 EXIT_NOT_CONFIRMED = 2  # --live without the matching --yes-spend
-STDERR_TAIL_LINES = 5
+STDERR_TAIL_LINES = 5  # how much of a failed attempt's stderr goes to the console; the side file has all of it
 
 OK, FAILED, MISSING = "ok", "failed", "missing"  # what became of one run
 EMPTY, RECORDED, INTERRUPTED = "empty", "recorded", "interrupted"  # a run slot on disk: nothing / a final recording / only a failed first attempt
@@ -731,7 +733,7 @@ def make_review_repo(repo: Path, digest_name: str, digest: str, case: Case) -> t
 class ReviewerOutput:
     stdout: str
     exit_code: int | None  # None: it never exited (timeout, or not runnable)
-    stderr_tail: str
+    stderr: str  # the reviewer's own remarks on its settings and paths: shown and kept for a failed attempt only, never recorded
     error: str | None
 
 
@@ -757,12 +759,12 @@ def run_reviewer(argv: list[str], cwd: Path) -> ReviewerOutput:
         return ReviewerOutput(_partial_output(exc.stdout), None, "", f"timed out after {TIMEOUT_SECONDS}s")
     except OSError as exc:
         return ReviewerOutput("", None, "", f"cannot run {argv[0]}: {exc}")
-    tail = "\n".join(proc.stderr.strip().splitlines()[-STDERR_TAIL_LINES:])
-    return ReviewerOutput(proc.stdout, proc.returncode, tail, None)
+    return ReviewerOutput(proc.stdout, proc.returncode, proc.stderr, None)
 
 
-def review_once(layout: Layout, config: Config, job: Job, digest: str, attempt: int) -> tuple[str, dict]:
-    """Review the case's change once. Returns the raw output and the provenance, which are not saved yet."""
+def review_once(layout: Layout, config: Config, job: Job, digest: str, attempt: int) -> tuple[str, dict, str]:
+    """Review the case's change once. Returns the raw output, the provenance and the stderr, none of them saved yet. The stderr
+    is not part of the provenance: it carries the recording machine's settings and local paths, and the repo is public."""
     scratch = Path(tempfile.mkdtemp(prefix="house-rules-generalization-"))
     try:
         if scratch.resolve().is_relative_to(layout.root.resolve()):
@@ -786,16 +788,30 @@ def review_once(layout: Layout, config: Config, job: Job, digest: str, attempt: 
         "reviewer_version": version, "reviewer_version_error": version_error,
         "code_sha256": job.case.code_sha256(), "base_sha256": job.case.base_sha256(), "digest_sha256": sha256_hex(digest),
         "clause_removed": job.case.clause if job.condition == "without_rule" else None,
-        "exit_code": output.exit_code, "error": output.error, "stderr_tail": output.stderr_tail,
+        "exit_code": output.exit_code, "error": output.error,
         "model_id": model.group() if model else None, "raw_sha256": sha256_hex(output.stdout),
         "status": OK if items is not None else FAILED, "failure": failure,
     }
-    return output.stdout, prov
+    return output.stdout, prov, output.stderr
 
 
-def save_recording(layout: Layout, job: Job, raw: str, prov: dict, *, failed_first_attempt: bool) -> None:
+def keep_failed_stderr(raw_path: Path, layout: Layout, prov: dict, stderr: str) -> None:
+    """Show the last lines of a failed attempt's stderr on the console and keep all of it next to its recording, to find out
+    why it failed. Only a failed attempt gets this: a run that worked leaves no trace of its stderr."""
+    if not stderr.strip():
+        return
+    side_path = raw_path.with_suffix(".stderr.txt")  # <condition>-<n>[.attempt1].stderr.txt
+    write_text(side_path, stderr)
+    tail = "\n".join(stderr.strip().splitlines()[-STDERR_TAIL_LINES:])
+    print(f"{prov['case']}/{prov['condition']}-{prov['run']} attempt {prov['attempt']} failed; the end of its stderr "
+          f"(all of it is in {display_path(side_path, layout.root)}):\n{tail}", file=sys.stderr, flush=True)
+
+
+def save_recording(layout: Layout, job: Job, raw: str, prov: dict, stderr: str, *, failed_first_attempt: bool) -> None:
     raw_path, prov_path = layout.recording(job.case.id, job.condition, job.run, failed_first_attempt=failed_first_attempt)
     write_text(raw_path, raw)  # the provenance is written last: a recording without it counts as missing
+    if prov["status"] == FAILED:
+        keep_failed_stderr(raw_path, layout, prov, stderr)
     write_text(prov_path, json.dumps(prov, indent=2, ensure_ascii=False) + "\n")
 
 
@@ -805,11 +821,11 @@ def record_slot(layout: Layout, config: Config, job: Job, digest: str, state: st
     (`state` INTERRUPTED) gets just the repeat. Returns the provenance of the last attempt."""
     attempt = 2 if state == INTERRUPTED else 1
     while True:
-        raw, prov = review_once(layout, config, job, digest, attempt)
+        raw, prov, stderr = review_once(layout, config, job, digest, attempt)
         if prov["status"] == OK or attempt == MAX_ATTEMPTS:
-            save_recording(layout, job, raw, prov, failed_first_attempt=False)
+            save_recording(layout, job, raw, prov, stderr, failed_first_attempt=False)
             return prov
-        save_recording(layout, job, raw, prov, failed_first_attempt=True)
+        save_recording(layout, job, raw, prov, stderr, failed_first_attempt=True)
         attempt += 1
 
 

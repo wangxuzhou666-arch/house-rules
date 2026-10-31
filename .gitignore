@@ -6,3 +6,4 @@ __pycache__/
 .house-rules-label-page.html
 .house-rules-label-batch.json
 .house-rules/
+samples/generalization/recordings/**/*.stderr.txt
