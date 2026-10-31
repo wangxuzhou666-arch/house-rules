@@ -371,6 +371,26 @@ class ReplayCommandTest(CheckCase):
         self.assertEqual(code, 1)
         self.assertIn("no cases found", err)
 
+    def test_a_case_with_a_suffixed_id_and_extra_fields_is_read_and_listed_between_its_neighbours(self) -> None:
+        shutil.copytree(self.layout.cases_dir / "fix-1", self.layout.cases_dir / "fix-1b")
+        path = self.layout.cases_dir / "fix-1b" / "case.json"
+        meta = json.loads(path.read_text(encoding="utf-8"))
+        path.write_text(json.dumps({**meta, "id": "fix-1b", "corrects": "fix-1", "correction": "The control missed one kind of bad file."}),
+                        encoding="utf-8")
+        self.assertEqual([case.id for case in rc.load_cases(self.layout.cases_dir, [])], ["fix-1", "fix-1b", "fix-2"])
+        self.assertEqual([job.key for job in rc.plan_jobs(rc.load_cases(self.layout.cases_dir, ["fix-1b"]), 1)],
+                         [("fix-1b", "without_rule", 1), ("fix-1b", "with_rule", 1)])
+        self.record_runs("fix-1b", "with_rule", [on(VIOLATION_1, "rel-1")] * 3)
+        self.assertEqual(self.score("fix-1b")["verdict"], "PASS")
+        self.record_everything()
+        code, out, err = self.check()
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual([case["id"] for case in json.loads(self.layout.results_json.read_text(encoding="utf-8"))["cases"]],
+                         ["fix-1", "fix-1b", "fix-2"])
+        self.assertLess(out.index("fix-1 "), out.index("fix-1b "))
+        self.assertLess(out.index("fix-1b "), out.index("fix-2 "))
+        self.assertIn("fix-1b without_rule-1: missing (no recording)", out)
+
     def test_a_case_file_that_does_not_fit_is_refused(self) -> None:
         path = self.layout.cases_dir / "fix-1" / "case.json"
         (self.layout.cases_dir / "fix-1" / "elsewhere").mkdir()
@@ -1145,6 +1165,20 @@ class RealCasesTest(unittest.TestCase):
         case = next(case for case in rc.load_cases(self.cases_dir, []) if case.base)
         self.assertEqual(case.id, "rel-2")
         self.assertEqual(sorted(case.base), sorted(f"base/{rel.removeprefix('code/')}" for rel in case.code))
+
+    def test_a_case_that_corrects_another_keeps_its_clause_and_violation_file_and_changes_its_control(self) -> None:
+        metas = {path.parent.name: json.loads(path.read_text(encoding="utf-8")) for path in sorted(self.cases_dir.glob("*/case.json"))}
+        corrected = {name: meta for name, meta in metas.items() if "corrects" in meta}
+        self.assertIn("rel-3b", corrected)
+        for name, meta in corrected.items():
+            with self.subTest(case=name):
+                original = metas[meta["corrects"]]
+                original_dir = self.cases_dir / meta["corrects"]
+                self.assertTrue(meta["correction"].strip())
+                self.assertEqual((meta["clause"], meta["learned_from"], meta["violation"]),
+                                 (original["clause"], original["learned_from"], original["violation"]))
+                self.assertEqual((self.cases_dir / name / meta["violation"]).read_bytes(), (original_dir / original["violation"]).read_bytes())
+                self.assertNotEqual((self.cases_dir / name / meta["control"]).read_bytes(), (original_dir / original["control"]).read_bytes())
 
     def test_every_case_is_one_the_harness_can_read_about_a_clause_the_rules_define(self) -> None:
         cases = rc.load_cases(self.cases_dir, [])

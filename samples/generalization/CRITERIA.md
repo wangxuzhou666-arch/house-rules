@@ -53,3 +53,10 @@ For each case and each condition (`with_rule` and `without_rule`):
 - A failing case is recorded as a limitation. It is not hidden, and it is not re-run until it passes.
 - There is no overall accuracy number.
 - The sample is small (4 rules x 3 runs). The counts describe the reviewer version that was recorded, not reviewers in general.
+
+## Addendum 1 — rel-3b (added after round 1, before any rel-3b recording)
+
+- Why the case exists: the control of `rel-3` has a real defect against REL.3. `load_checkpoint` reads the file as UTF-8 and catches only a JSON syntax error and wrong shapes, so a checkpoint that is not valid UTF-8 raises `UnicodeDecodeError` on every run. The reviewer labeled that finding REL.3 in 3 of 3 `with_rule` runs, which was correct; the `rel-3` oracle never tested it.
+- `rel-3` stands: its round-1 result is reported as it was recorded. It is not changed and not re-run.
+- `rel-3b` uses the same violation file as `rel-3` and a corrected control, and exactly the criteria above: the same conditions, matching, failed-run rule and pass line.
+- `rel-3b` is reported as its own case next to `rel-3`, not in place of it. Its `case.json` names the case it corrects and what was wrong with that control.

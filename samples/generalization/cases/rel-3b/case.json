@@ -1,0 +1,15 @@
+{
+  "v": 1,
+  "id": "rel-3b",
+  "clause": "REL.3",
+  "learned_from": [
+    "review-ratchet:l1:r3:r3-2"
+  ],
+  "violation": "code/access_tail.py",
+  "control": "code/batch_log_reader.py",
+  "control_kind": "compliant",
+  "mechanism": "load_position() handles a JSON syntax error with a logged fallback but returns any other valid JSON as is, so a position file that is a list, null or has a missing or mistyped field raises on every run and is never rewritten.",
+  "why_unseen": "The finding was a dict of timestamps in a hook's announcement file that failed on .items() and fromisoformat; this is an inode and byte-offset cursor of a log tailer that fails on subscripting and comparison, and the control checks the shape and takes the same fallback.",
+  "corrects": "rel-3",
+  "correction": "The control of rel-3 read its checkpoint as UTF-8 and caught only a JSON syntax error and wrong shapes, so a checkpoint that is not valid UTF-8 (or text the parser refuses with an error other than a syntax error) raised on every run, which is the failure the rule forbids."
+}

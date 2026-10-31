@@ -38,6 +38,8 @@ python3.12 -I samples/generalization/cases/rel-1/oracle.py
 
 Run it for `rel-1` to `rel-4`.
 
+`rel-3b` is `rel-3` with a corrected control (the control of `rel-3` did not survive a state file that is not valid UTF-8; see Addendum 1 in [CRITERIA.md](CRITERIA.md)); it is added after round 1, run its oracle the same way, and it is reported next to `rel-3`, not in place of it.
+
 ## Score and record
 
 ```
