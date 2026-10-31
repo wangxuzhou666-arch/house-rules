@@ -251,3 +251,13 @@ These five changes were accepted on 2026-10-28 and recorded by hand in `CODING-S
   [snippet truncated]
   ```
 - Decision: accept by Colar — "三条都接受 (Recommended)"
+
+## Rename note — 2026-10-31
+
+The tool these rules are run with was renamed from review-ratchet to house-rules (package `house_rules`, command `house-rules`). The rename is a hand edit, not a proposal batch: it adds no clause, retires none and changes no requirement, so it has no revision number, no receipt and no decision to record. What it changed in `CODING-STYLE.md`:
+
+- Prose and the PRJ heading name house-rules instead of review-ratchet, and the ADJUST note names the `house-rules compile` command.
+- The `digest:` overrides of PRJ.1 and PRJ.2 now begin `house-rules only:` instead of `review-ratchet only:`, so the compiled digest changed although no requirement did.
+- The three retirement markers (P0E.4, P0E.6, R.5) now read `<!-- house-rules-retired: ID -->`, the form the tool reads to keep a retired ID from being reused. Until this edit it did not see these three markers, so those IDs were not reserved against reuse.
+
+The Backfill and Revision entries above are left as written: they use the old name, the old `ratchet/` source paths in their evidence lines and the finding IDs `review-ratchet:l1:...`, which are persistent ledger IDs and are not rewritten. Numbering still continues from the highest Revision heading, so the next batch is Revision 3.

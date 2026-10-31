@@ -1,10 +1,10 @@
 # Coding Style (DRAFT template)
 
-<!-- ADJUST: a starting point, not a standard. Every knob below is marked ADJUST. Change thresholds, tool codes and examples to what your repo enforces, and delete the clauses you will not hold people to. After editing, run `ratchet compile` to regenerate the digest. -->
+<!-- ADJUST: a starting point, not a standard. Every knob below is marked ADJUST. Change thresholds, tool codes and examples to what your repo enforces, and delete the clauses you will not hold people to. After editing, run `house-rules compile` to regenerate the digest. -->
 
 > Readers: engineers and coding agents who write code, and reviewers (human or model) who judge it.
 > Role: the single source of truth for review standards. A reviewer does not invent thresholds; they live here.
-> Layering: this repository copy includes the baseline and explicitly scoped project rules. PRJ clauses apply only to review-ratchet. Local adoption does not publish or synchronize a rule across projects. If rules are split into files, list the shared baseline first and project rules after it in `rules_files`; later files add clauses, never override.
+> Layering: this repository copy includes the baseline and explicitly scoped project rules. PRJ clauses apply only to house-rules. Local adoption does not publish or synchronize a rule across projects. If rules are split into files, list the shared baseline first and project rules after it in `rules_files`; later files add clauses, never override.
 > Target: four kinds of bloat that generated code tends to produce: broad catches that swallow errors, fallbacks that disguise failure, abstractions with one implementation, and comments that restate the code.
 
 ## 0. Enforcement tiers
@@ -20,7 +20,7 @@
 Which tier a rule belongs to: if it holds in every session, is unrelated to the task and is unambiguous, make it mechanical; otherwise it is judgment.
 
 <!-- ADJUST: the family list. Add or remove families here and in the severity table under R.4. -->
-Clause IDs: `P0E.n` exceptions, `P0F.n` fallbacks, `P1.n` complexity, `P2.n` abstraction, `P3.n` comments, `PRJ.n` review-ratchet project contracts, `REL.n` state and identity reliability, `R.n` reviewer conduct. A linter finding that matches no clause is recorded as `<tool>:<code>`.
+Clause IDs: `P0E.n` exceptions, `P0F.n` fallbacks, `P1.n` complexity, `P2.n` abstraction, `P3.n` comments, `PRJ.n` house-rules project contracts, `REL.n` state and identity reliability, `R.n` reviewer conduct. A linter finding that matches no clause is recorded as `<tool>:<code>`.
 
 ## P0 · Exceptions: keep the guarded block small, and give every broad catch an identity
 
@@ -36,9 +36,9 @@ Clause IDs: `P0E.n` exceptions, `P0F.n` fallbacks, `P1.n` complexity, `P2.n` abs
    - **Rethrow with cause**: a retry wrapper that raises the last error, or a boundary that translates a parse failure into a client error and keeps the original as its cause. The test is that the exception's identity is not lost. Narrow the type instead where you can.
 
    A lint suppression on a broad catch is that line: a bare one, with no case and reason, is not accepted. <!-- ADJUST: e.g. a bare `noqa: BLE001` in ruff or an eslint-disable without a description. -->
-<!-- ratchet-retired: P0E.4 -->
+<!-- house-rules-retired: P0E.4 -->
 5. **[P0E.5]** Log inside a handler with the call that keeps the stack trace, not the one that drops it. <!-- ADJUST: e.g. `logger.exception` rather than `logger.error` (ruff TRY400); `console.error(err)` with the error object. -->
-<!-- ratchet-retired: P0E.6 -->
+<!-- house-rules-retired: P0E.6 -->
 
 ## P0 · Fallbacks: a failure must not pass for a success
 
@@ -78,17 +78,17 @@ Meta-rule: a proxy metric does not transfer between domains. Test a threshold ag
 3. **[P3.3]** Comments use the project's agreed language. <!-- ADJUST: pick one. -->
 4. **[P3.4]** No debugging leftovers in a commit: stray prints, temporary TODOs, commented-out code.
 
-## PRJ · Project contracts (review-ratchet only)
+## PRJ · Project contracts (house-rules only)
 
-These clauses are judgment rules for review-ratchet's review execution and finding attribution. Both have explicit `should-fix` severity; neither adds a mechanical gate.
+These clauses are judgment rules for review execution and finding attribution in house-rules. Both have explicit `should-fix` severity; neither adds a mechanical gate.
 
-1. **[PRJ.1]** Importing a saved review result without executing a reviewer is a replay, not a new review round; every new execution must pass run-identity and round-limit checks before the reviewer is called. (should-fix) <!-- digest: review-ratchet only: import without execution is replay; reused IDs never exempt new execution from pre-call identity and round checks -->
+1. **[PRJ.1]** Importing a saved review result without executing a reviewer is a replay, not a new review round; every new execution must pass run-identity and round-limit checks before the reviewer is called. (should-fix) <!-- digest: house-rules only: import without execution is replay; reused IDs never exempt new execution from pre-call identity and round checks -->
    Reusing a run ID alone does not grant a replay exemption. Only an import path that does not execute a new review can use that exemption.
    **Why added (proposal A, accepted 2026-10-28):** Existing fallback rules do not define execution identity. The two findings establish complementary boundaries: do not count or block a genuine replay as a new round, and do not let a new reviewer execution bypass its checks by reusing an ID.
    **Finding sources:** `review-ratchet:l1:r1:r1-1`; `review-ratchet:l1:r2:r2-1`.
    **Examples:** Violates: calling the reviewer again with an old run ID to bypass the cap. Complies: importing the same saved output without calling the reviewer or consuming another round.
 
-2. **[PRJ.2]** Attribute code findings only to clauses that define code violations, using the rules file's documented conventions to distinguish them from reviewer guidance. (should-fix) <!-- digest: review-ratchet only: map code clauses by file conventions for category and body refs; retain valid clauses where severity omission is allowed -->
+2. **[PRJ.2]** Attribute code findings only to clauses that define code violations, using the rules file's documented conventions to distinguish them from reviewer guidance. (should-fix) <!-- digest: house-rules only: map code clauses by file conventions for category and body refs; retain valid clauses where severity omission is allowed -->
    Where the file permits code-violation clauses without a declared severity, missing severity alone must not exclude a legitimate clause. Explicit category attribution and attribution inferred from body references must use the same criteria. Follow the file contract; this does not require a new clause-type field or forbid a documented severity-based convention in a mixed file.
    **Why added (proposal B, accepted 2026-10-28):** Excluding reviewer guidance is valid, but a blanket missing-severity filter also excludes valid clauses in files that omit severity declarations. The later counterexamples refine the same rule; two attribution paths are not two independent reasons to add rules.
    **Finding sources:** `review-ratchet:l1:r1:r1-2`; `review-ratchet:l1:r2:r2-2`; `review-ratchet:l1:r2:r2-3`.
@@ -131,7 +131,7 @@ These judgment rules are adopted in this repository only. They may generalize, b
    | P1, P2 | should-fix |
    | P3 | nice |
 
-<!-- ratchet-retired: R.5 -->
+<!-- house-rules-retired: R.5 -->
 6. **[R.6]** Read the surrounding code before judging a change. Something wrong in isolation can be right given the system's invariants.
 7. **[R.7]** A new gate or rule needs a failing example that proves it fires. <!-- digest: Prove gates with fail/pass, reversal and per-rule mutation checks; isolate unrelated probe effects; explicitly authorize real integration effects --> <!-- ADJUST: drop this clause if you do not write your own lint gates. -->
    A gate that runs green proves nothing, because a gate that always returns green also runs green. The proof is to build what it should catch and watch it turn red. Give every rule at least one positive example (must fail) and one negative (must pass), starting with the exceptions the rule states explicitly, since those are what a later tightening breaks first. Reverting to the old behavior must turn it green again, so the red is caused by the new part. Pin each positive to the specific rule that fired. With several rules, disable them one at a time and confirm only that rule's example goes green. Commit the tests; a one-off manual run proves nothing later.
