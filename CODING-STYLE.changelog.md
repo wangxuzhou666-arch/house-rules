@@ -139,3 +139,115 @@ These five changes were accepted on 2026-10-28 and recorded by hand in `CODING-S
       return fresh
   ```
 - Decision: accept by Colar — "接受退役 (Recommended)"
+
+## Revision 2 — 2026-10-30 (batch 17d090f41337b1e3b123b207eaf4bc7e0af512baeccc1b18c0656c10df1336c9)
+
+### add REL.4
+
+- Before: (new clause)
+- After:
+  ```markdown
+  4. **[REL.4]** Don't count a cap's use only at the end, on success or by opt-in: record each attempt as it starts, in code every caller passes through. (should-fix) <!-- digest: Don't count a cap's use at the end, on success only or by opt-in: count each attempt as it starts -->
+     Scope: a limit on something billed, rate-limited or repeated (a daily review cap, a round limit, a quota). A cap checked when the work starts but counted when it ends lets concurrent runs pass the check together; one counted only on success lets a failure after the spend go free; one that counts only the calls a caller marks lets a caller that forgets the mark escape. An attempt refused before it spends anything is not counted.
+     Violates: `if used < limit: call(); record(used + 1)`, or `record()` after `call()` returns. Complies: record the attempt, atomically with the check, before `call()`; keep it when the call fails; do it in the code path every caller takes.
+  ```
+- Why: REL.4 itself: no clause says when a cap's use must be counted (PRJ.1 pins identity and round checks before the call; P0F.1 and P0F.2 cover input and fallbacks). One mechanism sits behind three findings: a cap charged late (r4-2, cited here), only on success (r4-3, cited under a2) or only by opt-in (r4-4, cited under a3), instead of at the spend. A finding can be cited in one group only, which is why a2 and a3, the two groups that make room for REL.4, carry r4-3 and r4-4. REL.4 does not fit alone (digest 4092 + 119 > 4096): it needs both a2 and a3, and an apply without them is refused.
+- Evidence: `review-ratchet:l1:r4:r4-2` — `ratchet/review.py:308` — The daily cap is checked when a review starts, but the counting `review_run` is written only after claude finishes, so concurrent automatic reviews can exceed the cap.
+  ```
+      if used + 1 > config.max_review_rounds and not over_cap_allowed and not replayed:
+          return Refusal(REFUSE_ROUND_CAP, key, round_cap_message(key, used, config.max_review_rounds, len(open_findings(events))))
+      if from_file:
+          return None
+      capped = daily_cap_refusal(config, events, datetime.now().astimezone()) if automatic else None
+      if capped is not None:
+          return capped
+  ```
+- Decision: accept by Colar — "三条都接受 (Recommended)"
+
+### rewrite P0E.3
+
+- Before:
+  ```markdown
+  3. **[P0E.3]** Catch-all handlers are legal only in the cases below, and the line must name the case and the reason. <!-- digest: Catch-all only for: side channel, optional extra, batch isolation, top-level handler, rethrow with cause; name the case on the line --> <!-- ADJUST: the legal-case whitelist. Shorten or extend it, and keep the digest comment in step. -->
+     - **Side channel**: masking, metrics or telemetry must not take down the main flow.
+     - **Optional extra**: a field the conclusion does not depend on (a usage count recorded as 0).
+     - **Batch isolation**: one bad item must not sink the batch; log that item's identity.
+     - **Top-level handler**: the outermost layer of a server or worker, which logs the full traceback so the process survives.
+     - **Rethrow with cause**: a retry wrapper that raises the last error, or a boundary that translates a parse failure into a client error and keeps the original as its cause. The test is that the exception's identity is not lost. Narrow the type instead where you can.
+  ```
+- After:
+  ```markdown
+  3. **[P0E.3]** Catch-all handlers are legal only in the cases below, and the line must name the case and the reason. <!-- digest: Catch-all only for: side channel, optional extra, batch isolation, top-level handler, rethrow with cause; name the case on the line --> <!-- ADJUST: the legal-case whitelist. Shorten or extend it, and keep the digest comment in step. -->
+     - **Side channel**: masking, metrics or telemetry must not take down the main flow.
+     - **Optional extra**: a field the conclusion does not depend on (a usage count recorded as 0).
+     - **Batch isolation**: one bad item must not sink the batch; log that item's identity.
+     - **Top-level handler**: the outermost layer of a server or worker, which logs the full traceback so the process survives.
+     - **Rethrow with cause**: a retry wrapper that raises the last error, or a boundary that translates a parse failure into a client error and keeps the original as its cause. The test is that the exception's identity is not lost. Narrow the type instead where you can.
+
+     A lint suppression on a broad catch is that line: a bare one, with no case and reason, is not accepted. <!-- ADJUST: e.g. a bare `noqa: BLE001` in ruff or an eslint-disable without a description. -->
+  ```
+- Why: Pays for REL.4 (a1, drawn from r4-2, r4-3 and r4-4; r4-3 is cited here because a finding may sit in one group only). REL.4 is 115 bytes over the digest budget on its own; this merge frees 75 and a3 frees 52. P0E.4 (a bare lint suppression on a broad catch is not accepted) is already implied by P0E.3, whose line 'must name the case and the reason': a suppression comment is that line. The survivor P0E.3 keeps its digest line and gains P0E.4's sentence and ADJUST note. Lost: P0E.4's own digest line and the ID P0E.4, which is never reused.
+- Evidence: `review-ratchet:l1:r4:r4-3` — `ratchet/cli.py:249` — Only a successful review writes an `auto`-triggered review_run, so a billed automatic review that fails is never counted against the daily cap.
+  ```
+      print("\n".join(findings_table(fresh)) if fresh else "no new findings")
+      run_event = review_run_event(config.repo_slug, now_iso(), run_id=run_id, key=key, round_number=round_number,
+                                   max_rounds=config.max_review_rounds, over_cap=over_cap, finding_count=finding_count,
+                                   level=level, head=head, reviewer_version=reviewer_version,
+                                   version_changed=replaced_version is not None, from_file=bool(args.from_file),
+                                   trigger=TRIGGER_AUTO if automatic else None,
+  [snippet truncated]
+  ```
+- Decision: accept by Colar — "三条都接受 (Recommended)"
+
+### retire P0E.4
+
+- Before:
+  ```markdown
+  4. **[P0E.4]** A bare lint suppression on a broad catch is not accepted; it must carry the case and reason. <!-- ADJUST: e.g. a bare `noqa: BLE001` in ruff or an eslint-disable without a description. -->
+  ```
+- After: (retired)
+- Why: Pays for REL.4 (a1, drawn from r4-2, r4-3 and r4-4; r4-3 is cited here because a finding may sit in one group only). REL.4 is 115 bytes over the digest budget on its own; this merge frees 75 and a3 frees 52. P0E.4 (a bare lint suppression on a broad catch is not accepted) is already implied by P0E.3, whose line 'must name the case and the reason': a suppression comment is that line. The survivor P0E.3 keeps its digest line and gains P0E.4's sentence and ADJUST note. Lost: P0E.4's own digest line and the ID P0E.4, which is never reused.
+- Evidence: `review-ratchet:l1:r4:r4-3` — `ratchet/cli.py:249` — Only a successful review writes an `auto`-triggered review_run, so a billed automatic review that fails is never counted against the daily cap.
+  ```
+      print("\n".join(findings_table(fresh)) if fresh else "no new findings")
+      run_event = review_run_event(config.repo_slug, now_iso(), run_id=run_id, key=key, round_number=round_number,
+                                   max_rounds=config.max_review_rounds, over_cap=over_cap, finding_count=finding_count,
+                                   level=level, head=head, reviewer_version=reviewer_version,
+                                   version_changed=replaced_version is not None, from_file=bool(args.from_file),
+                                   trigger=TRIGGER_AUTO if automatic else None,
+  [snippet truncated]
+  ```
+- Decision: accept by Colar — "三条都接受 (Recommended)"
+
+### rewrite P0E.2
+
+- Before:
+  ```markdown
+  2. **[P0E.2]** Catch a specific exception type, with its own action. One response for every type is suppressing, not handling.
+  ```
+- After:
+  ```markdown
+  2. **[P0E.2]** Catch a specific exception type, with its own action. One response for every type is suppressing, not handling. Where the action is to do nothing, replace the empty handler with an explicit suppression that names the exception type. <!-- digest: Catch a specific exception type, with its own action; if none, an explicit suppression naming the type --> <!-- ADJUST: e.g. `contextlib.suppress(KeyError)` (ruff SIM105). -->
+  ```
+- Why: Pays for REL.4 (a1, drawn from r4-2, r4-3 and r4-4; r4-4 is cited here because a finding may sit in one group only). This merge frees 52 bytes and a2 frees 75, against the 115 REL.4 is over. P0E.6 (replace an empty handler with an explicit suppression that names the type) is the do-nothing case of P0E.2 (a specific type with its own action). P0E.2 gains P0E.6's sentence and ADJUST note and a digest line that still names the case (71 to 121 bytes, P0E.6's 102 removed). Lost: P0E.6's own digest line and the ID P0E.6, which is never reused.
+- Evidence: `review-ratchet:l1:r4:r4-4` — `skills/wrapup/SKILL.md:12` — The cap counts only reviews whose command carries `--auto`, and that flag is added only if the model follows a text instruction. The enforcement is therefore prompt-dependent.
+  ```
+  **Automatic mode** (`$ARGUMENTS` starts with `auto <worktree>`): the Stop hook asked for this wrap-up and nobody typed it. In step 1 run `ratchet wrapup --repo <worktree> --json --auto` with the Bash tool's `run_in_background` set, as a review takes minutes and a foreground call is cut off at its timeout; `--auto` marks the review as automatic, which the daily cap counts. Wait for the completion notice (do not poll or sleep) and read the output file it names; the JSON object is the last thing in it. Everything below applies, except that `skipped`, `capped`, `daily_capped` and an error get one 
+  [snippet truncated]
+  ```
+- Decision: accept by Colar — "三条都接受 (Recommended)"
+
+### retire P0E.6
+
+- Before:
+  ```markdown
+  6. **[P0E.6]** Replace an empty handler with an explicit suppression that names the exception type. <!-- ADJUST: e.g. `contextlib.suppress(KeyError)` (ruff SIM105). -->
+  ```
+- After: (retired)
+- Why: Pays for REL.4 (a1, drawn from r4-2, r4-3 and r4-4; r4-4 is cited here because a finding may sit in one group only). This merge frees 52 bytes and a2 frees 75, against the 115 REL.4 is over. P0E.6 (replace an empty handler with an explicit suppression that names the type) is the do-nothing case of P0E.2 (a specific type with its own action). P0E.2 gains P0E.6's sentence and ADJUST note and a digest line that still names the case (71 to 121 bytes, P0E.6's 102 removed). Lost: P0E.6's own digest line and the ID P0E.6, which is never reused.
+- Evidence: `review-ratchet:l1:r4:r4-4` — `skills/wrapup/SKILL.md:12` — The cap counts only reviews whose command carries `--auto`, and that flag is added only if the model follows a text instruction. The enforcement is therefore prompt-dependent.
+  ```
+  **Automatic mode** (`$ARGUMENTS` starts with `auto <worktree>`): the Stop hook asked for this wrap-up and nobody typed it. In step 1 run `ratchet wrapup --repo <worktree> --json --auto` with the Bash tool's `run_in_background` set, as a review takes minutes and a foreground call is cut off at its timeout; `--auto` marks the review as automatic, which the daily cap counts. Wait for the completion notice (do not poll or sleep) and read the output file it names; the JSON object is the last thing in it. Everything below applies, except that `skipped`, `capped`, `daily_capped` and an error get one 
+  [snippet truncated]
+  ```
+- Decision: accept by Colar — "三条都接受 (Recommended)"

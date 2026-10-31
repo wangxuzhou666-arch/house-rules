@@ -27,16 +27,18 @@ Clause IDs: `P0E.n` exceptions, `P0F.n` fallbacks, `P1.n` complexity, `P2.n` abs
 **Why**: the wider the `try`, the more different failures collapse into one handler. A timeout (retry), a missing key (a bug) and a failed write (alert) become the same log line, and a `return None` after it makes the failure look like success.
 
 1. **[P0E.1]** Put only the line you expect to fail inside `try`; move the rest after the block. <!-- ADJUST: language tool code, e.g. ruff TRY300 flags a return inside try. -->
-2. **[P0E.2]** Catch a specific exception type, with its own action. One response for every type is suppressing, not handling.
+2. **[P0E.2]** Catch a specific exception type, with its own action. One response for every type is suppressing, not handling. Where the action is to do nothing, replace the empty handler with an explicit suppression that names the exception type. <!-- digest: Catch a specific exception type, with its own action; if none, an explicit suppression naming the type --> <!-- ADJUST: e.g. `contextlib.suppress(KeyError)` (ruff SIM105). -->
 3. **[P0E.3]** Catch-all handlers are legal only in the cases below, and the line must name the case and the reason. <!-- digest: Catch-all only for: side channel, optional extra, batch isolation, top-level handler, rethrow with cause; name the case on the line --> <!-- ADJUST: the legal-case whitelist. Shorten or extend it, and keep the digest comment in step. -->
    - **Side channel**: masking, metrics or telemetry must not take down the main flow.
    - **Optional extra**: a field the conclusion does not depend on (a usage count recorded as 0).
    - **Batch isolation**: one bad item must not sink the batch; log that item's identity.
    - **Top-level handler**: the outermost layer of a server or worker, which logs the full traceback so the process survives.
    - **Rethrow with cause**: a retry wrapper that raises the last error, or a boundary that translates a parse failure into a client error and keeps the original as its cause. The test is that the exception's identity is not lost. Narrow the type instead where you can.
-4. **[P0E.4]** A bare lint suppression on a broad catch is not accepted; it must carry the case and reason. <!-- ADJUST: e.g. a bare `noqa: BLE001` in ruff or an eslint-disable without a description. -->
+
+   A lint suppression on a broad catch is that line: a bare one, with no case and reason, is not accepted. <!-- ADJUST: e.g. a bare `noqa: BLE001` in ruff or an eslint-disable without a description. -->
+<!-- ratchet-retired: P0E.4 -->
 5. **[P0E.5]** Log inside a handler with the call that keeps the stack trace, not the one that drops it. <!-- ADJUST: e.g. `logger.exception` rather than `logger.error` (ruff TRY400); `console.error(err)` with the error object. -->
-6. **[P0E.6]** Replace an empty handler with an explicit suppression that names the exception type. <!-- ADJUST: e.g. `contextlib.suppress(KeyError)` (ruff SIM105). -->
+<!-- ratchet-retired: P0E.6 -->
 
 ## P0 · Fallbacks: a failure must not pass for a success
 
@@ -94,7 +96,7 @@ These clauses are judgment rules for review-ratchet's review execution and findi
 
 ## REL · Preserve usable state and persistent identity
 
-These judgment rules are adopted in this repository only. They may generalize, but this adoption does not synchronize them into cross-project rules. All three have explicit `should-fix` severity; none adds a mechanical gate.
+These judgment rules are adopted in this repository only. They may generalize, but this adoption does not synchronize them into cross-project rules. All four have explicit `should-fix` severity; none adds a mechanical gate.
 
 1. **[REL.1]** When replacing a usable artifact, preserve its only usable copy until the replacement is prepared and validated; a failed replacement must leave or restore a usable state. (should-fix) <!-- digest: Keep usable state until replacement is ready and validated; retain or restore it on failure; disposable rebuildable temporary artifacts are exempt -->
    This applies to installed tools, configuration and deployment artifacts with existing usable state. Disposable temporary artifacts that can be discarded and rebuilt are exempt. Choose a replacement and recovery strategy appropriate to the artifact; this rule does not assume a single rename makes a multi-file operation atomic.
@@ -111,6 +113,10 @@ These judgment rules are adopted in this repository only. They may generalize, b
 3. **[REL.3]** Don't guard only the syntax of a state file you read back: a wrong shape must take the same fallback, or the same named error, as a parse failure. (should-fix) <!-- digest: Don't guard only a state file's syntax: a wrong shape takes the same fallback or named error as a parse failure, else one bad file fails every run -->
    Scope: a file a program wrote on an earlier run and reads on a later one (state, cache, saved records), which a person, an older version or a crash may have left in another shape. Input from the host or the caller is outside this rule.
    Violates: `except ValueError` around `json.loads`, then `.items()` on a list. Complies: an `isinstance` check that takes the parse-failure path, so the next save repairs the file.
+
+4. **[REL.4]** Don't count a cap's use only at the end, on success or by opt-in: record each attempt as it starts, in code every caller passes through. (should-fix) <!-- digest: Don't count a cap's use at the end, on success only or by opt-in: count each attempt as it starts -->
+   Scope: a limit on something billed, rate-limited or repeated (a daily review cap, a round limit, a quota). A cap checked when the work starts but counted when it ends lets concurrent runs pass the check together; one counted only on success lets a failure after the spend go free; one that counts only the calls a caller marks lets a caller that forgets the mark escape. An attempt refused before it spends anything is not counted.
+   Violates: `if used < limit: call(); record(used + 1)`, or `record()` after `call()` returns. Complies: record the attempt, atomically with the check, before `call()`; keep it when the call fails; do it in the code path every caller takes.
 
 ## R · Reviewer conduct
 
