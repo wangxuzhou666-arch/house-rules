@@ -24,22 +24,22 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from ratchet.cli import main  # noqa: E402
-from ratchet.config import DEFAULT_CLAUSE_ID_PATTERN, Config  # noqa: E402
-from ratchet.reservations import BOOK_NAME, Book, Reservation, consume_line, parse_book, reserve_line, utc_now  # noqa: E402
+from house_rules.cli import main  # noqa: E402
+from house_rules.config import DEFAULT_CLAUSE_ID_PATTERN, Config  # noqa: E402
+from house_rules.reservations import BOOK_NAME, Book, Reservation, consume_line, parse_book, reserve_line, utc_now  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
-# The suite runs inside Claude Code, which exports CLAUDE* variables (the session id among them), and a ratchet review's own claude
+# The suite runs inside Claude Code, which exports CLAUDE* variables (the session id among them), and a house-rules review's own claude
 # process carries the review marker. A commit made by a test with those set would look like a session's commit to the post-commit
 # hook and land in the developer's real pending directory. So every test starts without them, and the state the tool keeps goes to
 # a directory of this run's own. This comes before _GIT_ENV below copies the environment, which the commits and hooks inherit.
-SCRUBBED_ENV = ("RATCHET_REVIEW_CHILD", "RATCHET_AUTO_HEADLESS")
+SCRUBBED_ENV = ("HOUSE_RULES_REVIEW_CHILD", "HOUSE_RULES_AUTO_HEADLESS")
 for _name in [name for name in os.environ if name.startswith("CLAUDE") or name in SCRUBBED_ENV]:
     del os.environ[_name]
-_STATE_DIR = tempfile.TemporaryDirectory(prefix="ratchet-test-state-")
+_STATE_DIR = tempfile.TemporaryDirectory(prefix="house-rules-test-state-")
 atexit.register(_STATE_DIR.cleanup)
-os.environ["RATCHET_STATE_DIR"] = os.path.realpath(_STATE_DIR.name)
+os.environ["HOUSE_RULES_STATE_DIR"] = os.path.realpath(_STATE_DIR.name)
 
 # Isolate test repos from the developer's own git config (signing, hooks, identity).
 _GIT_ENV = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
@@ -218,7 +218,7 @@ class RepoCase(unittest.TestCase):
         return path
 
     def write_config(self, **config: object) -> None:
-        (self.repo / ".ratchet.json").write_text(json.dumps(config), encoding="utf-8")
+        (self.repo / ".house-rules.json").write_text(json.dumps(config), encoding="utf-8")
 
     def with_sample_rules(self, **config: object) -> None:
         self.write_rules()
@@ -242,7 +242,7 @@ class RepoCase(unittest.TestCase):
 
     def cli_ok(self, *argv: str, stdin: str = "") -> str:
         code, out, err = self.cli(*argv, stdin=stdin)
-        self.assertEqual(code, 0, f"ratchet {argv} failed: {err}")
+        self.assertEqual(code, 0, f"house-rules {argv} failed: {err}")
         return out
 
     def add_findings(self, items: list[dict], source: str = "l1", run: str = "R1") -> str:

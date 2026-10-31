@@ -10,9 +10,9 @@ from unittest import mock
 import support  # noqa: F401  (puts the repo root on sys.path)
 from support import FIXTURES, REPO_ROOT, SEVERITY_TABLE, RepoCase
 
-from ratchet import api
-from ratchet.errors import RatchetError
-from ratchet.gate import finding_hash, repo_relative, rule_code_of
+from house_rules import api
+from house_rules.errors import HouseRulesError
+from house_rules.gate import finding_hash, repo_relative, rule_code_of
 
 GATE_RULES = ("1. **[P0E.4]** A bare lint suppression on a broad catch is not accepted.\n"
               "2. **[P1.1]** Nesting depth of five or more is a violation.\n"
@@ -34,7 +34,7 @@ FIXTURE_IDS = ["demo-repo:gate:73491140740a", "demo-repo:gate:b1fee62becba", "de
 
 
 def downstream_hash(rel: str, code: str, text: str) -> str:
-    """The recipe an existing gate uses for the id of a gate finding, written out independently of ratchet.gate."""
+    """The recipe an existing gate uses for the id of a gate finding, written out independently of house_rules.gate."""
     return hashlib.sha1(f"{rel}|{code}|{''.join(text.split())}".encode()).hexdigest()[:12]
 
 
@@ -81,12 +81,12 @@ class IdCompatibilityTest(GateCase):
         alias.symlink_to(self.repo, target_is_directory=True)
         self.assertEqual(repo_relative(self.repo, str(alias / "src/a.py")), "src/a.py")
         self.assertEqual(repo_relative(self.repo, "src/a.py"), "src/a.py")
-        with self.assertRaises(RatchetError):
+        with self.assertRaises(HouseRulesError):
             repo_relative(self.repo, "../a.py")
 
     def test_multiple_findings_read_each_file_once_per_gate_call(self):
-        from ratchet.fsutil import read_text
-        with mock.patch("ratchet.gate.read_text", wraps=read_text) as reader:
+        from house_rules.fsutil import read_text
+        with mock.patch("house_rules.gate.read_text", wraps=read_text) as reader:
             self.record(REPORTS)
         reads = [call.args[0] for call in reader.call_args_list]
         self.assertEqual(reads.count(self.repo / "src/a.py"), 1)
@@ -280,7 +280,7 @@ class RecordTest(GateCase):
                 self.assertIn("is outside the repo", err)
 
     def test_it_works_from_a_subdirectory(self) -> None:
-        proc = subprocess.run([sys.executable, str(REPO_ROOT / "bin" / "ratchet"), "gate", "record"], cwd=self.repo / "src",
+        proc = subprocess.run([sys.executable, str(REPO_ROOT / "bin" / "house-rules"), "gate", "record"], cwd=self.repo / "src",
                               input=json.dumps([REPORTS[0]]), capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(len(self.finding_events()), 1)
@@ -297,9 +297,9 @@ class RepoRelativeTest(unittest.TestCase):
         self.assertEqual(repo_relative(root, "a/b.py"), "a/b.py")
         self.assertEqual(repo_relative(root, "./a//b.py"), "a/b.py")
         self.assertEqual(repo_relative(root, "/repo/a/b.py"), "a/b.py")
-        with self.assertRaises(RatchetError):
+        with self.assertRaises(HouseRulesError):
             repo_relative(root, "/other/a.py")
-        with self.assertRaises(RatchetError):
+        with self.assertRaises(HouseRulesError):
             repo_relative(root, "../a.py")
 
 
@@ -343,7 +343,7 @@ class PassTest(GateCase):
 
 class ApiTest(GateCase):
     def test_the_public_names_are_the_documented_ones(self) -> None:
-        self.assertEqual(sorted(api.__all__), ["GateRecording", "RatchetError", "ledger_path", "record_gate_findings", "record_gate_pass"])
+        self.assertEqual(sorted(api.__all__), ["GateRecording", "HouseRulesError", "ledger_path", "record_gate_findings", "record_gate_pass"])
         for name in api.__all__:
             self.assertTrue(hasattr(api, name), name)
 
@@ -378,16 +378,16 @@ class ApiTest(GateCase):
         self.addCleanup(os.chdir, cwd)
         self.assertEqual(api.record_gate_findings(REPORTS[:1]).ids, FIXTURE_IDS[:1])
 
-    def test_problems_raise_ratchet_error_and_write_nothing(self) -> None:
-        with self.assertRaises(RatchetError):
+    def test_problems_raise_house_rules_error_and_write_nothing(self) -> None:
+        with self.assertRaises(HouseRulesError):
             api.record_gate_findings([REPORTS[0], {**REPORTS[0], "code": "P9.9"}], repo=self.repo)
-        with self.assertRaises(RatchetError):
+        with self.assertRaises(HouseRulesError):
             api.record_gate_pass([], repo=self.repo)
         self.assertFalse(self.ledger.exists())
 
-    def test_an_unwritable_ledger_is_a_ratchet_error_too(self) -> None:
+    def test_an_unwritable_ledger_is_a_house_rules_error_too(self) -> None:
         self.write_config(rules_files=["rules.md"], ledger="no-such-dir/ledger.jsonl")
-        with self.assertRaises(RatchetError):
+        with self.assertRaises(HouseRulesError):
             api.record_gate_findings(REPORTS[:1], repo=self.repo)
 
     def record(self, reports: object) -> str:

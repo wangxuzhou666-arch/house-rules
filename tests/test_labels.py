@@ -9,8 +9,8 @@ from support import RepoCase, gate_finding, review_finding
 class LabelFlowTest(RepoCase):
     def setUp(self) -> None:
         super().setUp()
-        self.page = self.repo / ".ratchet-label-page.html"
-        self.batch = self.repo / ".ratchet-label-batch.json"
+        self.page = self.repo / ".house-rules-label-page.html"
+        self.batch = self.repo / ".house-rules-label-batch.json"
         self.first, self.second = review_finding("R1-001", line=1), review_finding("R1-002", line=2)
         self.append_raw(self.first, self.second)
 

@@ -6,7 +6,7 @@ import support  # noqa: F401  (puts the repo root on sys.path)
 import schema_check
 from support import FIXTURES, REPO_ROOT, gate_finding, gate_pass, review_finding, review_round
 
-from ratchet import ledger
+from house_rules import ledger
 
 SCHEMA = json.loads((REPO_ROOT / "schemas" / "finding.v1.schema.json").read_text(encoding="utf-8"))
 

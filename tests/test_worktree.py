@@ -1,6 +1,6 @@
 """Linked worktrees: what every worktree shares and what each one has of its own.
 
-The ledger, the skips file, `.ratchet/` and `.ratchet.json` live in the main worktree and all of them use those. The files git
+The ledger, the skips file, `.house-rules/` and `.house-rules.json` live in the main worktree and all of them use those. The files git
 tracks are each worktree's own: the rules, the digest, the inject targets, the changelog and the code under review. Every test
 makes the two worktrees differ in the file it is about, so reading the wrong one shows.
 """
@@ -15,16 +15,16 @@ from unittest import mock
 import support  # noqa: F401  (puts the repo root on sys.path)
 from support import STYLE_RULES, RepoCase, git, report_item, review_finding, review_item
 
-from ratchet import api
-from ratchet.config import load_config, tracked_name, tracked_path
-from ratchet.decision_context import build_context
-from ratchet.errors import RatchetError
-from ratchet.gate import finding_hash
-from ratchet.native_decisions import apply_answers, prepare
-from ratchet.proposal_store import JOURNAL, encoded, replace_local
-from ratchet.proposals import CHANGELOG, STATE, VERSION
-from ratchet.review import save_review
-from ratchet.review_evidence import capture, save
+from house_rules import api
+from house_rules.config import load_config, tracked_name, tracked_path
+from house_rules.decision_context import build_context
+from house_rules.errors import HouseRulesError
+from house_rules.gate import finding_hash
+from house_rules.native_decisions import apply_answers, prepare
+from house_rules.proposal_store import JOURNAL, encoded, replace_local
+from house_rules.proposals import CHANGELOG, STATE, VERSION
+from house_rules.review import save_review
+from house_rules.review_evidence import capture, save
 
 DIGEST = "CODING-STYLE.digest.md"
 REVIEWER = "reviewer.md"
@@ -54,7 +54,7 @@ class LinkedCase(RepoCase):
         self.base = self.commit("base")
         self.tree = self.tmp / "linked"
         git(self.repo, "worktree", "add", "-q", "-b", "feature", str(self.tree))
-        patcher = mock.patch.dict(os.environ, {"RATCHET_CLAUDE_CMD": "/nonexistent/claude"})  # no test reaches the real claude
+        patcher = mock.patch.dict(os.environ, {"HOUSE_RULES_CLAUDE_CMD": "/nonexistent/claude"})  # no test reaches the real claude
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -63,7 +63,7 @@ class LinkedCase(RepoCase):
 
     def ok_in_tree(self, *argv: str, stdin: str = "") -> str:
         code, out, err = self.in_tree(*argv, stdin=stdin)
-        self.assertEqual(code, 0, f"ratchet {argv} failed in the linked worktree: {err}")
+        self.assertEqual(code, 0, f"house-rules {argv} failed in the linked worktree: {err}")
         return out
 
     def main_text(self, name: str) -> str:
@@ -106,7 +106,7 @@ class ConfigPathsTest(LinkedCase):
         self.assertEqual(load_config(None, None, None, self.repo / "src").worktree, self.repo)
 
     def test_the_config_of_the_main_worktree_decides_whatever_the_linked_copy_says(self) -> None:
-        (self.tree / ".ratchet.json").write_text(json.dumps({"rules_files": ["absent.md"]}), encoding="utf-8")
+        (self.tree / ".house-rules.json").write_text(json.dumps({"rules_files": ["absent.md"]}), encoding="utf-8")
         self.assertEqual(self.in_tree("compile", "--check")[0], 0)
         self.assertEqual(load_config(self.tree, None, None, self.tree).rules_files, (self.tree / "rules.md",))
 
@@ -142,7 +142,7 @@ class CompileTest(LinkedCase):
         (self.tree / REVIEWER).write_text("no markers here\n", encoding="utf-8")
         code, _, err = self.in_tree("compile")
         self.assertEqual(code, 1)
-        self.assertIn(f"ratchet: error: {REVIEWER}: marker", err)  # anchored: `../linked/reviewer.md: marker` contains the bare form
+        self.assertIn(f"house-rules: error: {REVIEWER}: marker", err)  # anchored: `../linked/reviewer.md: marker` contains the bare form
 
     def test_compile_check_compares_the_files_of_the_worktree_it_is_run_in(self) -> None:
         (self.tree / "rules.md").write_text(EDITED_RULES, encoding="utf-8")  # its rules moved on, its digest did not
@@ -361,12 +361,12 @@ class ReviewRulesTest(LinkedCase):
     def test_findings_are_labeled_and_the_evidence_is_saved_with_the_rules_of_the_reviewed_worktree(self) -> None:
         (self.tree / "rules.md").write_text(WITH_NEW_CLAUSE, encoding="utf-8")
         text = "```json\n" + json.dumps([review_item(category="p3-9", severity="nice")]) + "\n```\n"
-        with mock.patch.dict(os.environ, {"RATCHET_CLAUDE_CMD": str(self.fake_claude(text))}):
+        with mock.patch.dict(os.environ, {"HOUSE_RULES_CLAUDE_CMD": str(self.fake_claude(text))}):
             code, _, err = self.cli("review", "--run", "R1", "--repo", str(self.tree), with_repo=False)
         self.assertEqual((code, err), (0, ""))
         (finding,) = [event for event in self.events() if event["kind"] == "finding"]
         self.assertEqual((finding["rule_id"], finding["rule_id_source"]), ("P3.9", "model"))
-        evidence = json.loads((self.repo / ".ratchet" / "reviews" / "R1.evidence.json").read_text(encoding="utf-8"))
+        evidence = json.loads((self.repo / ".house-rules" / "reviews" / "R1.evidence.json").read_text(encoding="utf-8"))
         (rules,) = evidence["rules"]
         self.assertEqual(rules["absolute_path"], str(self.tree / "rules.md"))
         self.assertIn("Name the invariant a comment protects", rules["text"])
@@ -374,7 +374,7 @@ class ReviewRulesTest(LinkedCase):
     def test_the_main_worktree_does_not_know_a_clause_only_the_linked_one_has(self) -> None:
         (self.tree / "rules.md").write_text(WITH_NEW_CLAUSE, encoding="utf-8")
         text = "```json\n" + json.dumps([review_item(category="p3-9", severity="nice")]) + "\n```\n"
-        with mock.patch.dict(os.environ, {"RATCHET_CLAUDE_CMD": str(self.fake_claude(text))}):
+        with mock.patch.dict(os.environ, {"HOUSE_RULES_CLAUDE_CMD": str(self.fake_claude(text))}):
             self.cli_ok("review", "--run", "R1")
         (finding,) = [event for event in self.events() if event["kind"] == "finding"]
         self.assertEqual(finding["rule_id"], "unmapped")
@@ -406,7 +406,7 @@ class DecisionContextTest(LinkedCase):
         self.assertNotEqual(in_tree["context_id"], in_main["context_id"])
 
     def test_the_raw_review_comes_from_the_shared_state_of_the_main_worktree(self) -> None:
-        reviews = self.repo / ".ratchet" / "reviews"
+        reviews = self.repo / ".house-rules" / "reviews"
         reviews.mkdir(parents=True)
         (reviews / "R1.txt").write_text("the raw review\n", encoding="utf-8")
         raw = self.packet("tree")["findings"][0]["raw_review"]
@@ -489,7 +489,7 @@ class ApplyTest(ProposalCase):
         batch_id = self.applied_in(self.tree)
         self.assertTrue((self.repo / STATE / batch_id / "batch.json").is_file())
         self.assertEqual(json.loads((self.repo / VERSION).read_text(encoding="utf-8"))["batch_id"], batch_id)
-        self.assertFalse((self.tree / ".ratchet").exists())
+        self.assertFalse((self.tree / ".house-rules").exists())
 
     def test_the_receipt_names_the_worktree_the_batch_was_applied_in(self) -> None:
         self.assertEqual(self.receipt(self.applied_in(self.tree))["worktree"], str(self.tree))
@@ -637,7 +637,7 @@ class RecoverTest(ProposalCase):
                 raise OSError("synthetic disk failure")
             return original(root, name, text)
 
-        with mock.patch("ratchet.proposal_store.replace_local", side_effect=failing):
+        with mock.patch("house_rules.proposal_store.replace_local", side_effect=failing):
             code, _, err = self.apply_in(self.tree, batch_id)
         self.assertEqual(code, 1)
         self.assertIn("interrupted", err)
@@ -646,16 +646,16 @@ class RecoverTest(ProposalCase):
     def test_the_journal_names_the_worktree_and_is_kept_in_the_main_one(self) -> None:
         self.interrupt_in_tree()
         self.assertEqual(json.loads((self.repo / JOURNAL).read_text(encoding="utf-8"))["tree"], str(self.tree))
-        self.assertFalse((self.tree / ".ratchet").exists())
+        self.assertFalse((self.tree / ".house-rules").exists())
 
     def test_another_worktree_is_blocked_and_told_where_to_recover(self) -> None:
         batch_id = self.interrupt_in_tree()
         code, _, err = self.apply_in(self.repo, batch_id)
         self.assertEqual(code, 1)
-        self.assertIn(f"interrupted proposal transaction in {self.tree}; run ratchet recover-proposals there first", err)
+        self.assertIn(f"interrupted proposal transaction in {self.tree}; run house-rules recover-proposals there first", err)
         code, _, err = self.run_in(self.repo, "recover-proposals")
         self.assertEqual(code, 1)
-        self.assertIn(f"was writing files in {self.tree}; run ratchet recover-proposals there", err)
+        self.assertIn(f"was writing files in {self.tree}; run house-rules recover-proposals there", err)
 
     def test_the_worktree_that_was_interrupted_recovers_its_own_files(self) -> None:
         batch_id = self.interrupt_in_tree()
@@ -671,7 +671,7 @@ class RecoverTest(ProposalCase):
         batch_id = self.interrupt_in_tree()
         code, _, err = self.apply_in(self.tree, batch_id)
         self.assertEqual(code, 1)
-        self.assertIn("interrupted proposal transaction; run ratchet recover-proposals first", err)
+        self.assertIn("interrupted proposal transaction; run house-rules recover-proposals first", err)
 
     def test_a_later_edit_in_the_worktree_blocks_its_recovery(self) -> None:
         self.interrupt_in_tree()
@@ -684,8 +684,8 @@ class RecoverTest(ProposalCase):
         batch_id = self.interrupt_in_tree()
         commands = {"distill": ["distill", "--drafts", str(self.drafts)], "apply-proposals": ["apply-proposals", "--input", "-"],
                     "rollback-proposals": ["rollback-proposals", "--batch", batch_id]}
-        here = "interrupted proposal transaction; run ratchet recover-proposals first"
-        there = f"interrupted proposal transaction in {self.tree}; run ratchet recover-proposals there first"
+        here = "interrupted proposal transaction; run house-rules recover-proposals first"
+        there = f"interrupted proposal transaction in {self.tree}; run house-rules recover-proposals there first"
         for command, argv in commands.items():
             for where, expected in ((self.tree, here), (self.repo, there)):
                 with self.subTest(command=command, where=where.name):
@@ -725,7 +725,7 @@ class NativeDecisionTest(ProposalCase):
 
     def test_a_batch_prepared_from_one_worktrees_code_is_not_applied_in_another_even_when_the_files_match(self) -> None:
         batch = self.batch()
-        with self.assertRaisesRegex(RatchetError, "decision evidence or source code changed"):
+        with self.assertRaisesRegex(HouseRulesError, "decision evidence or source code changed"):
             apply_answers(self.main_config, self.events(), self.answers(batch))
         self.assertEqual(self.main_text("rules.md"), STYLE_RULES)
         self.assertFalse((self.repo / STATE / batch["id"] / "receipt.json").exists())
@@ -743,14 +743,14 @@ class InitTest(LinkedCase):
     def test_init_sets_up_the_linked_worktree_and_says_which_it_is(self) -> None:
         (self.tree / DIGEST).unlink()
         out = self.ok_in_tree("init", "--yes")
-        self.assertEqual(out.splitlines()[0], f"ratchet init: {self.tree}")
+        self.assertEqual(out.splitlines()[0], f"house-rules init: {self.tree}")
         self.assertIn(f"stay shared with {self.repo}", out.splitlines()[1])
         self.assertIn(f"@{DIGEST}", self.tree_text("CLAUDE.md"))
         self.assertTrue((self.tree / DIGEST).is_file())
-        self.assertIn(".ratchet/", self.tree_text(".gitignore"))
+        self.assertIn(".house-rules/", self.tree_text(".gitignore"))
         for name in ("CLAUDE.md", ".gitignore"):
             self.assertFalse((self.repo / name).exists(), name)  # the main worktree's tracked files are not touched
-        self.assertEqual(self.main_text(".ratchet.json"), json.dumps({"rules_files": ["rules.md"], "inject_targets": [REVIEWER]}))
+        self.assertEqual(self.main_text(".house-rules.json"), json.dumps({"rules_files": ["rules.md"], "inject_targets": [REVIEWER]}))
 
     def test_the_commit_it_asks_for_is_made_of_the_linked_worktrees_files(self) -> None:
         (self.tree / DIGEST).unlink()
@@ -761,7 +761,7 @@ class InitTest(LinkedCase):
     def test_a_dry_run_in_the_linked_worktree_names_it_and_writes_nothing(self) -> None:
         (self.tree / DIGEST).unlink()
         out = self.ok_in_tree("init", "--dry-run")
-        self.assertEqual(out.splitlines()[0], f"[dry-run] ratchet init: {self.tree}")
+        self.assertEqual(out.splitlines()[0], f"[dry-run] house-rules init: {self.tree}")
         self.assertIn("+++ b/CLAUDE.md", out)  # the diff labels are the worktree's paths
         self.assertNotIn("+++ b/../", out)
         self.assertFalse((self.tree / DIGEST).exists())
@@ -777,7 +777,7 @@ class InitTest(LinkedCase):
 
     def test_the_main_worktree_heading_is_the_main_worktree_and_has_no_second_line(self) -> None:
         out = self.cli_ok("init", "--yes")
-        self.assertEqual(out.splitlines()[0], f"ratchet init: {self.repo}")
+        self.assertEqual(out.splitlines()[0], f"house-rules init: {self.repo}")
         self.assertNotIn("linked worktree", out)
 
 
@@ -801,10 +801,10 @@ class InitWithoutConfigTest(RepoCase):
             with self.subTest(flag=flag):
                 code, _, err = self.cli("init", flag, "--repo", str(tree), with_repo=False)
                 self.assertEqual(code, 1)
-                self.assertIn(f"{self.repo / '.ratchet.json'} lists no rules_files", err)
-                self.assertIn("run `ratchet init` in the main worktree first", err)
-                self.assertFalse((self.repo / ".ratchet.json").exists())
-                self.assertFalse((tree / ".ratchet.json").exists())
+                self.assertIn(f"{self.repo / '.house-rules.json'} lists no rules_files", err)
+                self.assertIn("run `house-rules init` in the main worktree first", err)
+                self.assertFalse((self.repo / ".house-rules.json").exists())
+                self.assertFalse((tree / ".house-rules.json").exists())
                 self.assertFalse((tree / "CODING-STYLE.md").exists())
 
 
@@ -812,10 +812,10 @@ class SharedStateTest(LinkedCase):
     def test_the_label_page_is_written_next_to_the_shared_ledger(self) -> None:
         self.append_raw(review_finding())
         out = self.ok_in_tree("label-page")
-        self.assertIn(str(self.repo / ".ratchet-label-page.html"), out)
-        self.assertTrue((self.repo / ".ratchet-label-page.html").is_file())
-        self.assertTrue((self.repo / ".ratchet-label-batch.json").is_file())
-        self.assertFalse((self.tree / ".ratchet-label-page.html").exists())
+        self.assertIn(str(self.repo / ".house-rules-label-page.html"), out)
+        self.assertTrue((self.repo / ".house-rules-label-page.html").is_file())
+        self.assertTrue((self.repo / ".house-rules-label-batch.json").is_file())
+        self.assertFalse((self.tree / ".house-rules-label-page.html").exists())
 
     def test_the_proposal_batch_page_is_written_into_the_shared_state(self) -> None:
         finding = review_finding(rule_id="P1.1", rule_code="P1.1")
@@ -826,7 +826,7 @@ class SharedStateTest(LinkedCase):
         out = self.ok_in_tree("distill", "--drafts", str(drafts))
         batch_id = out.splitlines()[0].split(": ", 1)[1]
         self.assertIn(f"review page: {self.repo / STATE / batch_id / 'review.html'}", out)
-        self.assertFalse((self.tree / ".ratchet").exists())
+        self.assertFalse((self.tree / ".house-rules").exists())
 
 
 class SkipsTest(LinkedCase):

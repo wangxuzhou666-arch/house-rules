@@ -5,9 +5,9 @@ from pathlib import Path
 import support  # noqa: F401  (puts the repo root on sys.path)
 from support import FIXTURES, SAMPLE_CLAUSES, SAMPLE_RULES, SEVERITY_TABLE, STYLE_RULES, make_config
 
-from ratchet.config import DEFAULT_CLAUSE_ID_PATTERN
-from ratchet.errors import RatchetError
-from ratchet.rules import category_of, family_of, load_rules, parse_rules_text, parse_severity_table
+from house_rules.config import DEFAULT_CLAUSE_ID_PATTERN
+from house_rules.errors import HouseRulesError
+from house_rules.rules import category_of, family_of, load_rules, parse_rules_text, parse_severity_table
 
 
 class ParseRulesTest(unittest.TestCase):
@@ -36,11 +36,11 @@ class ParseRulesTest(unittest.TestCase):
         self.assertEqual(severities, {"P1.1": "should-fix", "P1.2": "nice", "P1.3": "blocker", "P1.4": None})
 
     def test_duplicate_definition_is_an_error(self) -> None:
-        with self.assertRaisesRegex(RatchetError, "already defined"):
+        with self.assertRaisesRegex(HouseRulesError, "already defined"):
             self.parse("1. **[P1.1]** a\n2. **[P1.1]** b\n")
 
     def test_conflicting_severity_tags_are_an_error(self) -> None:
-        with self.assertRaisesRegex(RatchetError, "conflicting severity"):
+        with self.assertRaisesRegex(HouseRulesError, "conflicting severity"):
             self.parse("1. **[P1.1]** a (blocker) (nice)\n")
 
     def test_custom_id_pattern(self) -> None:
@@ -166,37 +166,37 @@ class LoadRulesTest(unittest.TestCase):
     def test_unknown_clause_is_rejected_not_coerced(self) -> None:
         rules = self.rules()
         for bad in ("P9.9", "p0e.1", "R", "whatever"):
-            with self.assertRaisesRegex(RatchetError, "unknown rule_id"):
+            with self.assertRaisesRegex(HouseRulesError, "unknown rule_id"):
                 rules.resolve_reported(bad)
 
     def test_tool_rule_map_must_point_at_a_known_clause(self) -> None:
-        with self.assertRaisesRegex(RatchetError, "no rules file defines"):
+        with self.assertRaisesRegex(HouseRulesError, "no rules file defines"):
             self.rules(tool_rule_map={"ruff:F811": "P9.9"})
 
     def test_scenarios_keys_are_checked(self) -> None:
-        with self.assertRaisesRegex(RatchetError, "scenarios key"):
+        with self.assertRaisesRegex(HouseRulesError, "scenarios key"):
             self.rules(scenarios={"nonsense": "text"})
 
     def test_rules_file_without_clauses_is_an_error(self) -> None:
         self.rules_path.write_text("# nothing defined here\n", encoding="utf-8")
-        with self.assertRaisesRegex(RatchetError, "no clause definitions"):
+        with self.assertRaisesRegex(HouseRulesError, "no clause definitions"):
             self.rules()
 
     def test_missing_rules_file_is_an_error(self) -> None:
-        with self.assertRaisesRegex(RatchetError, "cannot read rules file"):
+        with self.assertRaisesRegex(HouseRulesError, "cannot read rules file"):
             load_rules(make_config((self.dir / "absent.md",), root=self.dir))  # a file of the repo; one outside it is a shared layer
 
     def test_same_clause_in_two_files_is_an_error(self) -> None:
         second = self.dir / "more.md"
         second.write_text("1. **[P1.1]** again\n", encoding="utf-8")
-        with self.assertRaisesRegex(RatchetError, "already defined in"):
+        with self.assertRaisesRegex(HouseRulesError, "already defined in"):
             load_rules(make_config((self.rules_path, second)))
 
     def test_no_rules_files_means_no_known_clauses(self) -> None:
         rules = load_rules(make_config(()))
         self.assertFalse(rules.is_known_clause("P0E.1"))
         self.assertEqual(rules.resolve_reported("ruff:E501"), ("ruff:E501", "tool"))
-        with self.assertRaisesRegex(RatchetError, "no rules_files configured"):
+        with self.assertRaisesRegex(HouseRulesError, "no rules_files configured"):
             rules.resolve_reported("P0E.1")
         for text in ("", " ", "()", "Invalid input (P0E.1).", "No known clause"):
             with self.subTest(text=text):
@@ -210,7 +210,7 @@ class LoadRulesTest(unittest.TestCase):
 
 
 class ClauseTextTest(unittest.TestCase):
-    """What the parser keeps from a defining line besides the id: the text `ratchet compile` shortens."""
+    """What the parser keeps from a defining line besides the id: the text `house-rules compile` shortens."""
 
     def clause(self, line: str):
         (clause,) = parse_rules_text(line + "\n", "rules.md", DEFAULT_CLAUSE_ID_PATTERN).values()
@@ -288,23 +288,23 @@ class SeverityTableTest(unittest.TestCase):
         self.assertEqual(self.parse(text), {"P0E": "blocker", "P1": "should-fix"})
 
     def test_header_without_a_separator_row_is_an_error(self) -> None:
-        with self.assertRaisesRegex(RatchetError, "separator row"):
+        with self.assertRaisesRegex(HouseRulesError, "separator row"):
             self.parse("| family | severity |\n| P0E | blocker |\n")
 
     def test_unknown_severity_is_an_error(self) -> None:
-        with self.assertRaisesRegex(RatchetError, "rules.md:3: severity 'critical'"):
+        with self.assertRaisesRegex(HouseRulesError, "rules.md:3: severity 'critical'"):
             self.parse("| family | severity |\n|---|---|\n| P0E | critical |\n")
 
     def test_row_with_the_wrong_cell_count_is_an_error(self) -> None:
-        with self.assertRaisesRegex(RatchetError, "two cells"):
+        with self.assertRaisesRegex(HouseRulesError, "two cells"):
             self.parse("| family | severity |\n|---|---|\n| P0E | blocker | extra |\n")
 
     def test_empty_family_name_is_an_error(self) -> None:
-        with self.assertRaisesRegex(RatchetError, "empty family"):
+        with self.assertRaisesRegex(HouseRulesError, "empty family"):
             self.parse("| family | severity |\n|---|---|\n| P0E, | blocker |\n")
 
     def test_same_family_twice_with_different_severities_is_an_error(self) -> None:
-        with self.assertRaisesRegex(RatchetError, "family P1 is nice here but should-fix"):
+        with self.assertRaisesRegex(HouseRulesError, "family P1 is nice here but should-fix"):
             self.parse("| family | severity |\n|---|---|\n| P1 | should-fix |\n| P1 | nice |\n")
 
     def test_same_family_twice_with_the_same_severity_is_fine(self) -> None:
@@ -312,7 +312,7 @@ class SeverityTableTest(unittest.TestCase):
 
     def test_two_tables_in_one_file_conflict_when_they_disagree(self) -> None:
         text = SEVERITY_TABLE + "\nbetween\n\n" + SEVERITY_TABLE.replace("| P3 | nice |", "| P3 | blocker |")
-        with self.assertRaisesRegex(RatchetError, "family P3 is blocker here but nice"):
+        with self.assertRaisesRegex(HouseRulesError, "family P3 is blocker here but nice"):
             self.parse(text)
 
     def test_family_of_is_the_part_before_the_dot(self) -> None:
@@ -345,7 +345,7 @@ class LayeredRulesTest(unittest.TestCase):
     def test_redefining_a_clause_in_a_later_file_is_an_error(self) -> None:
         base = self.write("global.md", STYLE_RULES)
         override = self.write("project.md", "1. **[P1.1]** Loosened: depth of six is fine.\n")
-        with self.assertRaisesRegex(RatchetError, "project.md:1: clause P1.1 is already defined in .*global.md"):
+        with self.assertRaisesRegex(HouseRulesError, "project.md:1: clause P1.1 is already defined in .*global.md"):
             self.rules(base, override)
 
     def test_a_table_in_the_later_file_may_add_families(self) -> None:
@@ -362,7 +362,7 @@ class LayeredRulesTest(unittest.TestCase):
     def test_conflicting_tables_across_files_are_an_error(self) -> None:
         base = self.write("global.md", STYLE_RULES)
         extra = self.write("project.md", "1. **[X.1]** Extra.\n\n| family | severity |\n|---|---|\n| P3 | blocker |\n")
-        with self.assertRaisesRegex(RatchetError, "family P3 is blocker here but nice at .*global.md"):
+        with self.assertRaisesRegex(HouseRulesError, "family P3 is blocker here but nice at .*global.md"):
             self.rules(base, extra)
 
     def test_a_table_may_live_in_a_file_other_than_the_one_with_the_clauses(self) -> None:
@@ -430,16 +430,16 @@ class WholeValueToolIdTest(unittest.TestCase):
     def test_a_reported_tool_id_with_a_final_newline_is_unknown(self) -> None:
         rules = self.rules()
         self.assertEqual(rules.resolve_reported("ruff:F811"), ("ruff:F811", "tool"))
-        with self.assertRaisesRegex(RatchetError, "unknown rule_id"):
+        with self.assertRaisesRegex(HouseRulesError, "unknown rule_id"):
             rules.resolve_reported("ruff:F811\n")
 
     def test_a_tool_rule_map_key_with_a_final_newline_is_refused(self) -> None:
-        with self.assertRaisesRegex(RatchetError, "must look like"):
+        with self.assertRaisesRegex(HouseRulesError, "must look like"):
             self.rules(tool_rule_map={"ruff:F811\n": "P2.3"})
 
     def test_a_scenarios_key_with_a_final_newline_is_refused(self) -> None:
         self.rules(scenarios={"ruff:F811": "text"})
-        with self.assertRaisesRegex(RatchetError, "scenarios key"):
+        with self.assertRaisesRegex(HouseRulesError, "scenarios key"):
             self.rules(scenarios={"ruff:F811\n": "text"})
 
 

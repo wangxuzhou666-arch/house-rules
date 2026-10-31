@@ -19,18 +19,18 @@ from unittest import mock
 import support  # noqa: F401  (puts the repo root on sys.path)
 from support import RepoCase, git, make_config, report_item, review_finding, review_item, review_round
 
-from ratchet import api
-from ratchet.config import is_outer, load_config, rules_name, tracked_name, tracked_path
-from ratchet.decision_context import assess, build_context
-from ratchet.errors import RatchetError, SharedLayerMissing
-from ratchet.ledger import read_events
-from ratchet.proposals import CHANGELOG, STATE, VERSION, apply_batch, create_batch
-from ratchet.review import (
+from house_rules import api
+from house_rules.config import is_outer, load_config, rules_name, tracked_name, tracked_path
+from house_rules.decision_context import assess, build_context
+from house_rules.errors import HouseRulesError, SharedLayerMissing
+from house_rules.ledger import read_events
+from house_rules.proposals import CHANGELOG, STATE, VERSION, apply_batch, create_batch
+from house_rules.review import (
     REFUSE_CLAUDE, REFUSE_ROUND_CAP, REFUSE_ROUND_KEY, REFUSE_RULES, Refusal, review_refusal, round_key,
 )
-from ratchet.review_evidence import capture
-from ratchet.rules import load_rules, shared_layers
-from ratchet.sources import DiskReader, IndexReader
+from house_rules.review_evidence import capture
+from house_rules.rules import load_rules, shared_layers
+from house_rules.sources import DiskReader, IndexReader
 
 DIGEST = "CODING-STYLE.digest.md"
 PROJECT = "CODING-STYLE.md"
@@ -81,7 +81,7 @@ class SharedCase(RepoCase):
         self.shared.write_text(GLOBAL_RULES, encoding="utf-8")
         self.write_rules(PROJECT_RULES, PROJECT)
         self.write_config(rules_files=[SHARED_NAME, PROJECT])
-        patcher = mock.patch.dict(os.environ, {"RATCHET_CLAUDE_CMD": "/nonexistent/claude"})  # no test reaches the real claude
+        patcher = mock.patch.dict(os.environ, {"HOUSE_RULES_CLAUDE_CMD": "/nonexistent/claude"})  # no test reaches the real claude
         patcher.start()
         self.addCleanup(patcher.stop)
         self.finding = review_finding(rule_id="PRJ.1", rule_code="PRJ.1", summary="The replay rule flags a clean import.")
@@ -211,7 +211,7 @@ class HomeSpellingTest(RepoCase):
         repo.mkdir(parents=True)
         git(repo, "init", "-q", "-b", "main")
         (repo / PROJECT).write_text(PROJECT_RULES, encoding="utf-8")
-        (repo / ".ratchet.json").write_text(json.dumps({"rules_files": ["~/rules/CODING-STYLE.md", PROJECT]}), encoding="utf-8")
+        (repo / ".house-rules.json").write_text(json.dumps({"rules_files": ["~/rules/CODING-STYLE.md", PROJECT]}), encoding="utf-8")
         with mock.patch.dict(os.environ, {"HOME": str(home)}):
             self.assertEqual(self.cli("compile", "--repo", str(repo), with_repo=False)[0], 0)
             self.assertEqual(self.cli("compile", "--check", "--repo", str(repo), with_repo=False)[0], 0)
@@ -263,7 +263,7 @@ class LoadRulesTest(SharedCase):
 
     def test_a_missing_file_of_the_repo_is_still_the_plain_error(self) -> None:
         (self.repo / PROJECT).unlink()
-        with self.assertRaisesRegex(RatchetError, "cannot read rules file .*CODING-STYLE.md: not found in the working tree") as caught:
+        with self.assertRaisesRegex(HouseRulesError, "cannot read rules file .*CODING-STYLE.md: not found in the working tree") as caught:
             load_rules(self.config())
         self.assertNotIsInstance(caught.exception, SharedLayerMissing)
 
@@ -279,7 +279,7 @@ class LoadRulesTest(SharedCase):
     def test_skipping_does_not_excuse_a_file_of_the_repo(self) -> None:
         self.lose_the_layer()
         (self.repo / PROJECT).unlink()
-        with self.assertRaisesRegex(RatchetError, "cannot read rules file"), contextlib.redirect_stderr(io.StringIO()):
+        with self.assertRaisesRegex(HouseRulesError, "cannot read rules file"), contextlib.redirect_stderr(io.StringIO()):
             load_rules(self.config(), skip_missing=True)
 
     def test_a_reference_to_the_missing_layer_is_not_judged_when_it_is_skipped(self) -> None:
@@ -290,7 +290,7 @@ class LoadRulesTest(SharedCase):
             self.assertEqual(load_rules(self.config(), skip_missing=True).missing, (SHARED_NAME,))
         self.write_config(rules_files=[SHARED_NAME, PROJECT], tool_rule_map={"ruff:F811": "G9.9"})
         self.shared.write_text(GLOBAL_RULES, encoding="utf-8")
-        with self.assertRaisesRegex(RatchetError, "no rules file defines"):  # the layer is there: a wrong reference is still wrong
+        with self.assertRaisesRegex(HouseRulesError, "no rules file defines"):  # the layer is there: a wrong reference is still wrong
             load_rules(self.config(), skip_missing=True)
 
     def test_the_shared_layers_are_only_the_outer_ones(self) -> None:
@@ -388,14 +388,14 @@ class CompileTest(SharedCase):
     def test_an_inject_target_in_the_repo_is_still_told_to_be_staged(self) -> None:
         self.write_config(rules_files=[SHARED_NAME, PROJECT], inject_targets=["CLAUDE.md"])
         (self.repo / "CLAUDE.md").write_text("notes\n<!-- style-digest:begin -->\n<!-- style-digest:end -->\n", encoding="utf-8")
-        git(self.repo, "add", ".ratchet.json", PROJECT)
+        git(self.repo, "add", ".house-rules.json", PROJECT)
         code, _, err = self.cli("compile", "--check", "--staged")
         self.assertEqual(code, 1)
         self.assertIn("inject target not found in the git index:", err)
         self.assertIn("(stage it with `git add`)", err)
 
     def test_a_missing_rules_file_of_the_repo_is_still_told_to_be_staged(self) -> None:
-        git(self.repo, "add", ".ratchet.json")  # the project layer is on disk but not in the index
+        git(self.repo, "add", ".house-rules.json")  # the project layer is on disk but not in the index
         code, _, err = self.cli("compile", "--check", "--staged")
         self.assertEqual(code, 1)
         self.assertIn("cannot read rules file", err)
@@ -498,7 +498,7 @@ class RefusalTest(SharedCase):
                 err = self.refused(*argv)
                 self.assertNotIn("not found on PATH", err)  # the claude check comes after the rules check
         self.ledger_unchanged(self.ledger_bytes())
-        self.assertFalse((self.repo / ".ratchet" / "reviews").exists())
+        self.assertFalse((self.repo / ".house-rules" / "reviews").exists())
 
     def test_review_from_a_saved_file_refuses_too(self) -> None:
         saved = self.tmp / "review.json"
@@ -508,7 +508,7 @@ class RefusalTest(SharedCase):
         self.lose_the_layer()
         self.refused("review", "--from-file", str(saved))
         self.ledger_unchanged(before)
-        self.assertFalse((self.repo / ".ratchet" / "reviews").exists())
+        self.assertFalse((self.repo / ".house-rules" / "reviews").exists())
 
     def test_wrapup_that_would_review_refuses(self) -> None:
         self.write_config(rules_files=[SHARED_NAME, PROJECT], wrapup_min_files=1)
@@ -530,7 +530,7 @@ class RefusalTest(SharedCase):
         before = self.ledger_bytes()
         self.lose_the_layer()
         self.refused("gate", "record", stdin=json.dumps([{**item[0], "line": 1, "message": "again, elsewhere"}]))
-        with self.assertRaisesRegex(RatchetError, THE_LAYER_IS_GONE):
+        with self.assertRaisesRegex(HouseRulesError, THE_LAYER_IS_GONE):
             api.record_gate_findings([{**item[0], "message": "another"}], repo=self.repo)
         self.ledger_unchanged(before)
 
@@ -612,35 +612,35 @@ class ProposalTest(DraftMixin, SharedCase):
         self.assertFalse((self.repo / STATE).exists())
 
     def test_an_id_the_shared_layer_defines_cannot_be_added(self) -> None:
-        with self.assertRaisesRegex(RatchetError, "clause ID G1.1 has already been used"):
+        with self.assertRaisesRegex(HouseRulesError, "clause ID G1.1 has already been used"):
             self.batch(rule_id="G1.1", after="- [G1.1] Again.")
 
     def test_an_id_the_shared_layer_retired_stays_reserved(self) -> None:
-        self.shared.write_text(GLOBAL_RULES + "\n<!-- ratchet-retired: G1.7 -->\n", encoding="utf-8")
-        with self.assertRaisesRegex(RatchetError, "clause ID G1.7 has already been used"):
+        self.shared.write_text(GLOBAL_RULES + "\n<!-- house-rules-retired: G1.7 -->\n", encoding="utf-8")
+        with self.assertRaisesRegex(HouseRulesError, "clause ID G1.7 has already been used"):
             self.batch(rule_id="G1.7", after="- [G1.7] Back from the dead.")
 
     def test_an_id_the_project_retired_stays_reserved_as_before(self) -> None:
-        (self.repo / PROJECT).write_text(PROJECT_RULES + "\n<!-- ratchet-retired: PRJ.7 -->\n", encoding="utf-8")
-        with self.assertRaisesRegex(RatchetError, "clause ID PRJ.7 has already been used"):
+        (self.repo / PROJECT).write_text(PROJECT_RULES + "\n<!-- house-rules-retired: PRJ.7 -->\n", encoding="utf-8")
+        with self.assertRaisesRegex(HouseRulesError, "clause ID PRJ.7 has already been used"):
             self.batch(rule_id="PRJ.7", after="- [PRJ.7] Back from the dead.")
 
     def test_a_clause_the_shared_layer_defines_cannot_be_rewritten_or_retired_here(self) -> None:
         for action, after in (("rewrite", "1. **[G1.1]** Keep a function to one clear job."), ("retire", "")):
             for file in (PROJECT, SHARED_NAME, str(self.shared)):
                 with self.subTest(action=action, file=file):
-                    with self.assertRaisesRegex(RatchetError, f"repository that owns that file") as caught:
+                    with self.assertRaisesRegex(HouseRulesError, f"repository that owns that file") as caught:
                         self.batch(action=action, rule_id="G1.1", after=after, file=file)
                     self.assertIn("read-only here", str(caught.exception))
         self.assertFalse((self.repo / STATE).exists())
         self.assertEqual(self.shared.read_bytes(), self.shared_bytes)
 
     def test_the_message_names_the_file_that_defines_the_clause(self) -> None:
-        with self.assertRaisesRegex(RatchetError, rf"G2.1 is defined in {SHARED_NAME.replace('.', r'[.]')}, outside this repository"):
+        with self.assertRaisesRegex(HouseRulesError, rf"G2.1 is defined in {SHARED_NAME.replace('.', r'[.]')}, outside this repository"):
             self.batch(action="retire", rule_id="G2.1", after="")
 
     def test_a_clause_added_to_the_shared_file_is_refused_and_pointed_at_the_project_files(self) -> None:
-        with self.assertRaisesRegex(RatchetError, rf"{SHARED_NAME.replace('.', r'[.]')} lies outside this repository.*{PROJECT}$"):
+        with self.assertRaisesRegex(HouseRulesError, rf"{SHARED_NAME.replace('.', r'[.]')} lies outside this repository.*{PROJECT}$"):
             self.batch(rule_id="G1.9", after="- [G1.9] x.", file=SHARED_NAME)
 
     def test_a_clause_of_the_project_can_still_be_rewritten_and_retired(self) -> None:
@@ -652,7 +652,7 @@ class ProposalTest(DraftMixin, SharedCase):
     def test_a_batch_is_stale_when_the_shared_layer_changed_after_it_was_made(self) -> None:
         batch = self.batch()
         self.shared.write_text(GLOBAL_RULES.replace("Keep a function to one job.", "Keep a function to one clear job."), encoding="utf-8")
-        with self.assertRaisesRegex(RatchetError, "create a fresh proposal batch"):
+        with self.assertRaisesRegex(HouseRulesError, "create a fresh proposal batch"):
             self.apply(batch)
         self.assertNotIn("PRJ.3", self.project_text())
 
@@ -686,7 +686,7 @@ class ProposalTest(DraftMixin, SharedCase):
 
     def test_a_repo_whose_rules_are_all_shared_has_nowhere_to_write(self) -> None:
         self.write_config(rules_files=[SHARED_NAME])
-        with self.assertRaisesRegex(RatchetError, "every file in rules_files lies outside this repository.*project layer"):
+        with self.assertRaisesRegex(HouseRulesError, "every file in rules_files lies outside this repository.*project layer"):
             create_batch(self.config(), self.events(), [self.draft(self.finding, file=SHARED_NAME, rule_id="G1.9", after="- [G1.9] x.")])
 
     def test_the_cli_round_trip_leaves_the_shared_layer_byte_for_byte(self) -> None:
@@ -737,7 +737,7 @@ class LinkedWorktreeTest(DraftMixin, SharedCase):
 
     def test_the_linked_worktree_refuses_a_change_to_the_shared_layer_too(self) -> None:
         config = load_config(self.tree, None, None, self.tree)
-        with self.assertRaisesRegex(RatchetError, "repository that owns that file"):
+        with self.assertRaisesRegex(HouseRulesError, "repository that owns that file"):
             create_batch(config, self.events(), [self.draft(self.finding, action="retire", rule_id="G1.2", after="")])
 
     def test_without_the_layer_the_check_passes_and_the_rest_refuses_from_the_linked_worktree_too(self) -> None:
@@ -791,7 +791,7 @@ class ContextTest(DraftMixin, SharedCase):
             {"finding_ids": [self.finding["id"]], "verification": {"status": "supported", "basis": "read the rule"},
              "action": "rewrite", "rule_ids": ["G1.1"], "reason": "It is too narrow.",
              "changes": [{"action": "rewrite", "rule_id": "G1.1", "file": PROJECT, "after": "1. **[G1.1]** Wider."}]}]}
-        with self.assertRaisesRegex(RatchetError, f"G1.1 is defined in {SHARED_NAME.replace('.', '[.]')}.*repository that owns that file"):
+        with self.assertRaisesRegex(HouseRulesError, f"G1.1 is defined in {SHARED_NAME.replace('.', '[.]')}.*repository that owns that file"):
             assess(config, events, context, payload)
 
     def test_a_missing_layer_refuses_in_words_not_with_an_errno(self) -> None:
@@ -814,7 +814,7 @@ class ForeseenRefusalTest(SharedCase):
 
     def setUp(self) -> None:
         super().setUp()
-        git(self.repo, "add", ".ratchet.json", PROJECT)
+        git(self.repo, "add", ".house-rules.json", PROJECT)
         self.commit("base")
         (self.repo / "big.py").write_text("".join(f"x{number} = {number}\n" for number in range(250)), encoding="utf-8")  # over wrapup_min_changed_lines
         self.calls = self.tmp / "claude-calls"
@@ -824,8 +824,8 @@ class ForeseenRefusalTest(SharedCase):
         self.use(claude)
 
     def use(self, command: Path) -> None:
-        """RATCHET_CLAUDE_CMD for the rest of the test."""
-        patcher = mock.patch.dict(os.environ, {"RATCHET_CLAUDE_CMD": str(command)})
+        """HOUSE_RULES_CLAUDE_CMD for the rest of the test."""
+        patcher = mock.patch.dict(os.environ, {"HOUSE_RULES_CLAUDE_CMD": str(command)})
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -874,7 +874,7 @@ class ForeseenRefusalTest(SharedCase):
         self.assertEqual((data["status"], data["would_refuse"]), ("dry-run", {"kind": "rules", "round_key": None, "message": self.message()}))
         self.assertIn(f"a real run would be refused: {self.message()}; nothing run or written", err)  # --json sends the text to stderr
         self.assertEqual(self.ledger_bytes(), before)
-        self.assertFalse((self.repo / ".ratchet").exists())
+        self.assertFalse((self.repo / ".house-rules").exists())
         self.assertFalse(self.calls.exists())
 
     def test_the_text_report_says_the_review_would_be_refused_and_why(self) -> None:
@@ -894,9 +894,9 @@ class ForeseenRefusalTest(SharedCase):
         self.lose_the_layer()
         before = self.ledger_bytes()
         code, _, err = self.cli("wrapup")
-        self.assertEqual((code, err), (1, f"ratchet: error: {self.message()}\n"))
+        self.assertEqual((code, err), (1, f"house-rules: error: {self.message()}\n"))
         self.assertEqual(self.ledger_bytes(), before)
-        self.assertFalse((self.repo / ".ratchet" / "reviews").exists())
+        self.assertFalse((self.repo / ".house-rules" / "reviews").exists())
         self.assertFalse(self.calls.exists())
 
     def test_a_report_of_the_latest_review_needs_no_rules_and_still_works(self) -> None:

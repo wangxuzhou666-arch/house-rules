@@ -4,10 +4,10 @@ import unittest
 import support  # noqa: F401  (puts the repo root on sys.path)
 from support import FIXTURES, RepoCase, review_item
 
-from ratchet.config import load_config
-from ratchet.errors import RatchetError
-from ratchet.ingest import code_review_events, escape_stray_quotes, extract_review_items, extract_review_items_lenient
-from ratchet.rules import load_rules
+from house_rules.config import load_config
+from house_rules.errors import HouseRulesError
+from house_rules.ingest import code_review_events, escape_stray_quotes, extract_review_items, extract_review_items_lenient
+from house_rules.rules import load_rules
 
 
 class ExtractTest(unittest.TestCase):
@@ -39,15 +39,15 @@ class ExtractTest(unittest.TestCase):
         self.assertNotIn("loop.py", json.dumps(items))
 
     def test_only_the_json_tagged_fence_counts(self) -> None:
-        with self.assertRaisesRegex(RatchetError, "neither a JSON array"):
+        with self.assertRaisesRegex(HouseRulesError, "neither a JSON array"):
             extract_review_items(f"```\n{self.ARRAY}\n```")
 
     def test_no_array_anywhere_is_an_error_that_says_why(self) -> None:
-        with self.assertRaisesRegex(RatchetError, "failed to parse"):
+        with self.assertRaisesRegex(HouseRulesError, "failed to parse"):
             extract_review_items("text\n```json\n{broken\n```\n")
 
     def test_non_object_items_are_rejected(self) -> None:
-        with self.assertRaisesRegex(RatchetError, "item 1"):
+        with self.assertRaisesRegex(HouseRulesError, "item 1"):
             extract_review_items('["not an object"]')
 
 
@@ -97,22 +97,22 @@ class StrayQuoteTest(RepoCase):
 
     def test_a_repair_that_still_does_not_parse_raises_the_original_error(self) -> None:
         broken = STRAY.rstrip().removesuffix("]")  # a second defect, after the stray quotes: the closing bracket is missing
-        with self.assertRaises(RatchetError) as strict:
+        with self.assertRaises(HouseRulesError) as strict:
             extract_review_items(broken)
-        with self.assertRaises(RatchetError) as lenient:
+        with self.assertRaises(HouseRulesError) as lenient:
             extract_review_items_lenient(broken)
         self.assertEqual(str(lenient.exception), str(strict.exception))
 
     def test_input_with_nothing_to_repair_raises_the_strict_error(self) -> None:
-        with self.assertRaisesRegex(RatchetError, "neither a JSON array"):
+        with self.assertRaisesRegex(HouseRulesError, "neither a JSON array"):
             extract_review_items_lenient("no json here")
 
     def test_a_field_outside_the_schema_with_a_stray_quote_is_not_repaired(self) -> None:
-        with self.assertRaises(RatchetError):
+        with self.assertRaises(HouseRulesError):
             extract_review_items_lenient(STRAY.replace('"line": 3,', '"line": 3,\n    "note": "a"b",'))
 
     def test_compact_one_line_json_is_not_repaired(self) -> None:
-        with self.assertRaises(RatchetError):
+        with self.assertRaises(HouseRulesError):
             extract_review_items_lenient('[{"file": "a.py", "line": 1, "summary": "x["k"]", "failure_scenario": "f"}]')
 
     def test_the_command_ingests_it_stores_the_text_intact_and_says_so(self) -> None:

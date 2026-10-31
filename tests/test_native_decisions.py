@@ -3,12 +3,12 @@ import json
 from unittest import mock
 
 from support import RepoCase, review_finding
-from ratchet.config import load_config
-from ratchet.decision_context import build_context
-from ratchet.errors import RatchetError
-from ratchet.native_decisions import apply_answers, prepare, summary
-from ratchet.proposal_store import read_json
-from ratchet.proposals import CHANGELOG, STATE, apply_batch, rollback_batch
+from house_rules.config import load_config
+from house_rules.decision_context import build_context
+from house_rules.errors import HouseRulesError
+from house_rules.native_decisions import apply_answers, prepare, summary
+from house_rules.proposal_store import read_json
+from house_rules.proposals import CHANGELOG, STATE, apply_batch, rollback_batch
 
 APPLIED_AT = "2026-10-29T12:00:00"
 
@@ -42,7 +42,7 @@ class NativeDecisionsTest(RepoCase):
         return (self.repo / CHANGELOG).read_text(encoding="utf-8")
 
     def apply_on(self, payload: dict) -> dict:
-        with mock.patch("ratchet.proposals.now_iso", return_value=APPLIED_AT):
+        with mock.patch("house_rules.proposals.now_iso", return_value=APPLIED_AT):
             return apply_answers(self.config, self.events(), payload)
 
     def four_groups(self):
@@ -102,20 +102,20 @@ class NativeDecisionsTest(RepoCase):
     def test_no_default_empty_or_missing_answer_authorizes_writes(self):
         batch = self.batch()
         for choice in ("", "supported", "rewrite"):
-            with self.assertRaises(RatchetError):
+            with self.assertRaises(HouseRulesError):
                 apply_answers(self.config, self.events(), self.answer(batch, choice))
         payload = self.answer(batch)
         payload["answers"][0]["response"] = ""
-        with self.assertRaises(RatchetError):
+        with self.assertRaises(HouseRulesError):
             apply_answers(self.config, self.events(), payload)
         payload["answers"] = []
-        with self.assertRaises(RatchetError):
+        with self.assertRaises(HouseRulesError):
             apply_answers(self.config, self.events(), payload)
 
     def test_current_code_changes_invalidate_the_approval(self):
         batch = self.batch()
         (self.repo / "source.py").write_text("different code\n")
-        with self.assertRaisesRegex(RatchetError, "source code changed"):
+        with self.assertRaisesRegex(HouseRulesError, "source code changed"):
             apply_answers(self.config, self.events(), self.answer(batch))
         self.assertNotIn("[REL.1]", (self.repo / "rules.md").read_text())
 
@@ -137,7 +137,7 @@ class NativeDecisionsTest(RepoCase):
         assessment["context_id"] = build_context(self.config, self.events(), locations=locations)["context_id"]
         batch = prepare(self.config, self.events(), assessment, locations=locations)
         (self.repo / "source.py").write_text("new code\n" * 21)
-        with self.assertRaisesRegex(RatchetError, "source code changed"):
+        with self.assertRaisesRegex(HouseRulesError, "source code changed"):
             apply_answers(self.config, self.events(), self.answer(batch, "defer"))
 
     def test_native_approval_cannot_be_bypassed_through_legacy_command(self):
@@ -145,7 +145,7 @@ class NativeDecisionsTest(RepoCase):
         payload = self.answer(batch)
         payload.pop("answers")
         payload["decisions"] = [{"id": "p1", "decision": "accept"}]
-        with self.assertRaises(RatchetError):
+        with self.assertRaises(HouseRulesError):
             apply_batch(self.config, self.events(), payload)
 
     def test_merge_is_one_decision_and_partial_acceptance_is_rejected(self):
@@ -157,10 +157,10 @@ class NativeDecisionsTest(RepoCase):
             {"action": "retire", "rule_id": "P0E.6", "file": "rules.md", "after": ""}])
         batch = prepare(self.config, self.events(), assessment)
         payload = {**self.answer(batch), "decisions": [{"id": "p1", "decision": "accept"}, {"id": "p2", "decision": "reject"}]}
-        with self.assertRaisesRegex(RatchetError, "whole-group"):
+        with self.assertRaisesRegex(HouseRulesError, "whole-group"):
             apply_batch(self.config, self.events(), payload)
         apply_answers(self.config, self.events(), self.answer(batch))
-        self.assertIn("ratchet-retired: P0E.6", (self.repo / "rules.md").read_text())
+        self.assertIn("house-rules-retired: P0E.6", (self.repo / "rules.md").read_text())
 
     def test_reconsideration_has_a_new_id_and_can_link_its_parent(self):
         first = self.batch()

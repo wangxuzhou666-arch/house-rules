@@ -1,6 +1,6 @@
-"""The daily cap on automatic reviews: the config key, the refusal, and the slot that the Stop hook or `ratchet wrapup --auto` takes.
+"""The daily cap on automatic reviews: the config key, the refusal, and the slot that the Stop hook or `house-rules wrapup --auto` takes.
 
-The cap counts the reservations in the book (ratchet/reservations.py; its own tests are in test_reservations.py): one for each
+The cap counts the reservations in the book (house_rules/reservations.py; its own tests are in test_reservations.py): one for each
 automatic review that the Stop hook asked for or that `wrapup --auto` started, whatever became of the review. Nothing here runs the
 real claude: the review is an executable fake. A test that goes through the CLI plants reservations that are hours old or more than a
 day old, so that the real clock cannot move one across the edge while the test runs; the exact edge of the 24 hours is tested on the
@@ -24,16 +24,16 @@ from support import RepoCase, book_entries, book_lines, book_of, git, local_zone
 from test_review_refusal import dump_env_claude
 from test_wrapup import numbered
 
-from ratchet import reservations
-from ratchet.config import DEFAULT_WRAPUP_AUTO_MAX_PER_DAY, load_config
-from ratchet.errors import RatchetError
-from ratchet.ledger import read_events
-from ratchet.reservations import BOOK_NAME, BY_HOOK, BY_WRAPUP, LOCK_NAME, reservation_lock
-from ratchet.review import (
+from house_rules import reservations
+from house_rules.config import DEFAULT_WRAPUP_AUTO_MAX_PER_DAY, load_config
+from house_rules.errors import HouseRulesError
+from house_rules.ledger import read_events
+from house_rules.reservations import BOOK_NAME, BY_HOOK, BY_WRAPUP, LOCK_NAME, reservation_lock
+from house_rules.review import (
     REFUSE_CLAUDE, REFUSE_DAILY_CAP, REFUSE_ROUND_CAP, REFUSE_ROUND_KEY, REFUSE_RULES, TRIGGER_AUTO, Refusal, daily_cap_refusal,
     review_run_event, take_automatic_slot,
 )
-from ratchet.wrapup import WrapupPlan, plan_wrapup
+from house_rules.wrapup import WrapupPlan, plan_wrapup
 
 SECOND, MINUTE, HOUR, DAY = timedelta(seconds=1), timedelta(minutes=1), timedelta(hours=1), timedelta(days=1)
 # Noon UTC of a January day. Mid-January is away from every clock change, so the 24 hours before it are the same on the wall clock
@@ -47,7 +47,7 @@ TWO_AT_NOON = ("daily cap reached: 2 automatic review(s) were started or asked f
                "and wrapup_auto_max_per_day is 2. "
                "The next one can run after 2026-01-16T10:00:00, when the one from 2026-01-15T10:00:00 leaves that window; "
                "the work stays counted until then, and the first automatic wrap-up after that reviews it. "
-               "/review-ratchet:wrapup (`ratchet wrapup` without --auto) reviews it now.")
+               "/house-rules:wrapup (`house-rules wrapup` without --auto) reviews it now.")
 # The keys of every `wrapup --json` object, whatever its status.
 JSON_KEYS = {"status", "base", "base_reason", "changed_lines", "changed_files", "thresholds", "run", "new_unmapped",
              "repeated_unmapped", "repeat_of", "open_unmapped", "reason", "would_refuse"}
@@ -340,24 +340,24 @@ class TakeSlotTest(unittest.TestCase):
 
     def test_the_clock_is_read_inside_the_lock(self) -> None:
         def clock_while_the_lock_is_held() -> datetime:
-            with self.assertRaises(RatchetError), reservation_lock(self.root, wait=0.05):
+            with self.assertRaises(HouseRulesError), reservation_lock(self.root, wait=0.05):
                 self.fail("the lock was free when the clock was read")
             return NOON
 
-        with mock.patch("ratchet.review.utc_now", clock_while_the_lock_is_held):
+        with mock.patch("house_rules.review.utc_now", clock_while_the_lock_is_held):
             self.assertIsNone(self.take())
         self.assertEqual(book_entries(self.root)[0]["ts"], "2026-01-15T12:00:00+00:00")
 
     def test_a_lock_that_stays_held_is_a_named_error_and_nothing_is_written(self) -> None:
         with reservation_lock(self.root), mock.patch.object(reservations, "LOCK_WAIT_SECONDS", 0.2):
-            with self.assertRaises(RatchetError) as caught:
+            with self.assertRaises(HouseRulesError) as caught:
                 self.take()
         self.assertIn("another process is counting automatic reviews", str(caught.exception))
         self.assertFalse((self.root / BOOK_NAME).exists())
 
     def test_a_book_that_cannot_be_read_is_a_named_error_and_the_lock_is_let_go(self) -> None:
         (self.root / BOOK_NAME).mkdir(parents=True)
-        with self.assertRaises(RatchetError) as caught:
+        with self.assertRaises(HouseRulesError) as caught:
             self.take()
         self.assertIn(BOOK_NAME, str(caught.exception))
         with reservation_lock(self.root, wait=0.2):
@@ -460,7 +460,7 @@ class ReviewRefusalTest(CappedCase):
     def test_a_book_that_cannot_be_read_is_a_named_error_for_an_automatic_review_only(self) -> None:
         (self.repo / BOOK_NAME).unlink()
         (self.repo / BOOK_NAME).mkdir()
-        with self.assertRaises(RatchetError) as caught:
+        with self.assertRaises(HouseRulesError) as caught:
             self.refusal(automatic=True)
         self.assertIn(BOOK_NAME, str(caught.exception))
         self.assertIsNone(self.refusal())  # a review a person starts reads no book
@@ -500,7 +500,7 @@ class PlanTest(CappedCase):
 
 
 class AutoWrapupTest(CappedCase):
-    """`ratchet wrapup --auto`: the review it runs is marked and takes a slot as it starts, and past the cap it is refused before claude runs."""
+    """`house-rules wrapup --auto`: the review it runs is marked and takes a slot as it starts, and past the cap it is refused before claude runs."""
 
     def test_an_automatic_review_below_the_limit_runs_and_is_recorded_as_automatic(self) -> None:
         self.set_limit(3)
@@ -545,22 +545,22 @@ class AutoWrapupTest(CappedCase):
         before, book = self.ledger_bytes(), self.book_bytes()
         code, out, err = self.cli("wrapup", "--auto")
         message = self.refused_message()
-        self.assertEqual((code, err), (4, f"ratchet: error: {message}\n"))
+        self.assertEqual((code, err), (4, f"house-rules: error: {message}\n"))
         self.assertIn("wrapup: changed lines 250 >= wrapup_min_changed_lines 200; running a review", out)
         self.assertNotIn("review round", out)  # the refusal comes before the round line, as the round cap's does
         self.assertNotIn("--over-cap", message)  # no way past this one on the command line
         self.assertFalse(dump.exists())
         self.assertEqual(self.ledger_bytes(), before)
         self.assertEqual(self.book_bytes(), book)
-        self.assertEqual(sorted(path.name for path in (self.repo / ".ratchet").iterdir()), [Path(BOOK_NAME).name])  # no lock, no review saved
+        self.assertEqual(sorted(path.name for path in (self.repo / ".house-rules").iterdir()), [Path(BOOK_NAME).name])  # no lock, no review saved
 
     def test_the_count_under_the_lock_decides_when_the_check_ahead_saw_room_that_another_run_then_took(self) -> None:
         dump = self.tmp / "claude-everything.jsonl"
         self.use(dump_env_claude(self.tmp, dump))
         before, book = self.ledger_bytes(), self.book_bytes()
-        with mock.patch("ratchet.cli.review_refusal", return_value=None):  # the check without the lock found room; the count with it finds none
+        with mock.patch("house_rules.cli.review_refusal", return_value=None):  # the check without the lock found room; the count with it finds none
             code, out, err = self.cli("wrapup", "--auto")
-        self.assertEqual((code, err), (4, f"ratchet: error: {self.refused_message()}\n"))
+        self.assertEqual((code, err), (4, f"house-rules: error: {self.refused_message()}\n"))
         self.assertNotIn("review round", out)
         self.assertFalse(dump.exists())
         self.assertEqual(self.ledger_bytes(), before)
@@ -693,7 +693,7 @@ class AutoWrapupTest(CappedCase):
         with reservation_lock(self.repo), mock.patch.object(reservations, "LOCK_WAIT_SECONDS", 0.2):
             code, _, err = self.cli("wrapup", "--auto", "--json")
         self.assertEqual(code, 1)
-        self.assertIn("ratchet: error: another process is counting automatic reviews", err)
+        self.assertIn("house-rules: error: another process is counting automatic reviews", err)
         self.assertEqual((self.claude_calls(), self.book_bytes()), ([], before))
 
     def test_a_lock_the_file_system_refuses_stops_the_review_with_a_named_error_and_no_traceback(self) -> None:
@@ -702,7 +702,7 @@ class AutoWrapupTest(CappedCase):
         with mock.patch("fcntl.flock", side_effect=OSError(errno.ENOLCK, os.strerror(errno.ENOLCK))):
             code, _, err = self.cli("wrapup", "--auto", "--json")
         self.assertEqual(code, 1)
-        self.assertIn(f"ratchet: error: cannot lock {self.repo / LOCK_NAME}: [Errno {errno.ENOLCK}] {os.strerror(errno.ENOLCK)}", err)
+        self.assertIn(f"house-rules: error: cannot lock {self.repo / LOCK_NAME}: [Errno {errno.ENOLCK}] {os.strerror(errno.ENOLCK)}", err)
         self.assertNotIn("Traceback", err)
         self.assertEqual((self.claude_calls(), self.book_bytes()), ([], before))
 
@@ -741,7 +741,7 @@ class FailedReviewTest(CappedCase):
         self.retry_is_refused()
 
     def test_a_review_that_times_out_counts_and_the_retry_is_refused(self) -> None:
-        with mock.patch("ratchet.review.TIMEOUT_SECONDS", 0.5):
+        with mock.patch("house_rules.review.TIMEOUT_SECONDS", 0.5):
             err = self.fails(self.claude_that("exec sleep 30\n"))
         self.assertIn("did not finish within 0.5s", err)
         self.assertEqual(len(book_entries(self.repo)), 3)
@@ -855,7 +855,7 @@ class NoSlotTest(test_review_refusal.RefusalCase):
 
     def test_a_dry_run_takes_no_slot_and_makes_no_state_directory(self) -> None:
         self.assertIsNone(self.measure("--auto")["would_refuse"])
-        self.assertFalse((self.repo / ".ratchet").exists())
+        self.assertFalse((self.repo / ".house-rules").exists())
 
     def test_a_wrapup_and_a_review_without_auto_take_no_slot(self) -> None:
         self.assertEqual(self.wrap()["status"], "reviewed")
@@ -887,7 +887,7 @@ class LinkedWorktreeCapTest(CappedCase):
         code, out, err = self.cli("wrapup", "--json", "--auto", "--dry-run", "--repo", str(linked), with_repo=False)
         self.assertEqual(code, 0, err)
         self.assertEqual(json.loads(out)["would_refuse"]["kind"], REFUSE_DAILY_CAP)
-        self.assertFalse((linked / ".ratchet").exists())
+        self.assertFalse((linked / ".house-rules").exists())
 
     def test_a_slot_taken_in_a_linked_worktree_is_in_the_main_worktrees_book_for_that_worktree(self) -> None:
         self.set_limit(3)
@@ -896,7 +896,7 @@ class LinkedWorktreeCapTest(CappedCase):
         self.assertEqual(code, 0, err)
         last = book_entries(self.repo)[-1]
         self.assertEqual((last["kind"], last["by"], last["worktree"]), ("reserve", "wrapup", str(linked)))
-        self.assertFalse((linked / ".ratchet").exists())
+        self.assertFalse((linked / ".house-rules").exists())
 
     def test_a_reservation_of_the_hook_for_a_linked_worktree_is_used_by_a_wrapup_there_and_not_by_the_main_one(self) -> None:
         linked = self.linked_worktree()

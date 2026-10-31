@@ -1,4 +1,4 @@
-"""A review that would be refused, known beforehand: `review_refusal`, what `ratchet review` and `wrapup --dry-run` make of it,
+"""A review that would be refused, known beforehand: `review_refusal`, what `house-rules review` and `wrapup --dry-run` make of it,
 and the marker the review's claude process carries.
 
 Nothing here runs the real claude: a command that must exist is an executable fake (some are never run at all), and one that must
@@ -18,18 +18,18 @@ import test_wrapup
 from support import RepoCase, git, review_finding, review_round
 from test_wrapup import numbered, review_text
 
-from ratchet.config import load_config
-from ratchet.errors import DailyCapReached, RatchetError, RoundCapReached, RoundKeyUnavailable
-from ratchet.ledger import read_events
-from ratchet.review import (
+from house_rules.config import load_config
+from house_rules.errors import DailyCapReached, HouseRulesError, RoundCapReached, RoundKeyUnavailable
+from house_rules.ledger import read_events
+from house_rules.review import (
     REFUSE_CLAUDE, REFUSE_DAILY_CAP, REFUSE_ROUND_CAP, REFUSE_ROUND_KEY, REFUSE_RULES, REVIEW_CHILD_ENV, Refusal, review_refusal,
     round_key, run_claude,
 )
-from ratchet.rules import load_rules
+from house_rules.rules import load_rules
 
 REQUIRE_CLAUDE_MESSAGE = ("`{command}` not found on PATH; install Claude Code, or run the review elsewhere "
                           "and pass its saved output with --from-file FILE")
-WRAPUP_CAP_NOTE = "ratchet wrapup has no --over-cap: `ratchet review --over-cap` runs one more round, recorded"
+WRAPUP_CAP_NOTE = "house-rules wrapup has no --over-cap: `house-rules review --over-cap` runs one more round, recorded"
 
 
 def dump_env_claude(directory: Path, dump: Path) -> Path:
@@ -49,7 +49,7 @@ def dump_env_claude(directory: Path, dump: Path) -> Path:
 
 
 class RefusalCase(test_wrapup.WrapupCase):
-    """A repo on `main` with rules and one commit, and a claude that exists. `config` is what `.ratchet.json` holds besides the rules."""
+    """A repo on `main` with rules and one commit, and a claude that exists. `config` is what `.house-rules.json` holds besides the rules."""
 
     config: dict = {}
 
@@ -60,8 +60,8 @@ class RefusalCase(test_wrapup.WrapupCase):
         self.use(self.claude)
 
     def use(self, command: object) -> None:
-        """RATCHET_CLAUDE_CMD for the rest of the test."""
-        patcher = mock.patch.dict(os.environ, {"RATCHET_CLAUDE_CMD": str(command)})
+        """HOUSE_RULES_CLAUDE_CMD for the rest of the test."""
+        patcher = mock.patch.dict(os.environ, {"HOUSE_RULES_CLAUDE_CMD": str(command)})
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -74,7 +74,7 @@ class RefusalCase(test_wrapup.WrapupCase):
         return round_key(self.repo, None, None)
 
     def record_rounds(self, count: int, key: str | None = None, prefix: str = "past") -> str:
-        """`count` review rounds of a change already in the ledger. Their run ids are not `r<k>`, the id the next `ratchet review`
+        """`count` review rounds of a change already in the ledger. Their run ids are not `r<k>`, the id the next `house-rules review`
         picks for itself (no finding or saved review counts a run here): a recorded id stops that review with "already recorded",
         before the cap is looked at."""
         key = key or self.key()
@@ -92,7 +92,7 @@ class RefusalCase(test_wrapup.WrapupCase):
     def rules_message(self) -> str:
         """What `load_rules` says when the rules file is gone (the file is removed here)."""
         (self.repo / "rules.md").unlink()
-        with self.assertRaises(RatchetError) as caught:
+        with self.assertRaises(HouseRulesError) as caught:
             load_rules(load_config(self.repo, None, None, self.repo))
         return str(caught.exception)
 
@@ -142,7 +142,7 @@ class ForeseenKindsTest(RefusalCase):
         key = self.record_rounds(3)
         self.append_raw(review_finding("A-1", run="A"), review_finding("A-2", run="A", line=11))
         self.assertEqual(self.refusal(), Refusal(
-            REFUSE_ROUND_CAP, key, f"round cap reached for {key}: 3/3 rounds used; 2 findings still open (ratchet count). "
+            REFUSE_ROUND_CAP, key, f"round cap reached for {key}: 3/3 rounds used; 2 findings still open (house-rules count). "
             "Fix blockers, let the rest go to distill, or rerun with --over-cap (recorded)."))
 
     def test_a_round_below_the_cap_is_not_refused(self) -> None:
@@ -195,11 +195,11 @@ class ForeseenKindsTest(RefusalCase):
 
     def test_without_the_variable_it_is_claude_on_the_path_that_is_looked_for(self) -> None:
         with mock.patch.dict(os.environ):
-            del os.environ["RATCHET_CLAUDE_CMD"]
-            with mock.patch("ratchet.review.shutil.which", return_value=None) as which:
+            del os.environ["HOUSE_RULES_CLAUDE_CMD"]
+            with mock.patch("house_rules.review.shutil.which", return_value=None) as which:
                 refusal = self.refusal()
             which.assert_called_once_with("claude")
-            with mock.patch("ratchet.review.shutil.which", return_value="/somewhere/claude"):
+            with mock.patch("house_rules.review.shutil.which", return_value="/somewhere/claude"):
                 self.assertIsNone(self.refusal())
         self.assertEqual(refusal, Refusal(REFUSE_CLAUDE, self.key(), REQUIRE_CLAUDE_MESSAGE.format(command="claude")))
 
@@ -213,7 +213,7 @@ class ForeseenKindsTest(RefusalCase):
 
 
 class ForeseenOrderTest(RefusalCase):
-    """The checks run in the order `ratchet review` makes them, so the first thing wrong is the one named."""
+    """The checks run in the order `house-rules review` makes them, so the first thing wrong is the one named."""
 
     def test_broken_rules_come_before_a_detached_head(self) -> None:
         self.rules_message()
@@ -261,15 +261,15 @@ class RefusalErrorTest(unittest.TestCase):
 
 
 class ReviewUsesItTest(RefusalCase):
-    """`ratchet review` refuses with the very words and exit code `review_refusal` gives, and runs nothing."""
+    """`house-rules review` refuses with the very words and exit code `review_refusal` gives, and runs nothing."""
 
     def assert_refused_as_foreseen(self, expected_code: int) -> Refusal:
         refusal = self.refusal()
         before = self.ledger_bytes()
         code, out, err = self.cli("review")
-        self.assertEqual((code, out, err), (expected_code, "", f"ratchet: error: {refusal.message}\n"))  # no "review round N/M" line first
+        self.assertEqual((code, out, err), (expected_code, "", f"house-rules: error: {refusal.message}\n"))  # no "review round N/M" line first
         self.assertEqual(self.ledger_bytes(), before)
-        self.assertFalse((self.repo / ".ratchet").exists())
+        self.assertFalse((self.repo / ".house-rules").exists())
         self.assertEqual(self.claude_calls(), [])
         return refusal
 
@@ -347,7 +347,7 @@ class ReviewDryRunTest(RefusalCase):
     def test_a_dry_run_without_rules_is_stopped_as_a_real_run_is(self) -> None:
         message = self.rules_message()
         code, out, err = self.cli("review", "--dry-run")
-        self.assertEqual((code, err), (1, f"ratchet: error: {message}\n"))
+        self.assertEqual((code, err), (1, f"house-rules: error: {message}\n"))
         self.assertNotIn("would be refused", out)
 
 
@@ -448,7 +448,7 @@ class WrapupForeseesTest(RefusalCase):
         missing = self.missing_claude()
         message = self.measure()["would_refuse"]["message"]
         code, _, err = self.cli("wrapup")
-        self.assertEqual((code, err), (1, f"ratchet: error: {message}\n"))
+        self.assertEqual((code, err), (1, f"house-rules: error: {message}\n"))
         self.assertIn(str(missing), message)
         self.assertEqual(self.review_runs(), [])
 
@@ -458,12 +458,12 @@ class WrapupForeseesTest(RefusalCase):
         self.measure()
         self.cli("wrapup", "--dry-run")
         self.assertEqual(self.ledger_bytes(), before)
-        self.assertFalse((self.repo / ".ratchet").exists())
+        self.assertFalse((self.repo / ".house-rules").exists())
         self.assertEqual(self.claude_calls(), [])
 
 
 class ChildMarkerTest(RepoCase):
-    """The claude process of a review is marked, so a hook running inside it knows it is ratchet's own review."""
+    """The claude process of a review is marked, so a hook running inside it knows it is the tool's own review."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -477,14 +477,14 @@ class ChildMarkerTest(RepoCase):
         self.assertEqual(run_claude([str(self.script), "-p", "/code-review high"], self.tmp), review_text())
         (call,) = self.dumped()
         self.assertEqual(call["env"][REVIEW_CHILD_ENV], "1")
-        self.assertEqual(REVIEW_CHILD_ENV, "RATCHET_REVIEW_CHILD")
+        self.assertEqual(REVIEW_CHILD_ENV, "HOUSE_RULES_REVIEW_CHILD")
 
     def test_the_rest_of_the_environment_is_unchanged(self) -> None:
-        with mock.patch.dict(os.environ, {"RATCHET_TEST_KEPT": "as it was"}):
+        with mock.patch.dict(os.environ, {"HOUSE_RULES_TEST_KEPT": "as it was"}):
             path = os.environ["PATH"]
             run_claude([str(self.script), "-p", "x"], self.tmp)
         (call,) = self.dumped()
-        self.assertEqual((call["env"]["RATCHET_TEST_KEPT"], call["env"]["PATH"]), ("as it was", path))
+        self.assertEqual((call["env"]["HOUSE_RULES_TEST_KEPT"], call["env"]["PATH"]), ("as it was", path))
 
     def test_the_marker_stays_out_of_this_process(self) -> None:
         with mock.patch.dict(os.environ):
@@ -515,7 +515,7 @@ class RunsMarkedTest(RefusalCase):
         calls = [json.loads(line) for line in self.dump.read_text(encoding="utf-8").splitlines()]
         return [call for call in calls if "-p" in call["argv"]]
 
-    def test_ratchet_review_marks_the_claude_it_runs(self) -> None:
+    def test_house_rules_review_marks_the_claude_it_runs(self) -> None:
         self.cli_ok("review", "--run", "R1")
         (review,) = self.reviews()
         self.assertEqual((review["argv"], review["env"][REVIEW_CHILD_ENV]), (["-p", "/code-review high"], "1"))

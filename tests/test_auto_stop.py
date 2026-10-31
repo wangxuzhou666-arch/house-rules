@@ -1,6 +1,6 @@
-"""`ratchet auto stop`: the plugin's Stop hook judges the commits the git hook noted and asks Claude for the wrap-up when it is due.
+"""`house-rules auto stop`: the plugin's Stop hook judges the commits the git hook noted and asks Claude for the wrap-up when it is due.
 
-The commits are real: a copy of a repo `ratchet init` set up takes `git commit`s with the session id in their environment, hooks and
+The commits are real: a copy of a repo `house-rules init` set up takes `git commit`s with the session id in their environment, hooks and
 all, in the main worktree and in a linked one (`git -C`). The hook is run as Claude Code runs it: a process with the Stop input on
 stdin. No test reaches the real claude: the wrap-ups that run use an executable fake.
 """
@@ -28,25 +28,25 @@ import test_wrapup
 from support import _GIT_ENV, REPO_ROOT, book_entries, book_lines, git, plant_book, review_round
 from test_wrapup import numbered, review_text
 
-from ratchet import auto, auto_stop
-from ratchet.auto import PendingCommit
-from ratchet.cli import main
-from ratchet.hooks import _PYTHON_OK_CHECK
-from ratchet.reservations import BOOK_NAME, BY_HOOK, BY_WRAPUP, LOCK_NAME, reservation_lock
-from ratchet.review import Refusal, round_key
-from ratchet.start_point import START_POINTS_NAME
-from ratchet.wrapup import (
+from house_rules import auto, auto_stop
+from house_rules.auto import PendingCommit
+from house_rules.cli import main
+from house_rules.hooks import _PYTHON_OK_CHECK
+from house_rules.reservations import BOOK_NAME, BY_HOOK, BY_WRAPUP, LOCK_NAME, reservation_lock
+from house_rules.review import Refusal, round_key
+from house_rules.start_point import START_POINTS_NAME
+from house_rules.wrapup import (
     BASE_FLAG, BASE_HEAD, BASE_LAST_REVIEW, BASE_LAST_REVIEW_TREE, BASE_MERGE_BASE, BASE_START_POINT, Base, Changes, Thresholds, WrapupPlan,
 )
 
 SESSION = "0a1b2c3d-4e5f-6789-abcd-ef0123456789"
 OTHER_SESSION = "f0e1d2c3-b4a5-6789-0123-456789abcdef"
-BIN = REPO_ROOT / "bin" / "ratchet"
+BIN = REPO_ROOT / "bin" / "house-rules"
 RUN_SH = REPO_ROOT / "hooks" / "run.sh"
 HOOKS_JSON = REPO_ROOT / "hooks" / "hooks.json"
 TEMPLATE: list[Path] = []
 HOOK_LOG_LINE = r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00 auto stop: "
-FAST_EXIT_CPU_SECONDS = 0.3  # a bin/ratchet start costs 0.07 s of CPU here; the budget of the hook is about 0.1 s of wall time
+FAST_EXIT_CPU_SECONDS = 0.3  # a bin/house-rules start costs 0.07 s of CPU here; the budget of the hook is about 0.1 s of wall time
 FORK = "where this branch forked from main"  # what a count on a branch of main starts from, as the line says it
 START = "the start point recorded for main"  # and on main itself, while no review exists
 HOUR, DAY = timedelta(hours=1), timedelta(days=1)
@@ -54,7 +54,7 @@ OTHER_CHANGE = "other@0123456789ab"  # not the branch a test works on, so these 
 
 
 def setUpModule() -> None:
-    """One repo that `ratchet init` set up and committed; each test works on a copy, as init takes most of a second."""
+    """One repo that `house-rules init` set up and committed; each test works on a copy, as init takes most of a second."""
     holder = tempfile.TemporaryDirectory()
     unittest.addModuleCleanup(holder.cleanup)
     repo = Path(os.path.realpath(holder.name)) / "demo-repo"
@@ -66,7 +66,7 @@ def setUpModule() -> None:
     if code != 0:
         raise AssertionError(f"init failed: {err.getvalue()}")
     git(repo, "add", "-A")
-    git(repo, "-c", "commit.gpgsign=false", "commit", "-q", "--no-verify", "-m", "set up ratchet")  # no session: nothing noted
+    git(repo, "-c", "commit.gpgsign=false", "commit", "-q", "--no-verify", "-m", "set up house-rules")  # no session: nothing noted
     TEMPLATE.append(repo)
 
 
@@ -85,13 +85,13 @@ def task(kind: str, **fields: object) -> dict:
 def due_line(worktree: Path, lines: int = 250, files: int = 1, since: str = FORK) -> str:
     """The line the hook gives Claude for a worktree that is due, at the default thresholds. `since` is what the count started from,
     in the words of the base: where the branch forked from main, unless a test says otherwise."""
-    return (f"review-ratchet: {worktree} has {lines} changed line(s) in {files} file(s) since {since}, past the wrap-up "
-            f"threshold (200 lines or 5 files). Run the automatic wrap-up now: /review-ratchet:wrapup auto {worktree} "
-            f"(Skill tool: review-ratchet:wrapup, args: auto {worktree}; equivalent: ratchet wrapup --repo {worktree} --auto).")
+    return (f"house-rules: {worktree} has {lines} changed line(s) in {files} file(s) since {since}, past the wrap-up "
+            f"threshold (200 lines or 5 files). Run the automatic wrap-up now: /house-rules:wrapup auto {worktree} "
+            f"(Skill tool: house-rules:wrapup, args: auto {worktree}; equivalent: house-rules wrapup --repo {worktree} --auto).")
 
 
 def refusal_line(worktree: Path, message: str) -> str:
-    return f"review-ratchet: the wrap-up review of {worktree} is due but would be refused: {message}"
+    return f"house-rules: the wrap-up review of {worktree} is due but would be refused: {message}"
 
 
 def read_lines(path: Path) -> list[dict]:
@@ -124,7 +124,7 @@ class StopCase(test_wrapup.WrapupCase):
         forks from, so that it is not part of the work."""
         if config:
             self.set_config(**config)
-            git(self.repo, "add", ".ratchet.json")
+            git(self.repo, "add", ".house-rules.json")
             git(self.repo, "-c", "commit.gpgsign=false", "commit", "-q", "--no-verify", "-m", "configure")
         git(self.repo, "checkout", "-q", "-b", "feature")
 
@@ -159,7 +159,7 @@ class StopCase(test_wrapup.WrapupCase):
 
     def set_config(self, root: Path | None = None, **changes: object) -> None:
         """Change keys of the config on disk, uncommitted."""
-        path = (root or self.repo) / ".ratchet.json"
+        path = (root or self.repo) / ".house-rules.json"
         path.write_text(json.dumps({**json.loads(path.read_text(encoding="utf-8")), **changes}), encoding="utf-8")
 
     def clear_book(self) -> None:
@@ -176,7 +176,7 @@ class StopCase(test_wrapup.WrapupCase):
     # ---- the hook -------------------------------------------------------------------------------------------------
 
     def hook_env(self, overrides: dict[str, str | None] | None = None) -> dict[str, str]:
-        env = {**os.environ, auto.STATE_DIR_ENV: str(self.state), "RATCHET_CLAUDE_CMD": str(self.claude)}
+        env = {**os.environ, auto.STATE_DIR_ENV: str(self.state), "HOUSE_RULES_CLAUDE_CMD": str(self.claude)}
         for name, value in (overrides or {}).items():
             if value is None:
                 env.pop(name, None)
@@ -185,7 +185,7 @@ class StopCase(test_wrapup.WrapupCase):
         return env
 
     def stop(self, text: str | None = None, *, env: dict[str, str | None] | None = None, **fields: object) -> tuple[int, str, str]:
-        """`ratchet auto stop` as a process, started from a directory that is no repo, with the Stop input `fields` make (or `text`)."""
+        """`house-rules auto stop` as a process, started from a directory that is no repo, with the Stop input `fields` make (or `text`)."""
         proc = subprocess.run([sys.executable, str(BIN), "auto", "stop"], input=stop_input(**fields) if text is None else text,
                               cwd=self.tmp, capture_output=True, text=True, env=self.hook_env(env), timeout=120)
         return proc.returncode, proc.stdout, proc.stderr
@@ -210,8 +210,8 @@ class StopCase(test_wrapup.WrapupCase):
         """The hook asked for the wrap-up of exactly one worktree, whatever the counts."""
         [line] = self.context_lines(answer)
         top = worktree or self.repo
-        self.assertTrue(line.startswith(f"review-ratchet: {top} has "), line)
-        self.assertIn(f"/review-ratchet:wrapup auto {top} ", line)
+        self.assertTrue(line.startswith(f"house-rules: {top} has "), line)
+        self.assertIn(f"/house-rules:wrapup auto {top} ", line)
 
     # ---- what it leaves -------------------------------------------------------------------------------------------
 
@@ -254,14 +254,14 @@ class FastExitTest(StopCase):
         self.commit_work()
 
     def test_a_review_child_is_left_alone_and_its_pending_file_stays(self) -> None:
-        self.assert_silent(env={"RATCHET_REVIEW_CHILD": "1"})
+        self.assert_silent(env={"HOUSE_RULES_REVIEW_CHILD": "1"})
         self.assert_held_back_and_then_due()
 
     def test_only_a_review_child_marker_of_exactly_1_silences_it(self) -> None:
         for value in ("0", "", "true"):
             with self.subTest(value=value):
                 self.clear_book()
-                self.assert_asks_for(self.answer(env={"RATCHET_REVIEW_CHILD": value}))
+                self.assert_asks_for(self.answer(env={"HOUSE_RULES_REVIEW_CHILD": value}))
                 self.commit_work()
 
     def test_a_stop_that_continues_after_a_stop_hook_is_left_alone_and_its_pending_file_stays(self) -> None:
@@ -273,8 +273,8 @@ class FastExitTest(StopCase):
         self.assertTrue(self.pending_file().exists())
         for value in ("0", "", "true"):  # only a 1 is the pipeline's say-so, as for the review child marker
             with self.subTest(headless_ok=value):
-                self.assert_silent(env={"CLAUDE_CODE_SESSION_ATTENDED": "0", "RATCHET_AUTO_HEADLESS": value})
-        self.assert_asks_for(self.answer(env={"CLAUDE_CODE_SESSION_ATTENDED": "0", "RATCHET_AUTO_HEADLESS": "1"}))
+                self.assert_silent(env={"CLAUDE_CODE_SESSION_ATTENDED": "0", "HOUSE_RULES_AUTO_HEADLESS": value})
+        self.assert_asks_for(self.answer(env={"CLAUDE_CODE_SESSION_ATTENDED": "0", "HOUSE_RULES_AUTO_HEADLESS": "1"}))
 
     def test_an_attended_session_is_judged_whether_the_variable_says_so_or_is_missing_or_odd(self) -> None:
         for value in ("1", None, "yes", ""):
@@ -333,7 +333,7 @@ class NothingNotedCostsNothingTest(StopCase):
 
     def test_no_process_is_started_before_the_pending_file_has_been_found(self) -> None:
         self.plant()
-        cases = [("a review child", {"RATCHET_REVIEW_CHILD": "1"}, stop_input()), ("headless", {"CLAUDE_CODE_SESSION_ATTENDED": "0"}, stop_input()),
+        cases = [("a review child", {"HOUSE_RULES_REVIEW_CHILD": "1"}, stop_input()), ("headless", {"CLAUDE_CODE_SESSION_ATTENDED": "0"}, stop_input()),
                  ("active", {}, stop_input(stop_hook_active=True)), ("no input", {}, ""), ("another session", {}, stop_input(session_id=OTHER_SESSION))]
         for label, env, text in cases:
             with self.subTest(label), mock.patch.dict(os.environ, env), mock.patch("subprocess.run", side_effect=AssertionError("git was started")), \
@@ -344,9 +344,9 @@ class NothingNotedCostsNothingTest(StopCase):
 
     def test_what_a_session_with_nothing_noted_imports_stays_small(self) -> None:
         script = ("import io, sys; sys.path.insert(0, sys.argv[1])\n"
-                  "from ratchet import auto_stop\n"
+                  "from house_rules import auto_stop\n"
                   "auto_stop.stop_hook(io.StringIO('{\"session_id\": \"s1\"}'))\n"
-                  "heavy = {'ratchet.cli', 'ratchet.wrapup', 'ratchet.onboard', 'ratchet.proposals', 'ratchet.state_tree'}\n"
+                  "heavy = {'house_rules.cli', 'house_rules.wrapup', 'house_rules.onboard', 'house_rules.proposals', 'house_rules.state_tree'}\n"
                   "print(sorted(heavy & set(sys.modules)))\n")
         proc = subprocess.run([sys.executable, "-c", script, str(REPO_ROOT)], capture_output=True, text=True, env=self.hook_env())
         self.assertEqual((proc.returncode, proc.stdout.strip(), proc.stderr), (0, "[]", ""))
@@ -376,17 +376,17 @@ class DeferralTest(StopCase):
                 self.assertEqual(self.claimed_files(), [])
         self.assert_held_back_and_then_due(background_tasks=[])
 
-    def test_a_shell_running_a_ratchet_wrapup_or_review_holds_it_back(self) -> None:
-        commands = ("ratchet wrapup --repo /x --json", "python3.12 /p/bin/ratchet review --level high", "/plugin/bin/ratchet wrapup",
-                    "cd /x && ratchet wrapup --json 2>&1")
+    def test_a_shell_running_a_house_rules_wrapup_or_review_holds_it_back(self) -> None:
+        commands = ("house-rules wrapup --repo /x --json", "python3.12 /p/bin/house-rules review --level high", "/plugin/bin/house-rules wrapup",
+                    "cd /x && house-rules wrapup --json 2>&1")
         for command in commands:
             with self.subTest(command=command):
                 self.assert_silent(background_tasks=[task("shell", command=command)])
-        self.assert_held_back_and_then_due(background_tasks=[task("shell", command="ratchet count --by-rule")])
+        self.assert_held_back_and_then_due(background_tasks=[task("shell", command="house-rules count --by-rule")])
 
     def test_other_shells_monitors_and_kinds_never_hold_it_back(self) -> None:
-        for background in (task("shell", command="npm run dev"), task("shell", command="ratchet label r1-1 --outcome dismissed"),
-                           task("shell", command="myratchet wrapup --repo /x"), task("shell", command="ratchet reviewer"),
+        for background in (task("shell", command="npm run dev"), task("shell", command="house-rules label r1-1 --outcome dismissed"),
+                           task("shell", command="myhouse-rules wrapup --repo /x"), task("shell", command="house-rules reviewer"),
                            task("shell"), task("monitor"), task("cloud session"), task("MCP task")):
             with self.subTest(background=background):
                 self.clear_book()
@@ -443,7 +443,7 @@ class DueTest(StopCase):
         self.commit_work()
         [line] = self.context_lines(self.answer())
         for part in ("250 changed line(s) in 1 file(s)", f"since {FORK}, past", "200 lines or 5 files", str(self.repo),
-                     f"/review-ratchet:wrapup auto {self.repo}", f"args: auto {self.repo}", f"ratchet wrapup --repo {self.repo} --auto"):
+                     f"/house-rules:wrapup auto {self.repo}", f"args: auto {self.repo}", f"house-rules wrapup --repo {self.repo} --auto"):
             self.assertIn(part, line)
         self.assertNotIn("last review", line)  # this branch has none: the line says what the count really started from
 
@@ -461,10 +461,10 @@ class DueTest(StopCase):
         self.commit_work(spaced)
         quoted = shlex.quote(str(spaced))
         [line] = self.context_lines(self.answer())
-        self.assertIn(f"review-ratchet: {quoted} has 250 changed line(s)", line)
-        self.assertIn(f"/review-ratchet:wrapup auto {quoted} ", line)
+        self.assertIn(f"house-rules: {quoted} has 250 changed line(s)", line)
+        self.assertIn(f"/house-rules:wrapup auto {quoted} ", line)
         self.assertIn(f"args: auto {quoted};", line)
-        self.assertTrue(line.endswith(f"ratchet wrapup --repo {quoted} --auto)."))
+        self.assertTrue(line.endswith(f"house-rules wrapup --repo {quoted} --auto)."))
 
     def test_the_pending_file_is_consumed_and_the_claimed_one_is_deleted(self) -> None:
         self.begin()
@@ -534,7 +534,7 @@ class DueTest(StopCase):
     def test_a_repo_whose_config_lost_the_key_is_dropped_too(self) -> None:
         self.begin()
         self.commit_work()
-        path = self.repo / ".ratchet.json"
+        path = self.repo / ".house-rules.json"
         config = json.loads(path.read_text(encoding="utf-8"))
         del config["wrapup_auto"]
         path.write_text(json.dumps(config), encoding="utf-8")
@@ -553,7 +553,7 @@ class DueTest(StopCase):
 # ---- what the line says the count started from --------------------------------------------------------------------
 
 class SinceTest(StopCase):
-    """The line says where the count started in the words `ratchet wrapup` gives the base, whichever rule chose it. The fork point, the
+    """The line says where the count started in the words `house-rules wrapup` gives the base, whichever rule chose it. The fork point, the
     start point and a review as the base are the real runs of DueTest, StartPointTest and BaselineMovesTest; the rest, which no
     plain run reaches, is built by hand here."""
 
@@ -588,7 +588,7 @@ class SinceTest(StopCase):
 class StartPointTest(StopCase):
     """On the default branch the fork point is HEAD, so the commits a session makes there count only from a start point, and the Stop
     records one when there is none: the parent of the earliest commit it was told about. The work is on main unless a test leaves it.
-    The repo init set up starts from a root commit, `set up ratchet`, that was made outside any session, so the hook never noted it."""
+    The repo init set up starts from a root commit, `set up house-rules`, that was made outside any session, so the hook never noted it."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -762,7 +762,7 @@ class StartPointTest(StopCase):
 
     def test_the_start_point_is_recorded_for_the_configured_default_branch(self) -> None:
         self.set_config(default_branch="develop")
-        git(self.repo, "add", ".ratchet.json")
+        git(self.repo, "add", ".house-rules.json")
         configured = self.commit_unnoted()
         git(self.repo, "checkout", "-q", "-b", "develop")
         self.commit_work()
@@ -793,11 +793,11 @@ class StartPointTest(StopCase):
         damaged.write_text("{not json", encoding="utf-8")
         self.assertEqual(self.context_lines(self.answer()), [due_line(other)])
         [line] = self.hook_log()
-        self.assertRegex(line, HOOK_LOG_LINE + re.escape(str(self.repo)) + r": RatchetError: .*start-points\.json")
+        self.assertRegex(line, HOOK_LOG_LINE + re.escape(str(self.repo)) + r": HouseRulesError: .*start-points\.json")
 
     # ---- shared by the worktrees ----------------------------------------------------------------------------------
 
-    def test_a_commit_in_a_linked_worktree_on_main_records_the_start_in_the_main_worktrees_ratchet_dir(self) -> None:
+    def test_a_commit_in_a_linked_worktree_on_main_records_the_start_in_the_main_worktrees_house_rules_dir(self) -> None:
         linked = self.linked_on_main()
         self.commit_work(linked)
         self.assertEqual(self.context_lines(self.answer()), [due_line(linked, since=START)])
@@ -831,8 +831,8 @@ class StartPointTest(StopCase):
 
 class BaselineMovesTest(StopCase):
     def wrap_up(self, *argv: str, with_repo: bool = True) -> dict:
-        """`ratchet wrapup --json` with the fake claude: the object it printed."""
-        with mock.patch.dict(os.environ, {"RATCHET_CLAUDE_CMD": str(self.claude)}):
+        """`house-rules wrapup --json` with the fake claude: the object it printed."""
+        with mock.patch.dict(os.environ, {"HOUSE_RULES_CLAUDE_CMD": str(self.claude)}):
             code, out, err = self.cli("wrapup", "--json", *argv, with_repo=with_repo)
         self.assertEqual(code, 0, err)
         return json.loads(out)
@@ -876,7 +876,7 @@ class RefusalTest(StopCase):
         self.assertEqual(list(answer), ["systemMessage"])
         [line] = answer["systemMessage"].split("\n")
         self.assertTrue(line.startswith(refusal_line(self.repo, f"round cap reached for {key}: 1/1 rounds used;")), line)
-        self.assertTrue(line.endswith("ratchet wrapup has no --over-cap: `ratchet review --over-cap` runs one more round, recorded"), line)
+        self.assertTrue(line.endswith("house-rules wrapup has no --over-cap: `house-rules review --over-cap` runs one more round, recorded"), line)
 
     def test_the_same_refusal_after_another_commit_on_the_capped_branch_is_silent(self) -> None:
         self.begin(max_review_rounds=1)
@@ -905,10 +905,10 @@ class RefusalTest(StopCase):
         self.set_config(max_review_rounds=3)
         self.commit_work(lines=10)
         missing = self.tmp / "no-such-claude"
-        self.assertIn(f"`{missing}` not found on PATH", self.answer(env={"RATCHET_CLAUDE_CMD": str(missing)})["systemMessage"])
+        self.assertIn(f"`{missing}` not found on PATH", self.answer(env={"HOUSE_RULES_CLAUDE_CMD": str(missing)})["systemMessage"])
         self.assertEqual(len(self.announced()), 2)
         self.commit_work(lines=10)
-        self.assert_silent(env={"RATCHET_CLAUDE_CMD": str(missing)})
+        self.assert_silent(env={"HOUSE_RULES_CLAUDE_CMD": str(missing)})
 
     def test_a_refusal_without_a_round_key_is_told_by_its_message(self) -> None:
         self.begin()
@@ -1067,8 +1067,8 @@ class RefusalTest(StopCase):
 # ---- the daily cap on automatic reviews ---------------------------------------------------------------------------
 
 class DailyCapTest(StopCase):
-    """The review the hook asks for runs as `ratchet wrapup --auto`, so the daily cap on automatic reviews decides whether Claude is
-    asked: at the cap the person is told instead, once. Asking takes a slot, a reservation in the book (ratchet/reservations.py), and
+    """The review the hook asks for runs as `house-rules wrapup --auto`, so the daily cap on automatic reviews decides whether Claude is
+    asked: at the cap the person is told instead, once. Asking takes a slot, a reservation in the book (house_rules/reservations.py), and
     every ask takes one of its own. The book is planted with reservations that are hours old, or more than a day old, so that the
     real clock cannot move one across the edge of the 24 hours while a test runs; that edge itself is tested in test_reservations.py."""
 
@@ -1117,7 +1117,7 @@ class DailyCapTest(StopCase):
         self.assertTrue(line.startswith(refusal_line(self.repo, "daily cap reached: 2 automatic review(s) were started or asked for in the "
                                                                 "last 24 hours and wrapup_auto_max_per_day is 2. The next one can run after ")), line)
         self.assertRegex(line, r"after \d{4}-\d\d-\d\dT\d\d:\d\d:\d\d, when the one from " + re.escape(self.local_time(oldest.ts)) + r" leaves that window; ")
-        self.assertTrue(line.endswith("/review-ratchet:wrapup (`ratchet wrapup` without --auto) reviews it now."), line)
+        self.assertTrue(line.endswith("/house-rules:wrapup (`house-rules wrapup` without --auto) reviews it now."), line)
         self.assertEqual(self.claude_calls(), [])
         self.assertEqual(self.book_bytes(), before)
 
@@ -1202,7 +1202,7 @@ class DailyCapTest(StopCase):
         self.set_config(wrapup_auto_max_per_day=0)
         self.assert_silent()
         [line] = self.hook_log()
-        self.assertRegex(line, HOOK_LOG_LINE + re.escape(str(self.repo)) + ": RatchetError: config 'wrapup_auto_max_per_day' must be a positive")
+        self.assertRegex(line, HOOK_LOG_LINE + re.escape(str(self.repo)) + ": HouseRulesError: config 'wrapup_auto_max_per_day' must be a positive")
         self.assertEqual(self.announced(), {})
         self.assert_no_book_and_no_lock()
         self.set_config(wrapup_auto_max_per_day=2)
@@ -1247,7 +1247,7 @@ class DailyCapTest(StopCase):
         self.assert_asks_for(self.answer(), linked)
         [reserved] = book_entries(self.repo)
         self.assertEqual((reserved["by"], reserved["worktree"], reserved["head"]), ("hook", str(linked), git(linked, "rev-parse", "HEAD")))
-        self.assertFalse((linked / ".ratchet").exists())
+        self.assertFalse((linked / ".house-rules").exists())
 
     # ---- what takes no slot ---------------------------------------------------------------------------------------
 
@@ -1271,7 +1271,7 @@ class DailyCapTest(StopCase):
         before = self.book_bytes()
         self.commit_work()
         missing = self.tmp / "no-such-claude"
-        [line] = self.told_lines(self.answer(env={"RATCHET_CLAUDE_CMD": str(missing)}))
+        [line] = self.told_lines(self.answer(env={"HOUSE_RULES_CLAUDE_CMD": str(missing)}))
         self.assertIn(f"`{missing}` not found on PATH", line)
         self.assertNotIn("daily cap", line)
         self.assertEqual(self.book_bytes(), before)
@@ -1326,12 +1326,12 @@ class DailyCapTest(StopCase):
     def test_a_lock_that_stays_held_is_logged_and_the_commits_wait_for_the_stop_after(self) -> None:
         self.begin()
         self.commit_work()
-        with mock.patch.dict(os.environ, {"RATCHET_CLAUDE_CMD": str(self.claude)}), mock.patch("ratchet.reservations.LOCK_WAIT_SECONDS", 0.2), \
+        with mock.patch.dict(os.environ, {"HOUSE_RULES_CLAUDE_CMD": str(self.claude)}), mock.patch("house_rules.reservations.LOCK_WAIT_SECONDS", 0.2), \
                 reservation_lock(self.repo), contextlib.redirect_stdout(io.StringIO()) as out:
             self.assertEqual(auto_stop.stop_hook(io.StringIO(stop_input())), 0)
         self.assertEqual(out.getvalue(), "")  # nobody was asked, and nobody was told
         [line] = self.hook_log()
-        self.assertRegex(line, HOOK_LOG_LINE + re.escape(f"{self.repo}: RatchetError: another process is counting automatic reviews (") + ".*")
+        self.assertRegex(line, HOOK_LOG_LINE + re.escape(f"{self.repo}: HouseRulesError: another process is counting automatic reviews (") + ".*")
         self.assertEqual(self.book_bytes(), None)
         self.assertEqual(len(read_lines(self.pending_file())), 1)  # put back for the Stop after
         self.assert_asks_for(self.answer())
@@ -1341,12 +1341,12 @@ class DailyCapTest(StopCase):
         self.begin()
         self.commit_work()
         refused = OSError(errno.ENOLCK, os.strerror(errno.ENOLCK))
-        with mock.patch.dict(os.environ, {"RATCHET_CLAUDE_CMD": str(self.claude)}), mock.patch("fcntl.flock", side_effect=refused), \
+        with mock.patch.dict(os.environ, {"HOUSE_RULES_CLAUDE_CMD": str(self.claude)}), mock.patch("fcntl.flock", side_effect=refused), \
                 contextlib.redirect_stdout(io.StringIO()) as out:
             self.assertEqual(auto_stop.stop_hook(io.StringIO(stop_input())), 0)
         self.assertEqual(out.getvalue(), "")  # nobody was asked, and nobody was told
         [line] = self.hook_log()
-        self.assertRegex(line, HOOK_LOG_LINE + re.escape(f"{self.repo}: RatchetError: cannot lock {self.repo / LOCK_NAME}: ") + ".*")
+        self.assertRegex(line, HOOK_LOG_LINE + re.escape(f"{self.repo}: HouseRulesError: cannot lock {self.repo / LOCK_NAME}: ") + ".*")
         self.assertEqual(self.book_bytes(), None)
         self.assertEqual(len(read_lines(self.pending_file())), 1)  # put back for the Stop after
         self.assert_asks_for(self.answer())
@@ -1430,10 +1430,10 @@ class FailureTest(StopCase):
         other = self.another_repo()
         self.commit_work(other)
         self.commit_work()
-        (other / ".ratchet.json").write_text("{not json", encoding="utf-8")
+        (other / ".house-rules.json").write_text("{not json", encoding="utf-8")
         self.assertEqual(self.context_lines(self.answer()), [due_line(self.repo)])
         [line] = self.hook_log()
-        self.assertRegex(line, HOOK_LOG_LINE + re.escape(str(other)) + r": RatchetError: ")
+        self.assertRegex(line, HOOK_LOG_LINE + re.escape(str(other)) + r": HouseRulesError: ")
 
     def test_a_damaged_line_in_the_pending_file_does_not_hide_the_commits_around_it(self) -> None:
         self.begin()
@@ -1454,7 +1454,7 @@ class RequeueTest(StopCase):
 
     def break_config(self, root: Path | None = None) -> str:
         """The config of `root` unreadable, as a half-written file is; the text it had."""
-        path = (root or self.repo) / ".ratchet.json"
+        path = (root or self.repo) / ".house-rules.json"
         text = path.read_text(encoding="utf-8")
         path.write_text("{not json", encoding="utf-8")
         return text
@@ -1467,7 +1467,7 @@ class RequeueTest(StopCase):
 
     def stop_that_cannot_put_back(self, error: Exception) -> str:
         """A Stop, run in this process with the fake claude, whose write of the commits it puts back fails with `error`; what it printed."""
-        with mock.patch.dict(os.environ, {"RATCHET_CLAUDE_CMD": str(self.claude)}):
+        with mock.patch.dict(os.environ, {"HOUSE_RULES_CLAUDE_CMD": str(self.claude)}):
             with mock.patch.object(auto_stop, "append_pending", side_effect=error), contextlib.redirect_stdout(io.StringIO()) as out:
                 self.assertEqual(auto_stop.stop_hook(io.StringIO(stop_input())), 0)
         return out.getvalue()
@@ -1482,8 +1482,8 @@ class RequeueTest(StopCase):
             self.assertEqual(self.pending_file().read_text(encoding="utf-8"), noted)
             self.assertEqual(self.claimed_files(), [])
             self.assertEqual(len(self.hook_log()), tries)
-        self.assertRegex(self.hook_log()[0], HOOK_LOG_LINE + re.escape(str(self.repo)) + r": RatchetError: ")
-        (self.repo / ".ratchet.json").write_text(config, encoding="utf-8")  # the failure has passed
+        self.assertRegex(self.hook_log()[0], HOOK_LOG_LINE + re.escape(str(self.repo)) + r": HouseRulesError: ")
+        (self.repo / ".house-rules.json").write_text(config, encoding="utf-8")  # the failure has passed
         self.assertEqual(self.context_lines(self.answer()), [due_line(self.repo)])
         self.assertFalse(self.pending_file().exists())
         self.assertEqual(len(self.hook_log()), 2)
@@ -1608,7 +1608,7 @@ class RunShTest(unittest.TestCase):
         self.tmp = Path(os.path.realpath(tmp.name))
         self.root = self.tmp / "plugin"
         (self.root / "bin").mkdir(parents=True)
-        stub = self.root / "bin" / "ratchet"
+        stub = self.root / "bin" / "house-rules"
         stub.write_text(STUB.format(python=sys.executable), encoding="utf-8")
         stub.chmod(0o755)
         self.bin = self.tmp / "bin"
@@ -1677,9 +1677,9 @@ class RunShTest(unittest.TestCase):
 
     def test_a_usage_error_of_the_tool_is_exit_status_1_with_its_message_kept(self) -> None:
         self.python_on_path("python3.12")
-        proc = self.run_sh("no-such-subcommand", root=REPO_ROOT)  # as a bin/ratchet from before `auto stop` answers `auto stop`: argparse exits 2
+        proc = self.run_sh("no-such-subcommand", root=REPO_ROOT)  # as a bin/house-rules from before `auto stop` answers `auto stop`: argparse exits 2
         self.assertEqual((proc.returncode, proc.stdout), (1, ""))
-        self.assertIn("usage: ratchet", proc.stderr)
+        self.assertIn("usage: house-rules", proc.stderr)
 
     def test_a_machine_without_python_3_10_gets_exit_0_and_no_output_and_the_tool_is_not_run(self) -> None:
         self.program("python3", "exit 1")  # what the python3 that macOS ships (3.9) answers the version test
@@ -1705,7 +1705,7 @@ class RunShTest(unittest.TestCase):
             self.program(older, f'echo old >> {shlex.quote(str(log))}; exit 9')
         proc = self.run_sh("go")
         self.assertEqual(json.loads(proc.stdout)["argv"], ["go"])
-        self.assertEqual(log.read_text(encoding="utf-8").splitlines(), [str(self.root / "bin" / "ratchet")])  # no `-c` test, no older one
+        self.assertEqual(log.read_text(encoding="utf-8").splitlines(), [str(self.root / "bin" / "house-rules")])  # no `-c` test, no older one
 
     def test_each_python_that_names_its_version_from_3_10_to_3_14_is_a_candidate(self) -> None:
         for version in ("3.10", "3.11", "3.12", "3.13", "3.14"):
@@ -1714,18 +1714,18 @@ class RunShTest(unittest.TestCase):
                 self.assertEqual(json.loads(self.run_sh("go").stdout)["argv"], ["go"])
                 (self.bin / f"python{version}").unlink()
 
-    def test_ratchet_py_comes_first_as_in_the_git_hooks_and_one_that_fails_the_test_is_passed_over(self) -> None:
-        proc = self.run_sh("go", env={"RATCHET_PY": sys.executable})  # no python on PATH at all
+    def test_house_rules_py_comes_first_as_in_the_git_hooks_and_one_that_fails_the_test_is_passed_over(self) -> None:
+        proc = self.run_sh("go", env={"HOUSE_RULES_PY": sys.executable})  # no python on PATH at all
         self.assertEqual(json.loads(proc.stdout)["argv"], ["go"])
         self.python_on_path("python3.12")
         bad = self.program("bad", "exit 1")
-        proc = self.run_sh("go", env={"RATCHET_PY": str(bad)})
+        proc = self.run_sh("go", env={"HOUSE_RULES_PY": str(bad)})
         self.assertEqual(json.loads(proc.stdout)["argv"], ["go"])
 
     def test_it_puts_the_git_hooks_version_test_to_a_python_it_cannot_tell_the_version_of(self) -> None:
         self.assertIn(_PYTHON_OK_CHECK, RUN_SH.read_text(encoding="utf-8"))
 
-    def test_a_plugin_without_bin_ratchet_gets_exit_0_and_no_output(self) -> None:
+    def test_a_plugin_without_bin_house_rules_gets_exit_0_and_no_output(self) -> None:
         self.python_on_path("python3.12")
         empty = self.tmp / "empty-plugin"
         empty.mkdir()
@@ -1735,7 +1735,7 @@ class RunShTest(unittest.TestCase):
         self.python_on_path("python3.12")
         proc = self.run_sh("--help", env={"CLAUDE_PLUGIN_ROOT": None, "PATH": f"{self.bin}:/usr/bin:/bin"})
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("usage: ratchet", proc.stdout)
+        self.assertIn("usage: house-rules", proc.stdout)
 
     def test_the_command_of_hooks_json_runs_as_a_hook_runs_it(self) -> None:
         self.python_on_path("python3.12")
@@ -1761,11 +1761,11 @@ class RunShTest(unittest.TestCase):
 
     def test_a_review_child_ends_it_before_python_is_started_but_only_a_value_of_1_does(self) -> None:
         started = self.python_that_tells()
-        self.assert_exits_quietly(self.run_sh("auto", "stop", env={"RATCHET_REVIEW_CHILD": "1", "STUB_EXIT": "5"}))
+        self.assert_exits_quietly(self.run_sh("auto", "stop", env={"HOUSE_RULES_REVIEW_CHILD": "1", "STUB_EXIT": "5"}))
         self.assertFalse(started.exists())
         for value in ("0", ""):
             with self.subTest(value=value):
-                self.assertEqual(json.loads(self.run_sh("auto", "stop", env={"RATCHET_REVIEW_CHILD": value}).stdout)["argv"], ["auto", "stop"])
+                self.assertEqual(json.loads(self.run_sh("auto", "stop", env={"HOUSE_RULES_REVIEW_CHILD": value}).stdout)["argv"], ["auto", "stop"])
 
     def test_no_session_id_ends_it_before_python_is_started(self) -> None:
         started = self.python_that_tells()
@@ -1778,12 +1778,12 @@ class RunShTest(unittest.TestCase):
     def test_it_looks_for_the_note_where_state_dir_of_the_tool_puts_it(self) -> None:
         self.python_on_path("python3.12")
         mine, xdg, home = (str(self.tmp / name) for name in ("mine", "xdg", "home"))
-        unset = {auto.STATE_DIR_ENV: None, auto.XDG_STATE_ENV: None, "HOME": None}  # run_sh sets RATCHET_STATE_DIR; a case has only its own
+        unset = {auto.STATE_DIR_ENV: None, auto.XDG_STATE_ENV: None, "HOME": None}  # run_sh sets HOUSE_RULES_STATE_DIR; a case has only its own
         for label, variables in (
-            ("RATCHET_STATE_DIR beats the others", {auto.STATE_DIR_ENV: mine, auto.XDG_STATE_ENV: xdg, "HOME": home}),
+            ("HOUSE_RULES_STATE_DIR beats the others", {auto.STATE_DIR_ENV: mine, auto.XDG_STATE_ENV: xdg, "HOME": home}),
             ("XDG_STATE_HOME", {auto.XDG_STATE_ENV: xdg, "HOME": home}),
             ("HOME", {"HOME": home}),
-            ("an empty RATCHET_STATE_DIR is unset", {auto.STATE_DIR_ENV: "", auto.XDG_STATE_ENV: xdg, "HOME": home}),
+            ("an empty HOUSE_RULES_STATE_DIR is unset", {auto.STATE_DIR_ENV: "", auto.XDG_STATE_ENV: xdg, "HOME": home}),
             ("an empty XDG_STATE_HOME is unset", {auto.STATE_DIR_ENV: "", auto.XDG_STATE_ENV: "", "HOME": home}),
         ):
             with self.subTest(label):

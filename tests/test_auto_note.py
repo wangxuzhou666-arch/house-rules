@@ -1,6 +1,6 @@
-"""`ratchet auto note`: the git post-commit hook records each commit made inside a Claude Code session in a local pending file.
+"""`house-rules auto note`: the git post-commit hook records each commit made inside a Claude Code session in a local pending file.
 
-The commits are real: a repo `ratchet init` set up (hooks installed the pinned way and the portable way) takes `git commit`s with
+The commits are real: a repo `house-rules init` set up (hooks installed the pinned way and the portable way) takes `git commit`s with
 the session id in their environment, as Claude Code's Bash tool would make them. The cheaper checks run the command in-process.
 """
 import contextlib
@@ -24,16 +24,16 @@ import support  # noqa: F401  (puts the repo root on sys.path, and starts every 
 import test_init
 from support import _GIT_ENV, RepoCase, git
 
-from ratchet import auto
-from ratchet.blocks import HASH_BEGIN, HASH_END
-from ratchet.cli import build_parser, main
-from ratchet.hooks import hook_body
-from ratchet.onboard import EXECUTABLE_PATH
+from house_rules import auto
+from house_rules.blocks import HASH_BEGIN, HASH_END
+from house_rules.cli import build_parser, main
+from house_rules.hooks import hook_body
+from house_rules.onboard import EXECUTABLE_PATH
 
 SESSION = "0a1b2c3d-4e5f-6789-abcd-ef0123456789"
-REVIEW_CHILD = "RATCHET_REVIEW_CHILD"
+REVIEW_CHILD = "HOUSE_RULES_REVIEW_CHILD"
 # What tests/support.py takes out of the environment besides CLAUDE*. Spelled out, so that a name dropped from its list is caught.
-SCRUBBED_NAMES = (REVIEW_CHILD, "RATCHET_AUTO_HEADLESS")
+SCRUBBED_NAMES = (REVIEW_CHILD, "HOUSE_RULES_AUTO_HEADLESS")
 # Not safe as a file name: a path, a parent, a blank, a newline, one character too long.
 UNSAFE_IDS = ("../escape", "..", "has space", "line\nbreak", "x" * 129, "caf\u00e9", "semi;colon")
 HOOK_VARIANTS = {"pinned": None, "portable": ".githooks"}  # name -> core.hooksPath that init is run under
@@ -44,7 +44,7 @@ HOOK_LOG_LINE = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00 auto note: \
 def session_env(state: Path, session: str | None = SESSION, **more: str) -> dict[str, str]:
     """What a commit made by Claude Code's Bash tool carries: the session id, and a state directory of the test's own. The tool and the
     Python are named too, for the portable hook to find them."""
-    env = {auto.STATE_DIR_ENV: str(state), "RATCHET_BIN": str(EXECUTABLE_PATH), "RATCHET_PY": sys.executable, **more}
+    env = {auto.STATE_DIR_ENV: str(state), "HOUSE_RULES_BIN": str(EXECUTABLE_PATH), "HOUSE_RULES_PY": sys.executable, **more}
     if session is not None:
         env[auto.SESSION_ID_ENV] = session
     return env
@@ -75,7 +75,7 @@ def setUpModule() -> None:
         if code != 0:
             raise AssertionError(f"init failed for the {name} template: {err.getvalue()}")
         git(repo, "add", "-A")
-        git(repo, "-c", "commit.gpgsign=false", "commit", "-q", "--no-verify", "-m", "set up ratchet")  # no session: nothing noted
+        git(repo, "-c", "commit.gpgsign=false", "commit", "-q", "--no-verify", "-m", "set up house-rules")  # no session: nothing noted
         TEMPLATES[name] = repo
 
 
@@ -90,18 +90,18 @@ class StateDirTest(unittest.TestCase):
             os.environ.update(env)
             return auto.state_dir()
 
-    def test_ratchet_state_dir_comes_first(self) -> None:
-        self.assertEqual(self.resolve(RATCHET_STATE_DIR="/s/mine", XDG_STATE_HOME="/x"), Path("/s/mine"))
+    def test_house_rules_state_dir_comes_first(self) -> None:
+        self.assertEqual(self.resolve(HOUSE_RULES_STATE_DIR="/s/mine", XDG_STATE_HOME="/x"), Path("/s/mine"))
 
     def test_xdg_state_home_comes_next_with_the_tool_name_under_it(self) -> None:
-        self.assertEqual(self.resolve(XDG_STATE_HOME="/x"), Path("/x/review-ratchet"))
+        self.assertEqual(self.resolve(XDG_STATE_HOME="/x"), Path("/x/house-rules"))
 
     def test_the_default_is_under_home(self) -> None:
-        self.assertEqual(self.resolve(HOME="/h"), Path("/h/.local/state/review-ratchet"))
+        self.assertEqual(self.resolve(HOME="/h"), Path("/h/.local/state/house-rules"))
 
     def test_a_variable_that_is_set_but_empty_counts_as_unset(self) -> None:
-        self.assertEqual(self.resolve(RATCHET_STATE_DIR="", XDG_STATE_HOME="/x"), Path("/x/review-ratchet"))
-        self.assertEqual(self.resolve(RATCHET_STATE_DIR="", XDG_STATE_HOME="", HOME="/h"), Path("/h/.local/state/review-ratchet"))
+        self.assertEqual(self.resolve(HOUSE_RULES_STATE_DIR="", XDG_STATE_HOME="/x"), Path("/x/house-rules"))
+        self.assertEqual(self.resolve(HOUSE_RULES_STATE_DIR="", XDG_STATE_HOME="", HOME="/h"), Path("/h/.local/state/house-rules"))
 
     def test_the_directories_the_stop_hook_needs_sit_in_it(self) -> None:
         with mock.patch.dict(os.environ, {auto.STATE_DIR_ENV: "/s"}):
@@ -186,7 +186,7 @@ class PendingRecordTest(unittest.TestCase):
         self.assertIn(f"{path}:2: skipped a line", told)
 
 
-# ---- `ratchet auto note`, run in-process ------------------------------------------------------------------------------
+# ---- `house-rules auto note`, run in-process ------------------------------------------------------------------------------
 
 class NoteCase(RepoCase):
     """A repo whose config says wrapup_auto, with one commit, a state directory of the test's own and a session id in the environment."""
@@ -205,7 +205,7 @@ class NoteCase(RepoCase):
         return self.state / auto.PENDING_NAME / f"{SESSION}.jsonl"
 
     def note(self, env: dict[str, str | None] | None = None, *, repo: Path | None = None) -> tuple[int, str, str]:
-        """`ratchet auto note` in-process with `env` changed on top of the test's (None unsets a variable)."""
+        """`house-rules auto note` in-process with `env` changed on top of the test's (None unsets a variable)."""
         with mock.patch.dict(os.environ):
             for name, value in (env or {}).items():
                 if value is None:
@@ -266,14 +266,14 @@ class NoteTest(NoteCase):
                 self.assert_silent_and_nothing_written(self.note())
 
     def test_nothing_is_recorded_without_a_config(self) -> None:
-        (self.repo / ".ratchet.json").unlink()
+        (self.repo / ".house-rules.json").unlink()
         self.assert_silent_and_nothing_written(self.note())
 
     def test_nothing_is_recorded_when_head_does_not_exist_yet(self) -> None:
         unborn = self.tmp / "unborn"
         unborn.mkdir()
         git(unborn, "init", "-q", "-b", "main")
-        (unborn / ".ratchet.json").write_text(json.dumps({"wrapup_auto": True}), encoding="utf-8")
+        (unborn / ".house-rules.json").write_text(json.dumps({"wrapup_auto": True}), encoding="utf-8")
         self.assert_silent_and_nothing_written(self.note(repo=unborn))
 
     def test_a_linked_worktree_is_recorded_as_itself_and_the_main_worktrees_config_decides(self) -> None:
@@ -281,10 +281,10 @@ class NoteTest(NoteCase):
         git(self.repo, "worktree", "add", "-q", "-b", "side", str(linked))
         git(linked, "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "on the side")
         self.write_config(wrapup_auto=False)  # the main worktree's file, as the linked one's own copy still says true
-        (linked / ".ratchet.json").write_text(json.dumps({"wrapup_auto": True}), encoding="utf-8")
+        (linked / ".house-rules.json").write_text(json.dumps({"wrapup_auto": True}), encoding="utf-8")
         self.assert_silent_and_nothing_written(self.note(repo=linked))
         self.write_config(wrapup_auto=True)
-        (linked / ".ratchet.json").write_text(json.dumps({"wrapup_auto": False}), encoding="utf-8")
+        (linked / ".house-rules.json").write_text(json.dumps({"wrapup_auto": False}), encoding="utf-8")
         self.assertEqual(self.note(repo=linked), (0, "", ""))
         [record] = read_lines(self.pending_file)
         self.assertEqual((record["worktree"], record["head"]), (str(linked), git(linked, "rev-parse", "HEAD")))
@@ -415,7 +415,7 @@ class NoteFailureTest(NoteCase):
         self.assertTrue(third.endswith("auto note: third"))
 
     def test_a_config_that_cannot_be_read_is_told_and_not_raised(self) -> None:
-        (self.repo / ".ratchet.json").write_text("{not json", encoding="utf-8")
+        (self.repo / ".house-rules.json").write_text("{not json", encoding="utf-8")
         self.assertEqual(self.note(), (0, "", ""))
         [told] = hook_log(self.state)
         self.assertRegex(told, HOOK_LOG_LINE)
@@ -438,7 +438,7 @@ class NoteFailureTest(NoteCase):
         def raise_boom() -> None:
             raise KeyError("boom")  # the line the failure names: two calls below the one that catches it
 
-        with mock.patch("ratchet.auto._note", lambda repo: raise_boom()):
+        with mock.patch("house_rules.auto._note", lambda repo: raise_boom()):
             self.assertEqual(self.cli("auto", "note"), (0, "", ""))
         code = raise_boom.__code__
         [told] = hook_log(self.state)
@@ -455,23 +455,23 @@ class StateDirEndToEndTest(NoteCase):
         self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, "", ""))
         return proc
 
-    def test_ratchet_state_dir_is_used_even_when_xdg_state_home_and_home_are_set(self) -> None:
-        self.run_tool(RATCHET_STATE_DIR=str(self.tmp / "mine"), XDG_STATE_HOME=str(self.tmp / "xdg"), HOME=str(self.tmp / "home"))
+    def test_house_rules_state_dir_is_used_even_when_xdg_state_home_and_home_are_set(self) -> None:
+        self.run_tool(HOUSE_RULES_STATE_DIR=str(self.tmp / "mine"), XDG_STATE_HOME=str(self.tmp / "xdg"), HOME=str(self.tmp / "home"))
         self.assertTrue((self.tmp / "mine" / "pending" / f"{SESSION}.jsonl").is_file())
         self.assertFalse((self.tmp / "xdg").exists() or (self.tmp / "home").exists())
 
-    def test_xdg_state_home_is_used_when_ratchet_state_dir_is_not_set(self) -> None:
+    def test_xdg_state_home_is_used_when_house_rules_state_dir_is_not_set(self) -> None:
         self.run_tool(XDG_STATE_HOME=str(self.tmp / "xdg"), HOME=str(self.tmp / "home"))
-        self.assertTrue((self.tmp / "xdg" / "review-ratchet" / "pending" / f"{SESSION}.jsonl").is_file())
+        self.assertTrue((self.tmp / "xdg" / "house-rules" / "pending" / f"{SESSION}.jsonl").is_file())
         self.assertFalse((self.tmp / "home").exists())
 
     def test_home_is_used_when_neither_is_set(self) -> None:
         self.run_tool(HOME=str(self.tmp / "home"))
-        self.assertTrue((self.tmp / "home" / ".local" / "state" / "review-ratchet" / "pending" / f"{SESSION}.jsonl").is_file())
+        self.assertTrue((self.tmp / "home" / ".local" / "state" / "house-rules" / "pending" / f"{SESSION}.jsonl").is_file())
 
     def test_empty_variables_do_not_put_the_files_in_the_current_directory(self) -> None:
-        self.run_tool(RATCHET_STATE_DIR="", XDG_STATE_HOME="", HOME=str(self.tmp / "home"))
-        self.assertTrue((self.tmp / "home" / ".local" / "state" / "review-ratchet" / "pending" / f"{SESSION}.jsonl").is_file())
+        self.run_tool(HOUSE_RULES_STATE_DIR="", XDG_STATE_HOME="", HOME=str(self.tmp / "home"))
+        self.assertTrue((self.tmp / "home" / ".local" / "state" / "house-rules" / "pending" / f"{SESSION}.jsonl").is_file())
 
 
 class AutoParserTest(unittest.TestCase):
@@ -493,7 +493,7 @@ class AutoParserTest(unittest.TestCase):
 # ---- the hook: real commits ------------------------------------------------------------------------------------------
 
 class HookedRepoCase(RepoCase):
-    """A copy of the repo `ratchet init` set up and committed, with the hooks installed the way VARIANT says."""
+    """A copy of the repo `house-rules init` set up and committed, with the hooks installed the way VARIANT says."""
 
     VARIANT = ""
 
@@ -515,13 +515,13 @@ class HookedRepoCase(RepoCase):
         return read_lines(self.state / auto.PENDING_NAME / f"{session}.jsonl")
 
     def set_config(self, **changes: object) -> None:
-        path = self.repo / ".ratchet.json"
+        path = self.repo / ".house-rules.json"
         config = json.loads(path.read_text(encoding="utf-8"))
         config.update(changes)
         path.write_text(json.dumps(config), encoding="utf-8")
 
     def drop_config_key(self, key: str) -> None:
-        path = self.repo / ".ratchet.json"
+        path = self.repo / ".house-rules.json"
         config = json.loads(path.read_text(encoding="utf-8"))
         del config[key]
         path.write_text(json.dumps(config), encoding="utf-8")
@@ -590,7 +590,7 @@ class HookedCommitTests:
         self.assertEqual(len(self.records()), 1)
 
     def test_a_repo_without_a_config_is_left_alone(self) -> None:
-        (self.repo / ".ratchet.json").unlink()
+        (self.repo / ".house-rules.json").unlink()
         proc = self.session_commit()
         self.assertEqual((proc.stdout, proc.stderr), ("", ""))
         self.assertFalse(self.state.exists())
@@ -598,7 +598,7 @@ class HookedCommitTests:
     def test_a_failing_infer_does_not_stop_the_note(self) -> None:
         (self.repo / ".style-findings.jsonl").write_text("{this is not a ledger\n", encoding="utf-8")
         proc = self.session_commit()
-        self.assertIn("ratchet: error", proc.stderr)  # infer did fail
+        self.assertIn("house-rules: error", proc.stderr)  # infer did fail
         self.assertEqual(len(self.records()), 1)
 
     def test_a_state_directory_that_cannot_be_made_does_not_fail_or_clutter_the_commit(self) -> None:
@@ -643,7 +643,7 @@ class NoteLineTest(unittest.TestCase):
         self.tmp = Path(os.path.realpath(tmp.name))
         self.repo = self.tmp / "repo"
         self.repo.mkdir()
-        (self.repo / ".ratchet.json").write_text("{}", encoding="utf-8")
+        (self.repo / ".house-rules.json").write_text("{}", encoding="utf-8")
         self.calls = self.tmp / "calls.log"
         self.tool = self.tmp / "tool.py"
         self.tool.write_text("import os, sys\n"
@@ -654,7 +654,7 @@ class NoteLineTest(unittest.TestCase):
     def run_block(self, hook: str, variant: str, prologue: str = "", **env: str) -> subprocess.CompletedProcess:
         pinned = (Path(sys.executable), self.tool) if variant == "pinned" else None
         script = f"#!/bin/sh\n{prologue}" + "\n".join(hook_body(hook, pinned)) + "\necho reached-the-end\n"
-        full_env = {"PATH": "/usr/bin:/bin", "HOME": str(self.tmp), "RATCHET_PY": sys.executable, "RATCHET_BIN": str(self.tool), **env}
+        full_env = {"PATH": "/usr/bin:/bin", "HOME": str(self.tmp), "HOUSE_RULES_PY": sys.executable, "HOUSE_RULES_BIN": str(self.tool), **env}
         return subprocess.run(["sh", "-c", script], capture_output=True, text=True, cwd=self.repo, env=full_env)
 
     def called(self) -> list[str]:
@@ -704,10 +704,10 @@ class NoteLineTest(unittest.TestCase):
                 self.assertEqual(self.called(), [])
 
     def test_the_block_names_the_variable_the_note_reads_and_the_note_comes_after_infer(self) -> None:
-        for pinned in (None, (Path("/py/python3"), Path("/bin/ratchet"))):
+        for pinned in (None, (Path("/py/python3"), Path("/bin/house-rules"))):
             body = "\n".join(hook_body("post-commit", pinned))
             with self.subTest(pinned=pinned is not None):
-                self.assertIn(f'[ -z "${{{auto.SESSION_ID_ENV}:-}}" ] || "$_ratchet_py" "$_ratchet_bin" auto note || true', body)
+                self.assertIn(f'[ -z "${{{auto.SESSION_ID_ENV}:-}}" ] || "$_house_rules_py" "$_house_rules_bin" auto note || true', body)
                 self.assertLess(body.index("infer --quiet"), body.index("auto note"))
                 self.assertEqual(body.count("auto note"), 1)
         self.assertNotIn("auto note", "\n".join(hook_body("pre-commit", None)))
@@ -716,51 +716,51 @@ class NoteLineTest(unittest.TestCase):
 # ---- init: old blocks, and the probe --------------------------------------------------------------------------------------
 
 # The post-commit blocks init wrote before the note line existed (the pinned one with tokens for the two paths).
-OLD_PINNED_POST_COMMIT = r"""# Installed by `ratchet init`; re-run it to refresh the paths, delete this block to uninstall.
-if [ -n "${RATCHET_HOOK_PROBE:-}" ]; then
-  echo "ratchet-hook-probe post-commit"
+OLD_PINNED_POST_COMMIT = r"""# Installed by `house-rules init`; re-run it to refresh the paths, delete this block to uninstall.
+if [ -n "${HOUSE_RULES_HOOK_PROBE:-}" ]; then
+  echo "house-rules-hook-probe post-commit"
   exit 0
 fi
-_ratchet_py=@PY@
-_ratchet_bin=@BIN@
-# core.hooksPath can point many repos at one hooks directory; only repos with a config use ratchet.
-if [ -f .ratchet.json ]; then
-  if [ -x "$_ratchet_py" ] && [ -f "$_ratchet_bin" ]; then
-    "$_ratchet_py" "$_ratchet_bin" infer --quiet || true
+_house_rules_py=@PY@
+_house_rules_bin=@BIN@
+# core.hooksPath can point many repos at one hooks directory; only repos with a config use house-rules.
+if [ -f .house-rules.json ]; then
+  if [ -x "$_house_rules_py" ] && [ -f "$_house_rules_bin" ]; then
+    "$_house_rules_py" "$_house_rules_bin" infer --quiet || true
   else
-    printf '%s\n' "ratchet: WARNING: cannot run $_ratchet_bin with $_ratchet_py (interpreter or script missing); post-commit is NOT running. Re-run 'ratchet init' to refresh this hook." >&2
+    printf '%s\n' "house-rules: WARNING: cannot run $_house_rules_bin with $_house_rules_py (interpreter or script missing); post-commit is NOT running. Re-run 'house-rules init' to refresh this hook." >&2
   fi
 fi
-unset _ratchet_py _ratchet_bin"""
+unset _house_rules_py _house_rules_bin"""
 
-OLD_PORTABLE_POST_COMMIT = r"""# Installed by `ratchet init`; portable (no machine-specific paths), so it is safe to commit. Delete this block to uninstall.
-# The tool is $RATCHET_BIN, else `bin` in .ratchet.json (relative to the repo root), else `ratchet` on PATH.
-# Python is $RATCHET_PY, else python3 on PATH; it must be 3.10 or newer.
-if [ -n "${RATCHET_HOOK_PROBE:-}" ]; then
-  echo "ratchet-hook-probe post-commit"
+OLD_PORTABLE_POST_COMMIT = r"""# Installed by `house-rules init`; portable (no machine-specific paths), so it is safe to commit. Delete this block to uninstall.
+# The tool is $HOUSE_RULES_BIN, else `bin` in .house-rules.json (relative to the repo root), else `house-rules` on PATH.
+# Python is $HOUSE_RULES_PY, else python3 on PATH; it must be 3.10 or newer.
+if [ -n "${HOUSE_RULES_HOOK_PROBE:-}" ]; then
+  echo "house-rules-hook-probe post-commit"
   exit 0
 fi
-# core.hooksPath can point many repos at one hooks directory; only repos with a config use ratchet.
-if [ -f .ratchet.json ]; then
-  _ratchet_py="${RATCHET_PY:-python3}"
-  if "$_ratchet_py" -c 'import sys; sys.exit(sys.version_info < (3, 10))' 2>/dev/null; then
-    _ratchet_bin="${RATCHET_BIN:-}"
-    if [ -z "$_ratchet_bin" ]; then
-      _ratchet_bin=$("$_ratchet_py" -c 'import json; print(json.load(open(".ratchet.json")).get("bin", ""))' 2>/dev/null || true)
-      if [ -z "$_ratchet_bin" ]; then
-        _ratchet_bin=$(command -v ratchet || true)
+# core.hooksPath can point many repos at one hooks directory; only repos with a config use house-rules.
+if [ -f .house-rules.json ]; then
+  _house_rules_py="${HOUSE_RULES_PY:-python3}"
+  if "$_house_rules_py" -c 'import sys; sys.exit(sys.version_info < (3, 10))' 2>/dev/null; then
+    _house_rules_bin="${HOUSE_RULES_BIN:-}"
+    if [ -z "$_house_rules_bin" ]; then
+      _house_rules_bin=$("$_house_rules_py" -c 'import json; print(json.load(open(".house-rules.json")).get("bin", ""))' 2>/dev/null || true)
+      if [ -z "$_house_rules_bin" ]; then
+        _house_rules_bin=$(command -v house-rules || true)
       fi
     fi
-    if [ -f "$_ratchet_bin" ]; then
-      "$_ratchet_py" "$_ratchet_bin" infer --quiet || true
+    if [ -f "$_house_rules_bin" ]; then
+      "$_house_rules_py" "$_house_rules_bin" infer --quiet || true
     else
-      printf '%s\n' "ratchet: WARNING: cannot find the ratchet executable (set RATCHET_BIN, add \"bin\" to .ratchet.json, or put ratchet on PATH); post-commit is NOT running." >&2
+      printf '%s\n' "house-rules: WARNING: cannot find the house-rules executable (set HOUSE_RULES_BIN, add \"bin\" to .house-rules.json, or put house-rules on PATH); post-commit is NOT running." >&2
     fi
   else
-    printf '%s\n' "ratchet: WARNING: $_ratchet_py is missing or older than Python 3.10 (set RATCHET_PY to a 3.10+ interpreter); post-commit is NOT running." >&2
+    printf '%s\n' "house-rules: WARNING: $_house_rules_py is missing or older than Python 3.10 (set HOUSE_RULES_PY to a 3.10+ interpreter); post-commit is NOT running." >&2
   fi
 fi
-unset _ratchet_py _ratchet_bin"""
+unset _house_rules_py _house_rules_bin"""
 
 USER_CODE_BELOW = "echo mine, below the block\n"
 
@@ -783,7 +783,7 @@ class UpgradeOldBlockTest(test_init.InitCase):
         out = self.init("--yes")
         self.assertEqual(self.statuses(out)["hook post-commit"], "updated")
         after = path.read_text(encoding="utf-8")
-        self.assertIn('"$_ratchet_py" "$_ratchet_bin" auto note || true', after)
+        self.assertIn('"$_house_rules_py" "$_house_rules_bin" auto note || true', after)
         self.assertEqual(after.count(HASH_BEGIN), 1)
         self.assertTrue(after.endswith(f"{HASH_END}\n\n{USER_CODE_BELOW}"))  # what is outside the block is untouched
         self.assertEqual(after.count("auto note"), 1)

@@ -4,7 +4,7 @@ import unittest
 import support  # noqa: F401  (puts the repo root on sys.path)
 from support import RepoCase, gate_finding, gate_pass, git, report_item, review_finding
 
-from ratchet import outcomes
+from house_rules import outcomes
 
 
 class TrailerTest(RepoCase):
@@ -149,7 +149,7 @@ class QuietTest(RepoCase):
         self.assertIn("infer: +1 fixed (auto:commit)", out)
         self.assertNotIn("label-page", out)
         self.commit("fix: y", "Fixes-Finding: R9-009")
-        self.assertIn("run `ratchet label-page`", self.cli_ok("infer"))  # without --quiet the nudge is there
+        self.assertIn("run `house-rules label-page`", self.cli_ok("infer"))  # without --quiet the nudge is there
 
     def test_a_second_quiet_run_after_closing_is_silent(self) -> None:
         self.commit("fix: x", "Fixes-Finding: R1-001")
@@ -235,7 +235,7 @@ class GatePassTest(RepoCase):
     def test_hint_appears_above_the_label_page_threshold(self) -> None:
         self.append_raw(*[review_finding(f"R1-{n:03d}", line=n + 1) for n in range(3)])
         self.write_config(label_page_threshold=2)
-        self.assertIn("run `ratchet label-page`", self.infer_out())
+        self.assertIn("run `house-rules label-page`", self.infer_out())
         self.write_config(label_page_threshold=3)
         self.assertNotIn("label-page", self.infer_out())
 

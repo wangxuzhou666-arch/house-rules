@@ -108,7 +108,7 @@ class StagedCheckTest(StagedCase):
         (self.repo / "CLAUDE.md").write_text("notes\n<!-- style-digest:begin -->\n<!-- style-digest:end -->\n", encoding="utf-8")
         self.write_config(rules_files=["rules.md"], inject_targets=["CLAUDE.md"])
         self.regenerate()
-        self.stage("CLAUDE.md", DIGEST_NAME, ".ratchet.json")
+        self.stage("CLAUDE.md", DIGEST_NAME, ".house-rules.json")
         self.commit("add the block")
         self.assertEqual(self.check_staged()[0], 0)
         self.edit_rules()
@@ -124,7 +124,7 @@ class StagedCheckTest(StagedCase):
         (self.repo / "CLAUDE.md").write_text("notes\n<!-- style-digest:begin -->\n<!-- style-digest:end -->\n", encoding="utf-8")
         self.write_config(rules_files=["rules.md"], inject_targets=["CLAUDE.md"])
         self.regenerate()
-        self.stage("CLAUDE.md", DIGEST_NAME, ".ratchet.json")
+        self.stage("CLAUDE.md", DIGEST_NAME, ".house-rules.json")
         self.commit("add the block")
         self.edit_rules()
         self.stage("rules.md")  # both outputs are now stale as staged
@@ -135,7 +135,7 @@ class StagedCheckTest(StagedCase):
     def test_a_staged_target_without_markers_says_the_working_tree_has_them(self) -> None:
         (self.repo / "CLAUDE.md").write_text("notes\n", encoding="utf-8")  # committed without markers
         self.write_config(rules_files=["rules.md"], inject_targets=["CLAUDE.md"])
-        self.stage("CLAUDE.md", ".ratchet.json")
+        self.stage("CLAUDE.md", ".house-rules.json")
         (self.repo / "CLAUDE.md").write_text("notes\n<!-- style-digest:begin -->\n<!-- style-digest:end -->\n", encoding="utf-8")
         code, _, err = self.check_staged()
         self.assertEqual(code, 1)
@@ -144,7 +144,7 @@ class StagedCheckTest(StagedCase):
     def test_a_staged_target_without_markers_anywhere_gets_the_plain_marker_error(self) -> None:
         (self.repo / "CLAUDE.md").write_text("notes\n", encoding="utf-8")
         self.write_config(rules_files=["rules.md"], inject_targets=["CLAUDE.md"])
-        self.stage("CLAUDE.md", ".ratchet.json")
+        self.stage("CLAUDE.md", ".house-rules.json")
         code, _, err = self.check_staged()
         self.assertEqual(code, 1)
         self.assertIn("staged copy of CLAUDE.md: marker <!-- style-digest:begin --> not found", err)
@@ -154,7 +154,7 @@ class StagedCheckTest(StagedCase):
         marker_pair = "<!-- style-digest:begin -->\n<!-- style-digest:end -->\n"
         (self.repo / "CLAUDE.md").write_text(marker_pair * 2, encoding="utf-8")
         self.write_config(rules_files=["rules.md"], inject_targets=["CLAUDE.md"])
-        self.stage("CLAUDE.md", ".ratchet.json")
+        self.stage("CLAUDE.md", ".house-rules.json")
         (self.repo / "CLAUDE.md").write_text(marker_pair, encoding="utf-8")  # the working tree is fine; the staged copy is not
         code, _, err = self.check_staged()
         self.assertEqual(code, 1)
@@ -173,7 +173,7 @@ class StagedCheckTest(StagedCase):
         outside.write_text(STYLE_RULES, encoding="utf-8")
         self.write_config(rules_files=["../shared.md"])
         self.regenerate()
-        self.stage(DIGEST_NAME, ".ratchet.json")
+        self.stage(DIGEST_NAME, ".house-rules.json")
         self.commit("use a shared rules file")
         self.assertEqual(self.check_staged()[0], 0)
         outside.write_text(EDITED_RULES, encoding="utf-8")
@@ -183,7 +183,7 @@ class StagedCheckTest(StagedCase):
         (self.repo / "rules[1].md").write_text(STYLE_RULES, encoding="utf-8")
         self.write_config(rules_files=["rules[1].md"])
         self.regenerate()
-        self.stage("rules[1].md", DIGEST_NAME, ".ratchet.json")
+        self.stage("rules[1].md", DIGEST_NAME, ".house-rules.json")
         self.assertEqual(self.check_staged()[0], 0)
 
     def test_a_name_with_glob_characters_is_not_matched_as_a_pattern(self) -> None:
@@ -212,7 +212,7 @@ class StagedCheckTest(StagedCase):
         code, _, err = self.cli("compile", "--check")
         self.assertEqual(code, 1)
         self.assertIn(f"stale: {DIGEST_NAME} (digest, out of date)", err)
-        self.assertIn("run `ratchet compile` to regenerate", err)
+        self.assertIn("run `house-rules compile` to regenerate", err)
 
 
 class StagedWorktreeTest(StagedCase):
@@ -248,11 +248,11 @@ class StagedHookEnvironmentTest(StagedCase):
 
 class IndexBlobEnvTest(unittest.TestCase):
     def test_index_blob_keeps_the_hooks_index_file(self) -> None:
-        from ratchet import git as ratchet_git
+        from house_rules import git as house_rules_git
         with mock.patch.dict(os.environ, {"GIT_INDEX_FILE": "/nonexistent/index", "GIT_DIR": "/nonexistent/dir"}):
-            self.assertEqual(ratchet_git._git_env(keep_index_file=True).get("GIT_INDEX_FILE"), "/nonexistent/index")
-            self.assertNotIn("GIT_DIR", ratchet_git._git_env(keep_index_file=True))
-            self.assertNotIn("GIT_INDEX_FILE", ratchet_git._git_env(keep_index_file=False))
+            self.assertEqual(house_rules_git._git_env(keep_index_file=True).get("GIT_INDEX_FILE"), "/nonexistent/index")
+            self.assertNotIn("GIT_DIR", house_rules_git._git_env(keep_index_file=True))
+            self.assertNotIn("GIT_INDEX_FILE", house_rules_git._git_env(keep_index_file=False))
 
 
 if __name__ == "__main__":

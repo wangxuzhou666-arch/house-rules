@@ -1,4 +1,4 @@
-"""The `wrapup_auto` switch: the config key, what `ratchet init` asks and writes for it, and the setup skill that offers it.
+"""The `wrapup_auto` switch: the config key, what `house-rules init` asks and writes for it, and the setup skill that offers it.
 
 Only the switch is covered here; what a `true` starts reads `Config.wrapup_auto` and is tested where it lives.
 """
@@ -11,9 +11,9 @@ import test_init
 import test_worktree
 from support import REPO_ROOT, STYLE_RULES, RepoCase, git, make_config
 
-from ratchet.cli import build_parser
-from ratchet.config import DEFAULT_WRAPUP_AUTO, load_config
-from ratchet.onboard import WRAPUP_AUTO_QUESTION
+from house_rules.cli import build_parser
+from house_rules.config import DEFAULT_WRAPUP_AUTO, load_config
+from house_rules.onboard import WRAPUP_AUTO_QUESTION
 
 SETUP_SKILL = REPO_ROOT / "skills" / "setup" / "SKILL.md"
 RULES_QUESTION = "Rules file:"
@@ -59,18 +59,18 @@ class InitWritesTheKeyTest(test_init.InitCase):
     """A repo with no config yet: what init asks and what it writes."""
 
     def switch(self) -> object:
-        return json.loads(self.text(".ratchet.json"))["wrapup_auto"]
+        return json.loads(self.text(".house-rules.json"))["wrapup_auto"]
 
     def test_yes_writes_true_after_rules_files_with_the_indentation_init_always_uses(self) -> None:
         out = self.init("--yes")
-        self.assertEqual(self.text(".ratchet.json"), '{\n  "rules_files": [\n    "CODING-STYLE.md"\n  ],\n  "wrapup_auto": true\n}\n')
+        self.assertEqual(self.text(".house-rules.json"), '{\n  "rules_files": [\n    "CODING-STYLE.md"\n  ],\n  "wrapup_auto": true\n}\n')
         self.assertEqual(self.statuses(out)["config"], "added")
-        self.assertIn(".ratchet.json: rules_files ['CODING-STYLE.md'], wrapup_auto true", out)
+        self.assertIn(".house-rules.json: rules_files ['CODING-STYLE.md'], wrapup_auto true", out)
 
     def test_it_goes_after_every_key_the_config_already_has(self) -> None:
         self.write_config(repo_slug="mine", label_page_threshold=5)
         self.init("--yes")
-        self.assertEqual(list(json.loads(self.text(".ratchet.json"))), ["repo_slug", "label_page_threshold", "rules_files", "wrapup_auto"])
+        self.assertEqual(list(json.loads(self.text(".house-rules.json"))), ["repo_slug", "label_page_threshold", "rules_files", "wrapup_auto"])
 
     def test_no_wrapup_auto_writes_false_and_asks_nothing(self) -> None:
         code, out, err = self.ask("\n\n\n", "--no-wrapup-auto")  # the rules file, CLAUDE.md and the hooks: three answers are enough
@@ -120,7 +120,7 @@ class ConfigThatExistsTest(test_init.InitCase):
         self.write_rules(STYLE_RULES)
 
     def put_config(self, text: str) -> None:
-        (self.repo / ".ratchet.json").write_text(text, encoding="utf-8")
+        (self.repo / ".house-rules.json").write_text(text, encoding="utf-8")
 
     def test_a_config_that_has_the_key_is_left_byte_for_byte_whichever_the_value(self) -> None:
         for value in ("true", "false"):
@@ -128,14 +128,14 @@ class ConfigThatExistsTest(test_init.InitCase):
                 config = f'{{"rules_files":["rules.md"],   "wrapup_auto": {value}}}'
                 self.put_config(config)
                 out = self.init("--yes")
-                self.assertEqual(self.text(".ratchet.json"), config)
+                self.assertEqual(self.text(".house-rules.json"), config)
                 self.assertEqual(self.statuses(out)["config"], "already ok")
 
     def test_init_only_fills_in_a_missing_key_so_the_flag_does_not_overwrite_one_that_is_there(self) -> None:
         config = '{"rules_files":["rules.md"],"wrapup_auto":true}'
         self.put_config(config)
         self.init("--yes", "--no-wrapup-auto")
-        self.assertEqual(self.text(".ratchet.json"), config)
+        self.assertEqual(self.text(".house-rules.json"), config)
 
     def test_a_config_that_has_the_key_asks_nothing_about_it(self) -> None:
         self.put_config('{"rules_files": ["rules.md"], "wrapup_auto": false}')
@@ -148,39 +148,39 @@ class ConfigThatExistsTest(test_init.InitCase):
         self.put_config('{"rules_files":["rules.md"],   "repo_slug": "mine", "label_page_threshold": 5}')
         out = self.init("--yes")
         kept = {"rules_files": ["rules.md"], "repo_slug": "mine", "label_page_threshold": 5}
-        self.assertEqual(self.text(".ratchet.json"), json.dumps({**kept, "wrapup_auto": True}, indent=2) + "\n")
+        self.assertEqual(self.text(".house-rules.json"), json.dumps({**kept, "wrapup_auto": True}, indent=2) + "\n")
         self.assertEqual(self.statuses(out)["config"], "updated")
-        self.assertIn(".ratchet.json: wrapup_auto true", out)
+        self.assertIn(".house-rules.json: wrapup_auto true", out)
         self.assertEqual(self.statuses(self.init("--yes"))["config"], "already ok")
 
     def test_the_commit_init_asks_for_carries_the_config_it_changed(self) -> None:
         self.put_config('{"rules_files": ["rules.md"]}')
-        git(self.repo, "add", ".ratchet.json", "rules.md")
+        git(self.repo, "add", ".house-rules.json", "rules.md")
         self.commit("adopt the old way")
         out = self.init("--yes")
         (staged,) = [line for line in out.splitlines() if line.strip().startswith("git add ")]
-        self.assertIn(" .ratchet.json", staged.split(" && ")[0])
+        self.assertIn(" .house-rules.json", staged.split(" && ")[0])
 
     def test_a_config_without_it_is_asked_at_a_terminal_and_the_rules_question_is_not(self) -> None:
         self.put_config('{"rules_files": ["rules.md"]}')
         code, out, err = self.ask("n\n\n\n")  # the wrap-up, CLAUDE.md and the hooks
         self.assertEqual(code, 0, err)
         self.assertNotIn(RULES_QUESTION, out)
-        self.assertIs(json.loads(self.text(".ratchet.json"))["wrapup_auto"], False)
+        self.assertIs(json.loads(self.text(".house-rules.json"))["wrapup_auto"], False)
 
     def test_a_config_without_it_gets_false_from_the_flag_without_a_question(self) -> None:
         self.put_config('{"rules_files": ["rules.md"]}')
         code, out, err = self.ask("\n\n", "--no-wrapup-auto")  # CLAUDE.md and the hooks
         self.assertEqual(code, 0, err)
         self.assertNotIn(WRAPUP_AUTO_QUESTION, out)
-        self.assertEqual(json.loads(self.text(".ratchet.json")), {"rules_files": ["rules.md"], "wrapup_auto": False})
+        self.assertEqual(json.loads(self.text(".house-rules.json")), {"rules_files": ["rules.md"], "wrapup_auto": False})
 
     def test_a_config_with_the_key_and_no_rules_files_is_asked_for_the_rules_only(self) -> None:
         self.put_config('{"wrapup_auto": false}')
         code, out, err = self.ask(f"{self.repo / 'rules.md'}\n\n\n")  # the rules file, CLAUDE.md and the hooks
         self.assertEqual(code, 0, err)
         self.assertNotIn(WRAPUP_AUTO_QUESTION, out)
-        self.assertEqual(json.loads(self.text(".ratchet.json")), {"wrapup_auto": False, "rules_files": ["rules.md"]})
+        self.assertEqual(json.loads(self.text(".house-rules.json")), {"wrapup_auto": False, "rules_files": ["rules.md"]})
 
 
 class InitDryRunTest(test_init.InitCase):
@@ -189,7 +189,7 @@ class InitDryRunTest(test_init.InitCase):
         out = self.init("--dry-run")
         self.assertEqual(self.files(), before)
         self.assertEqual(self.statuses(out)["config"], "would add")
-        self.assertIn(".ratchet.json: rules_files ['CODING-STYLE.md'], wrapup_auto true", out)
+        self.assertIn(".house-rules.json: rules_files ['CODING-STYLE.md'], wrapup_auto true", out)
         self.assertIn('+  "wrapup_auto": true', out)
 
     def test_no_wrapup_auto_shows_false(self) -> None:
@@ -205,7 +205,7 @@ class InitDryRunTest(test_init.InitCase):
         out = self.init("--dry-run")
         self.assertEqual(self.files(), before)
         self.assertEqual(self.statuses(out)["config"], "would update")
-        self.assertIn(".ratchet.json: wrapup_auto true", out)
+        self.assertIn(".house-rules.json: wrapup_auto true", out)
         self.assertIn('+  "wrapup_auto": true', out)
 
     def test_a_config_with_the_key_shows_no_change(self) -> None:
@@ -222,27 +222,27 @@ class LinkedWorktreeTest(test_init.InitCase, test_worktree.LinkedCase):
         return [line for line in out.splitlines() if "wrapup_auto is not set in" in line]
 
     def test_no_config_is_written_and_one_line_says_how_to_turn_it_on(self) -> None:
-        before = self.main_text(".ratchet.json")
+        before = self.main_text(".house-rules.json")
         out = self.ok_in_tree("init", "--yes")
-        self.assertEqual(self.main_text(".ratchet.json"), before)
+        self.assertEqual(self.main_text(".house-rules.json"), before)
         self.assertNotIn("wrapup_auto", before)
         self.assertEqual(self.statuses(out)["config"], "already ok")
         (hint,) = self.hints(out)
-        self.assertIn(str(self.repo / ".ratchet.json"), hint)
-        self.assertIn("run `ratchet init` there", hint)
+        self.assertIn(str(self.repo / ".house-rules.json"), hint)
+        self.assertIn("run `house-rules init` there", hint)
         self.assertIn('"wrapup_auto": true', hint)
 
     def test_a_dry_run_gives_the_same_hint_and_writes_nothing(self) -> None:
-        before = self.main_text(".ratchet.json")
+        before = self.main_text(".house-rules.json")
         out = self.ok_in_tree("init", "--dry-run")
         self.assertEqual(len(self.hints(out)), 1)
-        self.assertEqual(self.main_text(".ratchet.json"), before)
+        self.assertEqual(self.main_text(".house-rules.json"), before)
 
     def test_no_wrapup_auto_gives_no_hint_and_still_writes_nothing(self) -> None:
-        before = self.main_text(".ratchet.json")
+        before = self.main_text(".house-rules.json")
         out = self.ok_in_tree("init", "--yes", "--no-wrapup-auto")
         self.assertEqual(self.hints(out), [])
-        self.assertEqual(self.main_text(".ratchet.json"), before)
+        self.assertEqual(self.main_text(".house-rules.json"), before)
 
     def test_a_config_that_has_the_key_gives_no_hint(self) -> None:
         self.write_config(rules_files=["rules.md"], inject_targets=[test_worktree.REVIEWER], wrapup_auto=False)
@@ -285,8 +285,8 @@ class SetupSkillTest(unittest.TestCase):
         self.assertIn("add `--no-wrapup-auto`", wrapup)
 
     def test_the_choice_is_settled_before_the_preview_and_the_real_run(self) -> None:
-        self.assertLess(self.text.index("Automatic wrap-up:"), self.text.index("ratchet init --dry-run"))
-        self.assertLess(self.text.index("ratchet init --dry-run"), self.text.index("ratchet init --yes"))
+        self.assertLess(self.text.index("Automatic wrap-up:"), self.text.index("house-rules init --dry-run"))
+        self.assertLess(self.text.index("house-rules init --dry-run"), self.text.index("house-rules init --yes"))
 
     def test_the_flag_it_names_is_one_init_takes_and_is_off_unless_given(self) -> None:
         parser = build_parser()

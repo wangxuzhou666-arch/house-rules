@@ -6,12 +6,12 @@ import unittest
 import support  # noqa: F401  (puts the repo root on sys.path)
 from support import RepoCase, gate_finding, review_finding
 
-from ratchet.cli import build_parser
-from ratchet.ledger import OUTCOMES
+from house_rules.cli import build_parser
+from house_rules.ledger import OUTCOMES
 
 
 class DirectLabelTest(RepoCase):
-    """`ratchet label ID... --outcome X`: the one-call route for a few findings; label-page + apply-labels is the batch route."""
+    """`house-rules label ID... --outcome X`: the one-call route for a few findings; label-page + apply-labels is the batch route."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -29,7 +29,7 @@ class DirectLabelTest(RepoCase):
         out = self.cli_ok("label", "r1-2", "--outcome", "false_positive")
         (outcome,) = self.outcomes()
         self.assertEqual((outcome["id"], outcome["outcome"], outcome["outcome_by"], outcome["evidence"]),
-                         (self.second["id"], "false_positive", "human", "ratchet label"))
+                         (self.second["id"], "false_positive", "human", "house-rules label"))
         self.assertIn("label: 1 human outcome(s), false_positive (r1-2)", out)
         self.assertIn("2 open", self.cli_ok("count"))
 
@@ -68,7 +68,7 @@ class DirectLabelTest(RepoCase):
     def test_the_event_is_the_one_apply_labels_writes(self) -> None:
         self.cli_ok("label", "r1-1", "--outcome", "dismissed", "--note", "accepted risk")
         self.cli_ok("label-page")
-        batch = json.loads((self.repo / ".ratchet-label-batch.json").read_text(encoding="utf-8"))
+        batch = json.loads((self.repo / ".house-rules-label-batch.json").read_text(encoding="utf-8"))
         payload = {"batch_id": batch["batch_id"],
                    "labels": [{"id": self.second["id"], "outcome": "dismissed", "note": "accepted risk"}]}
         self.cli_ok("apply-labels", stdin=json.dumps(payload))
@@ -80,7 +80,7 @@ class DirectLabelTest(RepoCase):
     def test_the_note_is_the_evidence_and_a_blank_one_is_not(self) -> None:
         self.cli_ok("label", "r1-1", "--outcome", "dismissed", "--note", "  accepted risk ")
         self.cli_ok("label", "r1-2", "--outcome", "dismissed", "--note", "   ")
-        self.assertEqual([outcome["evidence"] for outcome in self.outcomes()], ["accepted risk", "ratchet label"])
+        self.assertEqual([outcome["evidence"] for outcome in self.outcomes()], ["accepted risk", "house-rules label"])
 
     def test_a_gate_finding_is_named_by_its_hex_display_id(self) -> None:
         gate = gate_finding("a.py")
@@ -190,14 +190,14 @@ class DirectLabelTest(RepoCase):
 
     def test_a_finding_labeled_here_drops_out_of_the_label_page_and_is_refused_by_a_stale_batch(self) -> None:
         self.cli_ok("label-page")
-        batch = json.loads((self.repo / ".ratchet-label-batch.json").read_text(encoding="utf-8"))
+        batch = json.loads((self.repo / ".house-rules-label-batch.json").read_text(encoding="utf-8"))
         self.cli_ok("label", "r1-1", "--outcome", "fixed")
         stale = json.dumps({"batch_id": batch["batch_id"], "labels": [{"id": self.first["id"], "outcome": "dismissed"}]})
         code, _, err = self.cli("apply-labels", stdin=stale)
         self.assertEqual(code, 1)
         self.assertIn("already has an outcome", err)
         self.cli_ok("label-page")
-        again = json.loads((self.repo / ".ratchet-label-batch.json").read_text(encoding="utf-8"))
+        again = json.loads((self.repo / ".house-rules-label-batch.json").read_text(encoding="utf-8"))
         self.assertEqual(again["finding_ids"], [self.second["id"], self.third["id"]])
 
 

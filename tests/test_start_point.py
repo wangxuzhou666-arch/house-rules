@@ -1,4 +1,4 @@
-"""The start point: where ratchet began watching the default branch, kept in `.ratchet/start-points.json`, and the git helpers it uses."""
+"""The start point: where house-rules began watching the default branch, kept in `.house-rules/start-points.json`, and the git helpers it uses."""
 import itertools
 import json
 import subprocess
@@ -8,9 +8,9 @@ from pathlib import Path
 import support  # noqa: F401  (puts the repo root on sys.path)
 from support import _GIT_ENV, RepoCase, git, make_config
 
-from ratchet.errors import RatchetError
-from ratchet.git import commit_tree, common_ancestor, is_ancestor
-from ratchet.start_point import START_POINTS_NAME, read_start_points, record_start_point, usable_start_point
+from house_rules.errors import HouseRulesError
+from house_rules.git import commit_tree, common_ancestor, is_ancestor
+from house_rules.start_point import START_POINTS_NAME, read_start_points, record_start_point, usable_start_point
 
 
 class RecordTest(RepoCase):
@@ -25,7 +25,7 @@ class RecordTest(RepoCase):
     def test_nothing_recorded_reads_as_no_start_points_and_reading_creates_nothing(self) -> None:
         self.assertEqual(read_start_points(self.repo), {})
         self.assertIsNone(usable_start_point(self.config, "main", self.base))
-        self.assertFalse((self.repo / ".ratchet").exists())
+        self.assertFalse((self.repo / ".house-rules").exists())
 
     def test_a_start_point_is_written_as_a_flat_json_object_and_read_back(self) -> None:
         record_start_point(self.config, "main", self.base)
@@ -52,11 +52,11 @@ class RecordTest(RepoCase):
         git(self.repo, "worktree", "add", "-q", "-b", "side", str(linked))
         record_start_point(make_config(root=self.repo, worktree=linked), "main", self.base)
         self.assertEqual(read_start_points(self.repo), {"develop": self.base, "main": self.base})
-        self.assertFalse((linked / ".ratchet").exists())
+        self.assertFalse((linked / ".house-rules").exists())
 
     def test_the_file_is_moved_into_place_and_no_scratch_file_is_left_beside_it(self) -> None:
         record_start_point(self.config, "main", self.base)
-        self.assertEqual([path.name for path in (self.repo / ".ratchet").iterdir()], ["start-points.json"])
+        self.assertEqual([path.name for path in (self.repo / ".house-rules").iterdir()], ["start-points.json"])
 
     def test_an_abbreviated_sha_is_refused_before_it_makes_the_file_unreadable(self) -> None:
         with self.assertRaisesRegex(AssertionError, "not a full commit sha"):
@@ -88,12 +88,12 @@ class DamagedFileTest(RepoCase):
             with self.subTest(label):
                 self.path.write_text(text, encoding="utf-8")
                 for call in (lambda: read_start_points(self.repo), lambda: usable_start_point(self.config, "main", self.base)):
-                    with self.assertRaisesRegex(RatchetError, "start-points.json"):
+                    with self.assertRaisesRegex(HouseRulesError, "start-points.json"):
                         call()
 
     def test_recording_over_a_damaged_file_fails_and_leaves_it_as_it_was(self) -> None:
         self.path.write_text("{not json", encoding="utf-8")
-        with self.assertRaisesRegex(RatchetError, "start-points.json is not JSON"):
+        with self.assertRaisesRegex(HouseRulesError, "start-points.json is not JSON"):
             record_start_point(self.config, "main", self.base)
         self.assertEqual(self.path.read_text(encoding="utf-8"), "{not json")
 
@@ -199,7 +199,7 @@ class CommonAncestorTest(RepoCase):
         self.assertIsNone(common_ancestor(self.repo, [self.third, self.commit("unrelated root")]))
 
     def test_a_commit_the_clone_does_not_have_is_an_error_and_not_none(self) -> None:
-        with self.assertRaisesRegex(RatchetError, "merge-base"):
+        with self.assertRaisesRegex(HouseRulesError, "merge-base"):
             common_ancestor(self.repo, [self.first, "a" * 40])
 
     def test_no_commit_at_all_is_refused_and_not_taken_for_histories_that_share_nothing(self) -> None:

@@ -16,12 +16,12 @@ from unittest import mock
 import support  # noqa: F401  (puts the repo root on sys.path)
 from support import _GIT_ENV, STYLE_RULES, RepoCase, git, review_item
 
-from ratchet.blocks import HASH_BEGIN, HASH_END, HTML_BEGIN, HTML_END, upsert_block
-from ratchet.cli import main
-from ratchet.errors import RatchetError
-from ratchet.hooks import Pinned, Placement, hook_body, place_block, probe_hook
-from ratchet.onboard import CLAUDE_MD_HEADING, EXECUTABLE_PATH, TEMPLATE_PATH
-from ratchet.start_point import START_POINTS_NAME
+from house_rules.blocks import HASH_BEGIN, HASH_END, HTML_BEGIN, HTML_END, upsert_block
+from house_rules.cli import main
+from house_rules.errors import HouseRulesError
+from house_rules.hooks import Pinned, Placement, hook_body, place_block, probe_hook
+from house_rules.onboard import CLAUDE_MD_HEADING, EXECUTABLE_PATH, TEMPLATE_PATH
+from house_rules.start_point import START_POINTS_NAME
 
 DIGEST = "CODING-STYLE.digest.md"
 QUOTED_EXECUTABLE = shlex.quote(str(EXECUTABLE_PATH))
@@ -73,7 +73,7 @@ class InitCase(RepoCase):
 class FreshRepoTest(InitCase):
     def test_yes_sets_everything_up_from_the_template(self) -> None:
         out = self.init("--yes")
-        self.assertEqual(json.loads(self.text(".ratchet.json")), {"rules_files": ["CODING-STYLE.md"], "wrapup_auto": True})
+        self.assertEqual(json.loads(self.text(".house-rules.json")), {"rules_files": ["CODING-STYLE.md"], "wrapup_auto": True})
         self.assertEqual(self.text("CODING-STYLE.md"), TEMPLATE_PATH.read_text(encoding="utf-8"))
         self.assertTrue((self.repo / DIGEST).is_file())
         self.assertEqual(self.text("CLAUDE.md"), f"{HTML_BEGIN}\n{CLAUDE_MD_HEADING}\n@{DIGEST}\n{HTML_END}\n")
@@ -91,9 +91,9 @@ class FreshRepoTest(InitCase):
             text = path.read_text(encoding="utf-8")
             self.assertTrue(text.startswith("#!/bin/sh\n"), name)
             self.assertTrue(os.access(path, os.X_OK), name)
-            self.assertIn(f"_ratchet_bin={QUOTED_EXECUTABLE}\n", text)
-            self.assertIn(f"_ratchet_py={QUOTED_INTERPRETER}\n", text)
-            self.assertIn(f'"$_ratchet_py" "$_ratchet_bin" {command}', text)
+            self.assertIn(f"_house_rules_bin={QUOTED_EXECUTABLE}\n", text)
+            self.assertIn(f"_house_rules_py={QUOTED_INTERPRETER}\n", text)
+            self.assertIn(f'"$_house_rules_py" "$_house_rules_bin" {command}', text)
             self.assertEqual(text.count(HASH_BEGIN), 1)
             self.assertEqual(text.count(HASH_END), 1)
 
@@ -109,8 +109,8 @@ class FreshRepoTest(InitCase):
     def test_gitignore_lists_the_ledger_the_label_files_and_the_local_state_directory(self) -> None:
         self.init("--yes")
         self.assertEqual(self.text(".gitignore"), "\n".join([
-            HASH_BEGIN, ".style-findings.jsonl", ".ratchet-label-page.html", ".ratchet-label-batch.json",
-            ".ratchet/", HASH_END, ""]))
+            HASH_BEGIN, ".style-findings.jsonl", ".house-rules-label-page.html", ".house-rules-label-batch.json",
+            ".house-rules/", HASH_END, ""]))
 
     def test_it_ends_with_three_next_steps(self) -> None:
         out = self.init("--yes")
@@ -122,7 +122,7 @@ class FreshRepoTest(InitCase):
 
     def test_the_last_next_step_points_to_the_wrap_up_and_label_first_and_to_label_page_as_the_batch_route(self) -> None:
         last = [line for line in self.init("--yes").splitlines() if line.startswith("next 3:")][0]
-        marks = [last.index(text) for text in (" wrapup ", "/review-ratchet:wrapup", " label <id> --outcome ", " label-page ")]
+        marks = [last.index(text) for text in (" wrapup ", "/house-rules:wrapup", " label <id> --outcome ", " label-page ")]
         self.assertEqual(marks, sorted(marks))
 
     def test_a_directory_that_is_not_a_git_repo_is_an_error(self) -> None:
@@ -160,7 +160,7 @@ class IdempotenceTest(InitCase):
     def test_a_hook_path_that_moved_is_refreshed_in_place(self) -> None:
         self.init("--yes")
         path = self.hook("pre-commit")
-        path.write_text(path.read_text(encoding="utf-8").replace(QUOTED_EXECUTABLE, "/old/place/ratchet")
+        path.write_text(path.read_text(encoding="utf-8").replace(QUOTED_EXECUTABLE, "/old/place/house-rules")
                         .replace(QUOTED_INTERPRETER, "/old/python3"), encoding="utf-8")
         out = self.init("--yes")
         self.assertEqual(self.statuses(out)["hook pre-commit"], "updated")
@@ -209,7 +209,7 @@ class RulesFileTest(InitCase):
         (self.repo / "docs").mkdir()
         (self.repo / "docs" / "CODING-STYLE.md").write_text(STYLE_RULES, encoding="utf-8")
         self.init("--yes")
-        self.assertEqual(json.loads(self.text(".ratchet.json")), {"rules_files": ["docs/CODING-STYLE.md"], "wrapup_auto": True})
+        self.assertEqual(json.loads(self.text(".house-rules.json")), {"rules_files": ["docs/CODING-STYLE.md"], "wrapup_auto": True})
         self.assertFalse((self.repo / "CODING-STYLE.md").exists())
 
     def test_template_never_overwrites_an_existing_file(self) -> None:
@@ -222,14 +222,14 @@ class RulesFileTest(InitCase):
         mine = self.repo / "mine.md"
         mine.write_text(STYLE_RULES, encoding="utf-8")
         self.init("--yes", "--rules-file", str(mine))
-        self.assertEqual(json.loads(self.text(".ratchet.json")), {"rules_files": ["mine.md"], "wrapup_auto": True})
+        self.assertEqual(json.loads(self.text(".house-rules.json")), {"rules_files": ["mine.md"], "wrapup_auto": True})
         self.assertFalse((self.repo / "CODING-STYLE.md").exists())
 
     def test_rules_file_outside_the_repo_is_stored_absolute(self) -> None:
         shared = self.tmp / "shared.md"
         shared.write_text(STYLE_RULES, encoding="utf-8")
         self.init("--yes", "--rules-file", str(shared))
-        self.assertEqual(json.loads(self.text(".ratchet.json")), {"rules_files": [str(shared)], "wrapup_auto": True})
+        self.assertEqual(json.loads(self.text(".house-rules.json")), {"rules_files": [str(shared)], "wrapup_auto": True})
         self.assertTrue((self.repo / DIGEST).is_file())
 
     def test_a_missing_rules_file_is_an_error_and_nothing_is_written(self) -> None:
@@ -256,16 +256,16 @@ class ConfigFileTest(InitCase):
     def test_other_config_keys_are_kept_when_rules_files_is_added(self) -> None:
         self.write_config(label_page_threshold=5, repo_slug="mine")
         out = self.init("--yes")
-        self.assertEqual(json.loads(self.text(".ratchet.json")),
+        self.assertEqual(json.loads(self.text(".house-rules.json")),
                          {"label_page_threshold": 5, "repo_slug": "mine", "rules_files": ["CODING-STYLE.md"], "wrapup_auto": True})
         self.assertEqual(self.statuses(out)["config"], "updated")
 
     def test_a_config_with_rules_files_and_wrapup_auto_is_left_byte_for_byte(self) -> None:
         self.write_rules(STYLE_RULES)
         config = '{"rules_files":["rules.md"],   "scenarios": {}, "wrapup_auto": false}'
-        (self.repo / ".ratchet.json").write_text(config, encoding="utf-8")
+        (self.repo / ".house-rules.json").write_text(config, encoding="utf-8")
         out = self.init("--yes")
-        self.assertEqual(self.text(".ratchet.json"), config)
+        self.assertEqual(self.text(".house-rules.json"), config)
         self.assertEqual(self.statuses(out)["config"], "already ok")
         self.assertFalse((self.repo / "CODING-STYLE.md").exists())
 
@@ -410,7 +410,7 @@ class HooksTest(InitCase):
             out = self.init("--yes")
         self.assertTrue((shared / "pre-commit").is_file())
         self.assertIn(f"core.hooksPath comes from {config}", out)
-        self.assertIn("skips repos without .ratchet.json", out)
+        self.assertIn("skips repos without .house-rules.json", out)
 
     def test_a_hooks_path_set_in_the_repo_config_is_not_called_out(self) -> None:
         git(self.repo, "config", "core.hooksPath", ".githooks")
@@ -442,12 +442,12 @@ class HookScriptTest(unittest.TestCase):
         script = "#!/bin/sh\n" + "\n".join(hook_body(hook, (interpreter, executable))) + "\necho reached-the-end\n"
         with support_tmpdir() as repo:
             if with_config:
-                (repo / ".ratchet.json").write_text("{}", encoding="utf-8")
+                (repo / ".house-rules.json").write_text("{}", encoding="utf-8")
             return subprocess.run(["sh", "-c", script], capture_output=True, text=True, cwd=repo)
 
     def fake_executable(self, directory: Path, exit_code: int) -> Path:
-        """A Python script with an `env python3` shebang, like bin/ratchet: the hook must not depend on that line."""
-        path = directory / "with space" / "ratchet"
+        """A Python script with an `env python3` shebang, like bin/house-rules: the hook must not depend on that line."""
+        path = directory / "with space" / "house-rules"
         path.parent.mkdir(parents=True)
         path.write_text(f'#!/usr/bin/env python3\nimport sys\nprint("args:", *sys.argv[1:])\nsys.exit({exit_code})\n', encoding="utf-8")
         path.chmod(0o755)
@@ -488,11 +488,11 @@ class HookScriptTest(unittest.TestCase):
     def test_a_missing_executable_warns_loudly_and_does_not_fail(self) -> None:
         for hook in ("pre-commit", "post-commit"):
             with self.subTest(hook=hook):
-                proc = self.run_block(hook, Path("/nonexistent/place/ratchet"))
+                proc = self.run_block(hook, Path("/nonexistent/place/house-rules"))
                 self.assertEqual(proc.returncode, 0)
                 self.assertIn("reached-the-end", proc.stdout)
                 self.assertIn("WARNING", proc.stderr)
-                self.assertIn("/nonexistent/place/ratchet", proc.stderr)
+                self.assertIn("/nonexistent/place/house-rules", proc.stderr)
                 self.assertIn(f"{hook} is NOT running", proc.stderr)
 
     def test_a_missing_interpreter_warns_loudly_and_does_not_fail(self) -> None:
@@ -523,7 +523,7 @@ class HookScriptTest(unittest.TestCase):
             decoy.write_text("#!/bin/sh\necho decoy-python3-ran\nexit 7\n", encoding="utf-8")
             decoy.chmod(0o755)
             script = "#!/bin/sh\n" + "\n".join(hook_body("post-commit", (Path(sys.executable), self.fake_executable(tmp, 0)))) + "\n"
-            (tmp / ".ratchet.json").write_text("{}", encoding="utf-8")
+            (tmp / ".house-rules.json").write_text("{}", encoding="utf-8")
             proc = subprocess.run(["sh", "-c", script], capture_output=True, text=True, cwd=tmp,
                                   env={**os.environ, "PATH": f"{decoy.parent}:{os.environ['PATH']}"})
         self.assertNotIn("decoy", proc.stdout)
@@ -549,7 +549,7 @@ class GitignoreTest(InitCase):
         self.init("--yes")
         text = self.text(".gitignore")
         self.assertEqual(text.count(".style-findings.jsonl"), 1)
-        self.assertIn(".ratchet-label-page.html", text)
+        self.assertIn(".house-rules-label-page.html", text)
         self.assertTrue(text.startswith("node_modules/\n.style-findings.jsonl\n\n" + HASH_BEGIN))
 
     def test_a_root_anchored_entry_counts_as_listed(self) -> None:
@@ -558,7 +558,7 @@ class GitignoreTest(InitCase):
         self.assertEqual(self.text(".gitignore").count(".style-findings.jsonl"), 1)
 
     def test_everything_already_listed_means_no_block(self) -> None:
-        listed = "\n".join([".style-findings.jsonl", ".ratchet-label-page.html", ".ratchet-label-batch.json", ".ratchet/", ""])
+        listed = "\n".join([".style-findings.jsonl", ".house-rules-label-page.html", ".house-rules-label-batch.json", ".house-rules/", ""])
         (self.repo / ".gitignore").write_text(listed, encoding="utf-8")
         out = self.init("--yes")
         self.assertEqual(self.text(".gitignore"), listed)
@@ -568,14 +568,14 @@ class GitignoreTest(InitCase):
         self.write_config(ledger="data/ledger.jsonl")
         self.init("--yes")
         lines = self.text(".gitignore").splitlines()
-        for entry in ("data/ledger.jsonl", "data/.ratchet-label-page.html", "data/.ratchet-label-batch.json"):
+        for entry in ("data/ledger.jsonl", "data/.house-rules-label-page.html", "data/.house-rules-label-batch.json"):
             self.assertIn(entry, lines)
         self.assertNotIn(".style-findings.jsonl", lines)
 
     def test_a_ledger_outside_the_repo_is_not_listed(self) -> None:
         self.write_config(ledger=str(self.tmp / "ledger.jsonl"))
         self.init("--yes")
-        self.assertEqual(self.text(".gitignore").splitlines(), [HASH_BEGIN, ".ratchet/", HASH_END])
+        self.assertEqual(self.text(".gitignore").splitlines(), [HASH_BEGIN, ".house-rules/", HASH_END])
 
     def test_a_half_written_block_is_an_error(self) -> None:
         (self.repo / ".gitignore").write_text(f"{HASH_END}\n{HASH_BEGIN}\n", encoding="utf-8")
@@ -591,8 +591,8 @@ class GitignoreTest(InitCase):
 
     def test_everything_under_the_local_state_directory_is_ignored_and_the_rule_change_record_is_not(self) -> None:
         self.init("--yes")
-        for name in (".ratchet/reviews/r1.txt", ".ratchet/proposals/abc/batch.json", ".ratchet/proposals/abc/receipt.json",
-                     ".ratchet/proposals/version.json", ".ratchet/proposals/write.lock"):
+        for name in (".house-rules/reviews/r1.txt", ".house-rules/proposals/abc/batch.json", ".house-rules/proposals/abc/receipt.json",
+                     ".house-rules/proposals/version.json", ".house-rules/proposals/write.lock"):
             with self.subTest(name):
                 self.assertTrue(self.is_ignored(name))
         for name in ("CODING-STYLE.changelog.md", "CODING-STYLE.md", "CODING-STYLE.digest.md"):
@@ -601,14 +601,14 @@ class GitignoreTest(InitCase):
 
     def test_a_block_from_an_earlier_version_is_refreshed_in_place(self) -> None:
         self.init("--yes")
-        old_block = [HASH_BEGIN, ".style-findings.jsonl", ".ratchet-label-page.html", ".ratchet-label-batch.json",
-                     ".ratchet/reviews/", HASH_END]
+        old_block = [HASH_BEGIN, ".style-findings.jsonl", ".house-rules-label-page.html", ".house-rules-label-batch.json",
+                     ".house-rules/reviews/", HASH_END]
         (self.repo / ".gitignore").write_text("\n".join(["node_modules/", "", *old_block, "dist/", ""]), encoding="utf-8")
         out = self.init("--yes")
         self.assertEqual(self.statuses(out)[".gitignore"], "updated")
         self.assertEqual(self.text(".gitignore"), "\n".join([
-            "node_modules/", "", HASH_BEGIN, ".style-findings.jsonl", ".ratchet-label-page.html", ".ratchet-label-batch.json",
-            ".ratchet/", HASH_END, "dist/", ""]))
+            "node_modules/", "", HASH_BEGIN, ".style-findings.jsonl", ".house-rules-label-page.html", ".house-rules-label-batch.json",
+            ".house-rules/", HASH_END, "dist/", ""]))
         self.assertEqual(self.statuses(self.init("--yes"))[".gitignore"], "already ok")
 
 
@@ -640,7 +640,7 @@ class InteractiveTest(InitCase):
         mine.write_text(STYLE_RULES, encoding="utf-8")
         code, _, err = self.ask(f"{mine}\n\n\n\n")
         self.assertEqual(code, 0, err)
-        self.assertEqual(json.loads(self.text(".ratchet.json")), {"rules_files": ["mine.md"], "wrapup_auto": True})
+        self.assertEqual(json.loads(self.text(".house-rules.json")), {"rules_files": ["mine.md"], "wrapup_auto": True})
 
     def test_typing_template_copies_the_template_even_when_a_file_is_detected(self) -> None:
         (self.repo / "docs").mkdir()
@@ -702,7 +702,7 @@ class UpsertBlockTest(unittest.TestCase):
 
     def test_marker_problems_are_errors_that_name_the_file(self) -> None:
         for text in ("<b>\nx\n", "x\n<e>\n", "<e>\n<b>\n", "<b>\n<b>\n<e>\n", "<b>\n<e>\n<e>\n"):
-            with self.subTest(text=text), self.assertRaisesRegex(RatchetError, "^CLAUDE.md: expected exactly one"):
+            with self.subTest(text=text), self.assertRaisesRegex(HouseRulesError, "^CLAUDE.md: expected exactly one"):
                 upsert_block(text, "<b>", "<e>", ["x"], "CLAUDE.md")
 
 
@@ -844,7 +844,7 @@ class HookPlacementTest(InitCase):
         return path
 
     def probe(self, path: Path) -> list[str]:
-        proc = subprocess.run([str(path)], cwd=self.repo, capture_output=True, text=True, env={**os.environ, "RATCHET_HOOK_PROBE": "1"})
+        proc = subprocess.run([str(path)], cwd=self.repo, capture_output=True, text=True, env={**os.environ, "HOUSE_RULES_HOOK_PROBE": "1"})
         return proc.stdout.splitlines()
 
     def test_a_final_exit_0_does_not_matter_because_the_block_is_under_the_shebang(self) -> None:
@@ -854,7 +854,7 @@ class HookPlacementTest(InitCase):
         self.assertEqual(self.statuses(out)["hook pre-commit"], "added")
         self.assertTrue(text.startswith(f"#!/bin/sh\n\n{HASH_BEGIN}\n"))
         self.assertTrue(text.endswith(f"{HASH_END}\n\necho mine\nexit 0\n"))
-        self.assertIn("ratchet-hook-probe pre-commit", self.probe(path))
+        self.assertIn("house-rules-hook-probe pre-commit", self.probe(path))
 
     def test_it_is_idempotent_and_a_rerun_says_already_ok(self) -> None:
         path = self.install("#!/bin/sh\necho mine\nexit 0\n")
@@ -884,11 +884,11 @@ class HookPlacementTest(InitCase):
                 self.assertEqual(self.statuses(out)["hook pre-commit"], "added")
                 self.assertTrue(text.startswith(f"#!/bin/sh\n\n{HASH_BEGIN}\n"))
                 self.assertTrue(text.endswith(f"{HASH_END}\n\n{user}"))
-                self.assertIn("ratchet-hook-probe pre-commit", self.probe(path))
+                self.assertIn("house-rules-hook-probe pre-commit", self.probe(path))
                 path.unlink()
 
     def test_a_block_an_earlier_version_appended_after_the_exit_is_moved_to_the_top(self) -> None:
-        old_block = "\n".join([HASH_BEGIN, *hook_body("pre-commit", (Path("/old/python3"), Path("/old/ratchet"))), HASH_END])
+        old_block = "\n".join([HASH_BEGIN, *hook_body("pre-commit", (Path("/old/python3"), Path("/old/house-rules"))), HASH_END])
         path = self.install(f"#!/bin/sh\necho mine\nexit 0\n\n{old_block}\n")
         out = self.init("--yes")
         text = path.read_text(encoding="utf-8")
@@ -911,7 +911,7 @@ class HookPlacementTest(InitCase):
         self.assertEqual(self.statuses(self.init("--yes"))["hook pre-commit"], "already ok")
 
     def test_the_dry_run_plans_the_move_without_making_it(self) -> None:
-        old_block = "\n".join([HASH_BEGIN, *hook_body("pre-commit", (Path("/old/python3"), Path("/old/ratchet"))), HASH_END])
+        old_block = "\n".join([HASH_BEGIN, *hook_body("pre-commit", (Path("/old/python3"), Path("/old/house-rules"))), HASH_END])
         original = f"#!/bin/sh\necho mine\nexit 0\n\n{old_block}\n"
         path = self.install(original)
         out = self.init("--dry-run")
@@ -959,7 +959,7 @@ class HookProbeTest(InitCase):
         self.assertEqual(self.statuses(out)[".gitignore"], "added")  # and so are the steps after it
         self.assertEqual(path.read_text(encoding="utf-8").count(HASH_BEGIN), 1)
         self.assertNotIn("next 1:", out)
-        self.assertNotIn("review-ratchet is set up", out)
+        self.assertNotIn("house-rules is set up", out)
         self.assertNotIn("commit the files", out)
 
     def test_a_rerun_does_not_turn_the_failure_into_already_ok(self) -> None:
@@ -977,8 +977,8 @@ class HookProbeTest(InitCase):
     def test_the_probe_variable_and_token_are_in_the_block(self) -> None:
         self.init("--yes")
         text = self.text(".git/hooks/pre-commit")
-        self.assertIn('if [ -n "${RATCHET_HOOK_PROBE:-}" ]; then', text)
-        self.assertIn('echo "ratchet-hook-probe pre-commit"', text)
+        self.assertIn('if [ -n "${HOUSE_RULES_HOOK_PROBE:-}" ]; then', text)
+        self.assertIn('echo "house-rules-hook-probe pre-commit"', text)
 
 
 class ProbeHookTest(InitCase):
@@ -991,7 +991,7 @@ class ProbeHookTest(InitCase):
         return probe_hook(path, hook, self.repo)
 
     def test_a_hook_that_prints_its_token_and_exits_0_passes(self) -> None:
-        self.assertIsNone(self.probe("#!/bin/sh\necho ratchet-hook-probe pre-commit\nexit 0\n"))
+        self.assertIsNone(self.probe("#!/bin/sh\necho house-rules-hook-probe pre-commit\nexit 0\n"))
 
     def test_a_hook_that_exits_0_without_the_token_fails(self) -> None:
         problem = self.probe("#!/bin/sh\nexit 0\n")
@@ -999,17 +999,17 @@ class ProbeHookTest(InitCase):
         self.assertIn("status 0", problem)
 
     def test_the_token_of_another_hook_is_not_the_answer(self) -> None:
-        self.assertIn("never reached", self.probe("#!/bin/sh\necho ratchet-hook-probe post-commit\n"))
+        self.assertIn("never reached", self.probe("#!/bin/sh\necho house-rules-hook-probe post-commit\n"))
 
     def test_a_hook_that_answers_with_a_failing_status_is_not_a_pass(self) -> None:
-        problem = self.probe("#!/bin/sh\necho ratchet-hook-probe pre-commit\nexit 3\n")  # the token alone is not enough
+        problem = self.probe("#!/bin/sh\necho house-rules-hook-probe pre-commit\nexit 3\n")  # the token alone is not enough
         self.assertIn("status 3", problem)
 
     def test_the_hook_output_is_quoted_back(self) -> None:
         self.assertIn("mine", self.probe("#!/bin/sh\necho mine\nexit 1\n"))
 
     def test_a_hook_that_takes_too_long_fails_with_the_time_limit(self) -> None:
-        with mock.patch("ratchet.hooks.PROBE_TIMEOUT_SECONDS", 1):
+        with mock.patch("house_rules.hooks.PROBE_TIMEOUT_SECONDS", 1):
             problem = self.probe("#!/bin/sh\nexec sleep 30\n")
         self.assertIn("did not finish within 1s", problem)
 
@@ -1046,8 +1046,8 @@ class PortableHookTest(InitCase):
 
     def as_machine(self, machine: str) -> contextlib.ExitStack:
         stack = contextlib.ExitStack()
-        stack.enter_context(mock.patch("ratchet.onboard.sys", SimpleNamespace(executable=f"/{machine}/bin/python3.12")))
-        stack.enter_context(mock.patch("ratchet.onboard.EXECUTABLE_PATH", Path(f"/{machine}/review-ratchet/bin/ratchet")))
+        stack.enter_context(mock.patch("house_rules.onboard.sys", SimpleNamespace(executable=f"/{machine}/bin/python3.12")))
+        stack.enter_context(mock.patch("house_rules.onboard.EXECUTABLE_PATH", Path(f"/{machine}/house-rules/bin/house-rules")))
         return stack
 
     def test_the_block_holds_no_path_of_this_machine(self) -> None:
@@ -1056,8 +1056,8 @@ class PortableHookTest(InitCase):
             with self.subTest(name):
                 for machine_specific in (sys.executable, str(EXECUTABLE_PATH), str(EXECUTABLE_PATH.parent), str(self.repo), str(self.tmp)):
                     self.assertNotIn(machine_specific, text)
-                self.assertNotIn("_ratchet_py=/", text)
-                self.assertNotIn("_ratchet_bin=/", text)
+                self.assertNotIn("_house_rules_py=/", text)
+                self.assertNotIn("_house_rules_bin=/", text)
 
     def test_the_report_calls_it_portable_and_does_not_say_to_keep_it_out_of_git(self) -> None:
         out = self.init("--yes")
@@ -1077,10 +1077,10 @@ class PortableHookTest(InitCase):
 
     def test_the_same_two_machines_do_change_a_pinned_hook(self) -> None:
         git(self.repo, "config", "--unset", "core.hooksPath")  # control: .git/hooks is not tracked, so it keeps the absolute paths
-        with self.as_machine("machine-a"), mock.patch("ratchet.onboard.probe_hook", return_value=None):  # those paths do not exist
+        with self.as_machine("machine-a"), mock.patch("house_rules.onboard.probe_hook", return_value=None):  # those paths do not exist
             self.init("--yes")
         first = self.text(".git/hooks/pre-commit")
-        with self.as_machine("machine-b"), mock.patch("ratchet.onboard.probe_hook", return_value=None):
+        with self.as_machine("machine-b"), mock.patch("house_rules.onboard.probe_hook", return_value=None):
             out = self.init("--yes")
         self.assertNotEqual(self.text(".git/hooks/pre-commit"), first)
         self.assertEqual(self.statuses(out)["hook pre-commit"], "updated")
@@ -1091,19 +1091,19 @@ class PortableHookTest(InitCase):
         git(self.repo, "config", "core.hooksPath", str(shared))
         self.init("--yes")
         text = (shared / "pre-commit").read_text(encoding="utf-8")
-        self.assertIn(f"_ratchet_bin={QUOTED_EXECUTABLE}\n", text)
-        self.assertIn(f"_ratchet_py={QUOTED_INTERPRETER}\n", text)
+        self.assertIn(f"_house_rules_bin={QUOTED_EXECUTABLE}\n", text)
+        self.assertIn(f"_house_rules_py={QUOTED_INTERPRETER}\n", text)
 
     def test_dot_git_hooks_keeps_the_absolute_paths(self) -> None:
         git(self.repo, "config", "--unset", "core.hooksPath")
         self.init("--yes")
-        self.assertIn(f"_ratchet_bin={QUOTED_EXECUTABLE}\n", self.text(".git/hooks/pre-commit"))
+        self.assertIn(f"_house_rules_bin={QUOTED_EXECUTABLE}\n", self.text(".git/hooks/pre-commit"))
 
     def test_a_copy_of_the_tool_inside_the_repo_is_pointed_at_through_bin(self) -> None:
-        inside = self.repo / "third_party" / "ratchet" / "bin" / "ratchet"
-        with mock.patch("ratchet.onboard.EXECUTABLE_PATH", inside):
+        inside = self.repo / "third_party" / "house-rules" / "bin" / "house-rules"
+        with mock.patch("house_rules.onboard.EXECUTABLE_PATH", inside):
             out = self.init("--yes")
-        self.assertIn('set "bin": "third_party/ratchet/bin/ratchet" in .ratchet.json', out)
+        self.assertIn('set "bin": "third_party/house-rules/bin/house-rules" in .house-rules.json', out)
 
     def test_the_real_tool_outside_the_repo_gets_no_such_hint(self) -> None:
         self.assertNotIn('set "bin"', self.init("--yes"))
@@ -1131,7 +1131,7 @@ class PortableBlockRuntimeTest(unittest.TestCase):
         self.tmp = Path(os.path.realpath(tmp.name))
         self.repo = self.tmp / "repo"
         self.repo.mkdir()
-        (self.repo / ".ratchet.json").write_text("{}", encoding="utf-8")
+        (self.repo / ".house-rules.json").write_text("{}", encoding="utf-8")
         self.path_dir = self.tmp / "path-bin"
         self.path_dir.mkdir()
         self.python3_log = self.tmp / "python3.log"
@@ -1151,38 +1151,38 @@ class PortableBlockRuntimeTest(unittest.TestCase):
         full_env = {"PATH": f"{self.path_dir}:/usr/bin:/bin", "HOME": str(self.tmp), **env}
         return subprocess.run(["sh", "-c", script], capture_output=True, text=True, cwd=self.repo, env=full_env)
 
-    def test_ratchet_bin_from_the_environment_is_used(self) -> None:
+    def test_house_rules_bin_from_the_environment_is_used(self) -> None:
         tool = self.fake_tool(self.tmp / "elsewhere" / "tool.py", "from-env")
-        proc = self.run_block("post-commit", RATCHET_BIN=str(tool))
+        proc = self.run_block("post-commit", HOUSE_RULES_BIN=str(tool))
         self.assertIn("from-env: infer --quiet", proc.stdout)
         self.assertEqual(proc.stderr, "")
 
     def test_the_environment_beats_the_config_and_the_config_beats_the_path(self) -> None:
-        self.fake_tool(self.repo / "tools" / "ratchet.py", "from-config")
-        self.fake_tool(self.path_dir / "ratchet", "from-path")
-        (self.repo / ".ratchet.json").write_text(json.dumps({"bin": "tools/ratchet.py"}), encoding="utf-8")
+        self.fake_tool(self.repo / "tools" / "house-rules.py", "from-config")
+        self.fake_tool(self.path_dir / "house-rules", "from-path")
+        (self.repo / ".house-rules.json").write_text(json.dumps({"bin": "tools/house-rules.py"}), encoding="utf-8")
         env_tool = self.fake_tool(self.tmp / "env.py", "from-env")
-        self.assertIn("from-env:", self.run_block("post-commit", RATCHET_BIN=str(env_tool)).stdout)
+        self.assertIn("from-env:", self.run_block("post-commit", HOUSE_RULES_BIN=str(env_tool)).stdout)
         self.assertIn("from-config:", self.run_block("post-commit").stdout)
 
     def test_bin_in_the_config_is_relative_to_the_repo_root(self) -> None:
-        self.fake_tool(self.repo / "third_party" / "ratchet" / "bin" / "ratchet", "vendored")
-        (self.repo / ".ratchet.json").write_text(json.dumps({"bin": "third_party/ratchet/bin/ratchet"}), encoding="utf-8")
+        self.fake_tool(self.repo / "third_party" / "house-rules" / "bin" / "house-rules", "vendored")
+        (self.repo / ".house-rules.json").write_text(json.dumps({"bin": "third_party/house-rules/bin/house-rules"}), encoding="utf-8")
         proc = self.run_block("post-commit")
         self.assertIn("vendored: infer --quiet", proc.stdout)
 
-    def test_without_either_the_ratchet_on_the_path_is_used(self) -> None:
-        self.fake_tool(self.path_dir / "ratchet", "from-path").chmod(0o755)  # `command -v` only finds executables
+    def test_without_either_the_house_rules_on_the_path_is_used(self) -> None:
+        self.fake_tool(self.path_dir / "house-rules", "from-path").chmod(0o755)  # `command -v` only finds executables
         proc = self.run_block("post-commit")
         self.assertIn("from-path: infer --quiet", proc.stdout)
 
     def test_a_bin_that_does_not_exist_warns_instead_of_falling_back_to_the_path(self) -> None:
-        self.fake_tool(self.path_dir / "ratchet", "from-path")
-        (self.repo / ".ratchet.json").write_text(json.dumps({"bin": "tools/gone.py"}), encoding="utf-8")
+        self.fake_tool(self.path_dir / "house-rules", "from-path")
+        (self.repo / ".house-rules.json").write_text(json.dumps({"bin": "tools/gone.py"}), encoding="utf-8")
         proc = self.run_block("pre-commit")
         self.assertEqual(proc.returncode, 0)
         self.assertNotIn("from-path", proc.stdout)
-        self.assertIn("WARNING: cannot find the ratchet executable", proc.stderr)
+        self.assertIn("WARNING: cannot find the house-rules executable", proc.stderr)
         self.assertIn("pre-commit is NOT running", proc.stderr)
         self.assertIn("reached-the-end", proc.stdout)
 
@@ -1193,22 +1193,22 @@ class PortableBlockRuntimeTest(unittest.TestCase):
                     proc = self.run_block(hook, prologue=flags)
                     self.assertEqual(proc.returncode, 0, proc.stderr)
                     self.assertIn("reached-the-end", proc.stdout)
-                    self.assertIn("WARNING: cannot find the ratchet executable (set RATCHET_BIN", proc.stderr)
+                    self.assertIn("WARNING: cannot find the house-rules executable (set HOUSE_RULES_BIN", proc.stderr)
                     self.assertIn(f"{hook} is NOT running", proc.stderr)
 
     def test_a_config_that_cannot_be_read_does_not_end_a_set_e_hook(self) -> None:
-        (self.repo / ".ratchet.json").write_text("{not json", encoding="utf-8")
-        self.fake_tool(self.path_dir / "ratchet", "from-path").chmod(0o755)
+        (self.repo / ".house-rules.json").write_text("{not json", encoding="utf-8")
+        self.fake_tool(self.path_dir / "house-rules", "from-path").chmod(0o755)
         proc = self.run_block("post-commit", prologue="set -e\n")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("from-path: infer --quiet", proc.stdout)
         self.assertIn("reached-the-end", proc.stdout)
 
-    def test_ratchet_py_from_the_environment_is_used_and_python3_on_the_path_is_the_default(self) -> None:
+    def test_house_rules_py_from_the_environment_is_used_and_python3_on_the_path_is_the_default(self) -> None:
         tool = self.fake_tool(self.tmp / "tool.py", "ran")
-        self.run_block("post-commit", RATCHET_BIN=str(tool), RATCHET_PY=sys.executable)
+        self.run_block("post-commit", HOUSE_RULES_BIN=str(tool), HOUSE_RULES_PY=sys.executable)
         self.assertFalse(self.python3_log.exists())  # the shim was not used
-        self.run_block("post-commit", RATCHET_BIN=str(tool))
+        self.run_block("post-commit", HOUSE_RULES_BIN=str(tool))
         self.assertTrue(self.python3_log.exists())
 
     def test_a_python_that_is_too_old_warns_and_runs_nothing(self) -> None:
@@ -1218,7 +1218,7 @@ class PortableBlockRuntimeTest(unittest.TestCase):
         tool = self.fake_tool(self.tmp / "tool.py", "ran")
         for hook in ("pre-commit", "post-commit"):
             with self.subTest(hook=hook):
-                proc = self.run_block(hook, RATCHET_PY=str(old), RATCHET_BIN=str(tool))
+                proc = self.run_block(hook, HOUSE_RULES_PY=str(old), HOUSE_RULES_BIN=str(tool))
                 self.assertEqual(proc.returncode, 0)
                 self.assertNotIn("ran:", proc.stdout)
                 self.assertIn(f"WARNING: {old} is missing or older than Python 3.10", proc.stderr)
@@ -1227,26 +1227,26 @@ class PortableBlockRuntimeTest(unittest.TestCase):
 
     def test_a_missing_python_warns_and_runs_nothing(self) -> None:
         tool = self.fake_tool(self.tmp / "tool.py", "ran")
-        proc = self.run_block("pre-commit", RATCHET_PY="/nonexistent/python3.99", RATCHET_BIN=str(tool))
+        proc = self.run_block("pre-commit", HOUSE_RULES_PY="/nonexistent/python3.99", HOUSE_RULES_BIN=str(tool))
         self.assertEqual(proc.returncode, 0)
         self.assertIn("WARNING: /nonexistent/python3.99 is missing or older than Python 3.10", proc.stderr)
         self.assertIn("reached-the-end", proc.stdout)
 
     def test_a_failing_check_blocks_pre_commit_and_never_post_commit(self) -> None:
         tool = self.fake_tool(self.tmp / "tool.py", "ran", exit_code=1)
-        blocked = self.run_block("pre-commit", RATCHET_BIN=str(tool))
+        blocked = self.run_block("pre-commit", HOUSE_RULES_BIN=str(tool))
         self.assertEqual(blocked.returncode, 1)
         self.assertNotIn("reached-the-end", blocked.stdout)
-        survived = self.run_block("post-commit", RATCHET_BIN=str(tool))
+        survived = self.run_block("post-commit", HOUSE_RULES_BIN=str(tool))
         self.assertEqual(survived.returncode, 0)
         self.assertIn("reached-the-end", survived.stdout)
 
     def test_a_failing_check_blocks_under_set_e_too(self) -> None:
         tool = self.fake_tool(self.tmp / "tool.py", "ran", exit_code=1)
-        self.assertEqual(self.run_block("pre-commit", prologue="set -e\n", RATCHET_BIN=str(tool)).returncode, 1)
+        self.assertEqual(self.run_block("pre-commit", prologue="set -e\n", HOUSE_RULES_BIN=str(tool)).returncode, 1)
 
     def test_a_repo_without_a_config_is_left_alone(self) -> None:
-        (self.repo / ".ratchet.json").unlink()
+        (self.repo / ".house-rules.json").unlink()
         for hook in ("pre-commit", "post-commit"):
             with self.subTest(hook=hook):
                 proc = self.run_block(hook)
@@ -1254,23 +1254,23 @@ class PortableBlockRuntimeTest(unittest.TestCase):
                 self.assertEqual(proc.stdout.strip(), "reached-the-end")
 
     def test_the_probe_answers_before_anything_else_in_both_kinds_of_block(self) -> None:
-        (self.repo / ".ratchet.json").unlink()  # not even a config is needed
-        for label, pinned in (("portable", None), ("pinned", (Path("/nonexistent/python3"), Path("/nonexistent/ratchet")))):
+        (self.repo / ".house-rules.json").unlink()  # not even a config is needed
+        for label, pinned in (("portable", None), ("pinned", (Path("/nonexistent/python3"), Path("/nonexistent/house-rules")))):
             for hook in ("pre-commit", "post-commit"):
                 with self.subTest(kind=label, hook=hook):
                     script = "#!/bin/sh\n" + "\n".join(hook_body(hook, pinned)) + "\necho reached-the-end\n"
                     proc = subprocess.run(["sh", "-c", script], capture_output=True, text=True, cwd=self.repo,
-                                          env={"PATH": "/usr/bin:/bin", "RATCHET_HOOK_PROBE": "1"})
-                    self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, f"ratchet-hook-probe {hook}\n", ""))
+                                          env={"PATH": "/usr/bin:/bin", "HOUSE_RULES_HOOK_PROBE": "1"})
+                    self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (0, f"house-rules-hook-probe {hook}\n", ""))
 
     def test_an_empty_probe_variable_is_not_a_probe(self) -> None:
-        proc = self.run_block("pre-commit", RATCHET_HOOK_PROBE="")
+        proc = self.run_block("pre-commit", HOUSE_RULES_HOOK_PROBE="")
         self.assertIn("reached-the-end", proc.stdout)
-        self.assertNotIn("ratchet-hook-probe", proc.stdout)
+        self.assertNotIn("house-rules-hook-probe", proc.stdout)
 
     # The block sits above the user's code in the same shell, so what it assigns is what that code would read.
-    SHOW_VARIABLES = ('echo "RATCHET_PY=${RATCHET_PY-unset} RATCHET_BIN=${RATCHET_BIN-unset} '
-                      '_ratchet_py=${_ratchet_py-unset} _ratchet_bin=${_ratchet_bin-unset}"')
+    SHOW_VARIABLES = ('echo "HOUSE_RULES_PY=${HOUSE_RULES_PY-unset} HOUSE_RULES_BIN=${HOUSE_RULES_BIN-unset} '
+                      '_house_rules_py=${_house_rules_py-unset} _house_rules_bin=${_house_rules_bin-unset}"')
 
     def variables_after(self, hook: str, **kwargs: object) -> dict[str, str]:
         proc = self.run_block(hook, after=self.SHOW_VARIABLES, **kwargs)
@@ -1278,12 +1278,12 @@ class PortableBlockRuntimeTest(unittest.TestCase):
         return dict(pair.split("=", 1) for pair in proc.stdout.splitlines()[-1].split())
 
     def test_a_portable_block_leaves_no_variable_behind_whichever_way_it_ends(self) -> None:
-        unset = {"RATCHET_PY": "unset", "RATCHET_BIN": "unset", "_ratchet_py": "unset", "_ratchet_bin": "unset"}
-        self.fake_tool(self.repo / "tools" / "ratchet.py", "from-config")
-        config = self.repo / ".ratchet.json"
+        unset = {"HOUSE_RULES_PY": "unset", "HOUSE_RULES_BIN": "unset", "_house_rules_py": "unset", "_house_rules_bin": "unset"}
+        self.fake_tool(self.repo / "tools" / "house-rules.py", "from-config")
+        config = self.repo / ".house-rules.json"
         for hook in ("pre-commit", "post-commit"):
             with self.subTest("the tool runs", hook=hook):
-                config.write_text(json.dumps({"bin": "tools/ratchet.py"}), encoding="utf-8")
+                config.write_text(json.dumps({"bin": "tools/house-rules.py"}), encoding="utf-8")
                 self.assertEqual(self.variables_after(hook), unset)
             with self.subTest("the tool is missing", hook=hook):
                 config.write_text(json.dumps({"bin": "tools/gone.py"}), encoding="utf-8")
@@ -1299,16 +1299,16 @@ class PortableBlockRuntimeTest(unittest.TestCase):
     def test_a_portable_block_keeps_the_users_own_values(self) -> None:
         tool = self.fake_tool(self.tmp / "tool.py", "ran")
         with self.subTest("exported"):
-            shown = self.variables_after("post-commit", RATCHET_BIN=str(tool), RATCHET_PY=sys.executable)
-            self.assertEqual((shown["RATCHET_BIN"], shown["RATCHET_PY"]), (str(tool), sys.executable))
-            self.assertEqual((shown["_ratchet_bin"], shown["_ratchet_py"]), ("unset", "unset"))
+            shown = self.variables_after("post-commit", HOUSE_RULES_BIN=str(tool), HOUSE_RULES_PY=sys.executable)
+            self.assertEqual((shown["HOUSE_RULES_BIN"], shown["HOUSE_RULES_PY"]), (str(tool), sys.executable))
+            self.assertEqual((shown["_house_rules_bin"], shown["_house_rules_py"]), ("unset", "unset"))
         with self.subTest("set earlier in the hook"):
-            shown = self.variables_after("post-commit", prologue="RATCHET_PY=mine-py\nRATCHET_BIN=mine-bin\n")
-            self.assertEqual((shown["RATCHET_BIN"], shown["RATCHET_PY"]), ("mine-bin", "mine-py"))
+            shown = self.variables_after("post-commit", prologue="HOUSE_RULES_PY=mine-py\nHOUSE_RULES_BIN=mine-bin\n")
+            self.assertEqual((shown["HOUSE_RULES_BIN"], shown["HOUSE_RULES_PY"]), ("mine-bin", "mine-py"))
 
     def test_a_pinned_block_runs_and_leaves_the_users_variables_alone(self) -> None:
         tool = self.fake_tool(self.tmp / "tool.py", "ran")
-        user = "RATCHET_PY=mine-py\nRATCHET_BIN=mine-bin\n"
+        user = "HOUSE_RULES_PY=mine-py\nHOUSE_RULES_BIN=mine-bin\n"
         for label, pinned, ran in (("the tool runs", (Path(sys.executable), tool), True),
                                    ("the interpreter is missing", (Path("/nonexistent/python3"), tool), False),
                                    ("the tool is missing", (Path(sys.executable), self.tmp / "gone.py"), False)):
@@ -1317,12 +1317,12 @@ class PortableBlockRuntimeTest(unittest.TestCase):
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.assertEqual("ran: infer --quiet" in proc.stdout, ran)
                 self.assertEqual(proc.stdout.splitlines()[-1],
-                                 "RATCHET_PY=mine-py RATCHET_BIN=mine-bin _ratchet_py=unset _ratchet_bin=unset")
+                                 "HOUSE_RULES_PY=mine-py HOUSE_RULES_BIN=mine-bin _house_rules_py=unset _house_rules_bin=unset")
         with self.subTest("no config"):
-            (self.repo / ".ratchet.json").unlink()
+            (self.repo / ".house-rules.json").unlink()
             proc = self.run_block("post-commit", prologue=user, pinned=(Path(sys.executable), tool), after=self.SHOW_VARIABLES)
             self.assertEqual(proc.stdout.splitlines()[-1],
-                             "RATCHET_PY=mine-py RATCHET_BIN=mine-bin _ratchet_py=unset _ratchet_bin=unset")
+                             "HOUSE_RULES_PY=mine-py HOUSE_RULES_BIN=mine-bin _house_rules_py=unset _house_rules_bin=unset")
 
     def test_a_pinned_block_still_ends_the_whole_hook_when_the_check_fails(self) -> None:
         failing = self.fake_tool(self.tmp / "tool.py", "ran", exit_code=1)
@@ -1352,8 +1352,8 @@ class CommitHintTest(InitCase):
         out = self.init("--yes")
         header, line = self.hint(out)
         self.assertIn("until these are committed together every other commit is blocked", header)
-        self.assertEqual(line, '  git add .ratchet.json CODING-STYLE.md CODING-STYLE.digest.md CLAUDE.md .gitignore '
-                               '&& git commit -m "chore: adopt review-ratchet"')
+        self.assertEqual(line, '  git add .house-rules.json CODING-STYLE.md CODING-STYLE.digest.md CLAUDE.md .gitignore '
+                               '&& git commit -m "chore: adopt house-rules"')
 
     def test_the_commit_hint_comes_before_the_next_steps_which_stay_last(self) -> None:
         lines = self.init("--yes").splitlines()
@@ -1376,7 +1376,7 @@ class CommitHintTest(InitCase):
         git(self.repo, "rm", "-q", "--cached", "other.txt")
         adopted = self.run_line(self.hint(out)[1].strip())
         self.assertEqual(adopted.returncode, 0, adopted.stderr)
-        self.assertEqual(git(self.repo, "log", "--format=%s"), "chore: adopt review-ratchet")
+        self.assertEqual(git(self.repo, "log", "--format=%s"), "chore: adopt house-rules")
         git(self.repo, "add", "other.txt")
         later = self.commit_other()
         self.assertEqual(later.returncode, 0, later.stderr)
@@ -1389,21 +1389,21 @@ class CommitHintTest(InitCase):
         self.assertEqual(self.start_point_step(recording)[0], "added")
         self.assertTrue(recording.splitlines()[-1].startswith("next 3:"))
         rerun = self.init("--yes")
-        self.assertEqual(rerun.splitlines()[-1], "review-ratchet is set up")
+        self.assertEqual(rerun.splitlines()[-1], "house-rules is set up")
         self.assertNotIn("commit the files", rerun)
         self.assertNotIn("next 1:", rerun)
 
     def test_an_all_ok_rerun_with_nothing_committed_still_points_at_the_commit(self) -> None:
         self.init("--yes")
         rerun = self.init("--yes")
-        self.assertIn("review-ratchet is set up", rerun)
+        self.assertIn("house-rules is set up", rerun)
         self.assertIn("commit the files init created", rerun)
         self.assertNotIn("next 1:", rerun)
 
     def test_a_step_the_user_opted_out_of_still_counts_as_set_up(self) -> None:
         self.init("--yes", "--no-claude-md")
         rerun = self.init("--yes", "--no-claude-md")
-        self.assertIn("review-ratchet is set up", rerun)
+        self.assertIn("house-rules is set up", rerun)
         self.assertNotIn("next 1:", rerun)
 
     def test_an_ignored_file_is_not_listed_because_git_add_would_refuse_it(self) -> None:
@@ -1421,7 +1421,7 @@ class CommitHintTest(InitCase):
         shared.write_text(STYLE_RULES, encoding="utf-8")
         _, line = self.hint(self.init("--yes", "--rules-file", str(shared)))
         self.assertNotIn("shared.md", line)
-        self.assertIn(".ratchet.json", line)
+        self.assertIn(".house-rules.json", line)
 
     def test_names_with_spaces_are_quoted(self) -> None:
         (self.repo / "docs dir").mkdir()
@@ -1495,9 +1495,9 @@ class StartPointStepTest(InitCase):
         git(self.repo, "branch", "-m", "main", "trunk")
         out = self.init_without_hooks()
         self.assertEqual(self.start_point_step(out), ("skipped", "no default branch found (no origin/HEAD, main or master): "
-                                                                 "set default_branch in .ratchet.json and run init again"))
+                                                                 "set default_branch in .house-rules.json and run init again"))
         self.assertFalse((self.repo / START_POINTS_NAME).exists())
-        self.write_config(**json.loads(self.text(".ratchet.json")), default_branch="trunk")
+        self.write_config(**json.loads(self.text(".house-rules.json")), default_branch="trunk")
         self.assertEqual(self.start_point_step(self.init_without_hooks()), ("added", self.recording_detail(base, "trunk")))
         self.assertEqual(self.recorded(), {"trunk": base})
 
@@ -1552,7 +1552,7 @@ class StartPointStepTest(InitCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(self.start_point_step(out), ("added", self.recording_detail(base)))
         self.assertEqual(self.recorded(), {"main": base})
-        self.assertFalse((linked / ".ratchet").exists())
+        self.assertFalse((linked / ".house-rules").exists())
 
     def test_a_damaged_start_points_file_stops_init_and_is_left_alone_and_a_rerun_after_deleting_it_records(self) -> None:
         base = self.commit("base")
@@ -1578,7 +1578,7 @@ class StartPointStepTest(InitCase):
 class DryRunDiffTest(InitCase):
     def test_every_file_a_real_run_would_write_is_shown_as_a_diff(self) -> None:
         out = self.init("--dry-run")
-        for name in (".ratchet.json", "CODING-STYLE.digest.md", "CLAUDE.md", ".gitignore", ".git/hooks/pre-commit", ".git/hooks/post-commit"):
+        for name in (".house-rules.json", "CODING-STYLE.digest.md", "CLAUDE.md", ".gitignore", ".git/hooks/pre-commit", ".git/hooks/post-commit"):
             with self.subTest(name):
                 self.assertIn(f"+++ b/{name}", out)
         self.assertIn("--- /dev/null", out)
@@ -1646,7 +1646,7 @@ class DryRunDiffTest(InitCase):
 class ClaudeMdHeadingTest(InitCase):
     def test_the_block_has_its_own_heading_above_the_import(self) -> None:
         self.init("--yes")
-        self.assertEqual(self.text("CLAUDE.md").splitlines(), [HTML_BEGIN, "## Code style digest (review-ratchet)", f"@{DIGEST}", HTML_END])
+        self.assertEqual(self.text("CLAUDE.md").splitlines(), [HTML_BEGIN, "## Code style digest (house-rules)", f"@{DIGEST}", HTML_END])
 
     def test_a_block_from_an_older_run_without_the_heading_gets_it_in_place(self) -> None:
         (self.repo / "CLAUDE.md").write_text(f"top\n{HTML_BEGIN}\n@{DIGEST}\n{HTML_END}\nbottom\n", encoding="utf-8")
@@ -1710,16 +1710,16 @@ class MissingTemplateTest(InitCase):
     """A vendored copy made before templates/ was included has no template file."""
 
     def missing(self):
-        return mock.patch("ratchet.onboard.TEMPLATE_PATH", self.tmp / "no-templates" / "CODING-STYLE.template.md")
+        return mock.patch("house_rules.onboard.TEMPLATE_PATH", self.tmp / "no-templates" / "CODING-STYLE.template.md")
 
     def test_template_without_the_file_is_a_clean_error_that_names_rules_file_and_writes_nothing(self) -> None:
         before = self.files()
         with self.missing():
             code, _, err = self.cli("init", "--yes", "--template")
         self.assertEqual(code, 1)
-        self.assertIn("not in this copy of review-ratchet", err)
+        self.assertIn("not in this copy of house-rules", err)
         self.assertIn("--rules-file", err)
-        self.assertIn("ratchet vendor", err)
+        self.assertIn("house-rules vendor", err)
         self.assertEqual(self.files(), before)
 
     def test_the_default_with_no_rules_file_found_is_the_same_error(self) -> None:

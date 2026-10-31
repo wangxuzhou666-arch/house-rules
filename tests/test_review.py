@@ -11,13 +11,13 @@ from support import (
     FIXTURES, REPO_ROOT, STYLE_RULES, RepoCase, gate_finding, git, make_config, review_finding, review_item, review_round,
 )
 
-from ratchet.errors import RatchetError, RoundKeyUnavailable
-from ratchet.review import (
+from house_rules.errors import HouseRulesError, RoundKeyUnavailable
+from house_rules.review import (
     check_run_id, claude_command, default_run_id, findings_table, replaced_critic_version, review_rounds_used, round_key,
 )
-from ratchet.review_evidence import MAX_SNIPPET_CHARS, TRUNCATED_MARK, snapshot_snippets, snippet_around, worktree_snippets
-from ratchet.source_evidence import MAX_SOURCE_BYTES
-from ratchet.state_tree import state_tree
+from house_rules.review_evidence import MAX_SNIPPET_CHARS, TRUNCATED_MARK, snapshot_snippets, snippet_around, worktree_snippets
+from house_rules.source_evidence import MAX_SOURCE_BYTES
+from house_rules.state_tree import state_tree
 
 
 def review_text(*items: dict, preface: str = "Reviewed the diff.") -> str:
@@ -37,7 +37,7 @@ class ReviewCase(RepoCase):
         self.record = self.tmp / "claude-call.json"
         self.version_record = self.tmp / "claude-version-calls.jsonl"
         # No test may reach the real `claude`: anything that does not set its own command gets one that cannot run.
-        patcher = mock.patch.dict(os.environ, {"RATCHET_CLAUDE_CMD": "/nonexistent/claude"})
+        patcher = mock.patch.dict(os.environ, {"HOUSE_RULES_CLAUDE_CMD": "/nonexistent/claude"})
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -78,7 +78,7 @@ class ReviewCase(RepoCase):
         return [json.loads(line) for line in self.version_record.read_text(encoding="utf-8").splitlines()]
 
     def review(self, claude: Path | str, *argv: str) -> tuple[int, str, str]:
-        with mock.patch.dict(os.environ, {"RATCHET_CLAUDE_CMD": str(claude)}):
+        with mock.patch.dict(os.environ, {"HOUSE_RULES_CLAUDE_CMD": str(claude)}):
             return self.cli("review", *argv)
 
     def findings(self) -> list[dict]:
@@ -88,7 +88,7 @@ class ReviewCase(RepoCase):
         return [event for event in self.events() if event["kind"] == "review_run"]
 
     def reviews_dir(self) -> Path:
-        return self.repo / ".ratchet" / "reviews"
+        return self.repo / ".house-rules" / "reviews"
 
     def saved(self) -> list[str]:
         return sorted(p.name for p in self.reviews_dir().glob("*.txt")) if self.reviews_dir().exists() else []
@@ -105,7 +105,7 @@ class RunningClaudeTest(ReviewCase):
 
     def test_stdin_is_closed_so_a_headless_run_never_waits_for_input(self) -> None:
         script = self.fake_claude(review_text())
-        with mock.patch("ratchet.review.subprocess.run", wraps=subprocess.run) as run:  # the module is shared: git calls land here too
+        with mock.patch("house_rules.review.subprocess.run", wraps=subprocess.run) as run:  # the module is shared: git calls land here too
             self.review(script, "--run", "R1")
         claude_calls = [call for call in run.call_args_list if call.args[0][0] == str(script)]
         self.assertEqual([call.args[0][1:] for call in claude_calls], [["--version"], ["-p", "/code-review high"]])
@@ -117,7 +117,7 @@ class RunningClaudeTest(ReviewCase):
         cwd = os.getcwd()
         os.chdir(self.repo / "sub")
         self.addCleanup(os.chdir, cwd)
-        with mock.patch.dict(os.environ, {"RATCHET_CLAUDE_CMD": str(self.fake_claude(review_text()))}):
+        with mock.patch.dict(os.environ, {"HOUSE_RULES_CLAUDE_CMD": str(self.fake_claude(review_text()))}):
             self.assertEqual(self.cli("review", "--run", "R1", with_repo=False)[0], 0)
         self.assertEqual(Path(self.call()["cwd"]).resolve(), self.repo.resolve())
 
@@ -159,15 +159,15 @@ class RunningClaudeTest(ReviewCase):
         self.assertFalse(self.ledger.exists())
 
     def test_a_stuck_claude_times_out(self) -> None:
-        with mock.patch("ratchet.review.TIMEOUT_SECONDS", 0.3):
+        with mock.patch("house_rules.review.TIMEOUT_SECONDS", 0.3):
             code, _, err = self.review(self.fake_claude(sleep=5), "--run", "R1")
         self.assertEqual(code, 1)
         self.assertIn("did not finish within", err)
 
     def test_the_real_executable_with_the_replacement_command_end_to_end(self) -> None:
         script = self.fake_claude(review_text(FINDING_A))
-        proc = subprocess.run([sys.executable, str(REPO_ROOT / "bin" / "ratchet"), "review", "--run", "R1", "--repo", str(self.repo)],
-                              capture_output=True, text=True, env={**os.environ, "RATCHET_CLAUDE_CMD": str(script)})
+        proc = subprocess.run([sys.executable, str(REPO_ROOT / "bin" / "house-rules"), "review", "--run", "R1", "--repo", str(self.repo)],
+                              capture_output=True, text=True, env={**os.environ, "HOUSE_RULES_CLAUDE_CMD": str(script)})
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("R1-1", proc.stdout)
         self.assertNotIn("Traceback", proc.stderr)
@@ -179,7 +179,7 @@ class RecordingTest(ReviewCase):
         code, out, err = self.review(self.fake_claude(raw), "--run", "R7")
         self.assertEqual(code, 0, err)
         self.assertEqual((self.reviews_dir() / "R7.txt").read_text(encoding="utf-8"), raw)
-        self.assertIn("saved raw review output to .ratchet/reviews/R7.txt", out)
+        self.assertIn("saved raw review output to .house-rules/reviews/R7.txt", out)
         findings = [e for e in self.events() if e["kind"] == "finding"]
         self.assertEqual([(e["display_id"], e["source"], e["run_id"], e["rule_id"], e["severity"]) for e in findings],
                          [("R7-1", "l1", "R7", "P0E.1", "blocker"), ("R7-2", "l1", "R7", "P3.1", "nice")])
@@ -286,19 +286,19 @@ class RecordingTest(ReviewCase):
         code, out, err = self.review(self.fake_claude("The model rambled and printed no JSON.\n"), "--run", "R1")
         self.assertEqual(code, 1)
         self.assertIn("neither a JSON array nor text containing", err)
-        self.assertIn("saved raw review output to .ratchet/reviews/R1.txt", out)
+        self.assertIn("saved raw review output to .house-rules/reviews/R1.txt", out)
         self.assertEqual(self.saved(), ["R1.txt"])
         self.assertFalse(self.ledger.exists())
 
     def test_run_ids_that_are_not_safe_file_names_are_refused(self) -> None:
         for bad in ("../x", "a/b", ".hidden", "", "has space", "-x"):
             with self.subTest(run=bad):
-                with self.assertRaises(RatchetError):
+                with self.assertRaises(HouseRulesError):
                     check_run_id(bad)
         code, _, err = self.review(self.fake_claude(review_text()), "--run", "../escape")
         self.assertEqual(code, 1)
         self.assertIn("must match", err)
-        self.assertFalse((self.repo / ".ratchet" / "escape.txt").exists())
+        self.assertFalse((self.repo / ".house-rules" / "escape.txt").exists())
 
     def test_the_open_count_and_the_closing_hint_are_printed(self) -> None:
         _, out, _ = self.review(self.fake_claude(review_text(FINDING_A, FINDING_B)), "--run", "R1")
@@ -309,7 +309,7 @@ class RecordingTest(ReviewCase):
     def test_a_pile_of_open_findings_suggests_the_label_page(self) -> None:
         self.write_config(rules_files=["rules.md"], label_page_threshold=1)
         _, out, _ = self.review(self.fake_claude(review_text(FINDING_A, FINDING_B)), "--run", "R1")
-        self.assertIn("open > 1: run `ratchet label-page`", out)
+        self.assertIn("open > 1: run `house-rules label-page`", out)
 
     def test_the_open_count_includes_findings_from_earlier_reviews(self) -> None:
         self.review(self.fake_claude(review_text(FINDING_A)), "--run", "R1")
@@ -440,7 +440,7 @@ class RoundKeyTest(RepoCase):
     def test_a_configured_default_branch_that_does_not_exist_is_an_error_not_a_fallback(self) -> None:
         self.commit("c1")
         self.switch("feature", create=True)
-        with self.assertRaises(RatchetError) as caught:
+        with self.assertRaises(HouseRulesError) as caught:
             self.key(default="nope")
         self.assertNotIsInstance(caught.exception, RoundKeyUnavailable)
         self.assertIn("'nope'", str(caught.exception))
@@ -520,7 +520,7 @@ class RoundCapTest(ReviewCase):
         before, saved = self.ledger_bytes(), self.saved()
         code, out, err = self.review(self.fake_claude(review_text(FINDING_B)))
         self.assertEqual(code, 3)
-        self.assertIn(f"round cap reached for {self.KEY}: 3/3 rounds used; 3 findings still open (ratchet count). "
+        self.assertIn(f"round cap reached for {self.KEY}: 3/3 rounds used; 3 findings still open (house-rules count). "
                       "Fix blockers, let the rest go to distill, or rerun with --over-cap (recorded).", err)
         self.assertFalse(self.record.exists(), "claude must not be invoked for a refused round")
         self.assertEqual(self.ledger_bytes(), before)
@@ -644,7 +644,7 @@ class RoundCapTest(ReviewCase):
         self.assertEqual([e["kind"] for e in events], ["finding", "finding", "review_run"])
         run = dict(events[-1])
         self.assertRegex(run.pop("ts"), r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d$")
-        self.assertRegex(run.pop("tree"), r"^[0-9a-f]{40}$")  # the working tree as the review found it (rules.md and .ratchet.json, uncommitted)
+        self.assertRegex(run.pop("tree"), r"^[0-9a-f]{40}$")  # the working tree as the review found it (rules.md and .house-rules.json, uncommitted)
         self.assertEqual(run, {"v": 1, "kind": "review_run", "repo": "demo-repo", "run": "R5", "round_key": self.KEY, "round": 1,
                                "max_rounds": 3, "over_cap": False, "finding_count": 2, "source": "claude",
                                "reviewer": "claude-code", "reviewer_version": "2.1.0 (Claude Code)", "level": "high",
@@ -913,7 +913,7 @@ class CriticVersionTest(ReviewCase):
             self.commit("c2")
             return review_text(FINDING_A)
 
-        with mock.patch("ratchet.cli.run_claude", side_effect=commit_while_claude_is_busy):
+        with mock.patch("house_rules.cli.run_claude", side_effect=commit_while_claude_is_busy):
             code, _, err = self.review(self.fake_claude(), "--run", "R1")
         self.assertEqual(code, 0, err)
         after = git(self.repo, "rev-parse", "HEAD")
@@ -951,7 +951,7 @@ class CriticVersionTest(ReviewCase):
                  ("did not finish within 0.3s", {"version_sleep": 5})]
         for number, (reason, kwargs) in enumerate(cases, start=1):
             # only the case that hangs needs the short limit; a loaded machine must not turn the other two into timeouts
-            with self.subTest(reason=reason), mock.patch("ratchet.review.VERSION_TIMEOUT_SECONDS", 0.3 if "version_sleep" in kwargs else 10):
+            with self.subTest(reason=reason), mock.patch("house_rules.review.VERSION_TIMEOUT_SECONDS", 0.3 if "version_sleep" in kwargs else 10):
                 code, out, err = self.review(self.fake_claude(review_text(FINDING_A), **kwargs), "--run", f"V{number}")
                 self.assertEqual(code, 0, err)
                 self.assertEqual(len(err.splitlines()), 1, err)
@@ -1135,8 +1135,8 @@ class CommittedSnippetLocatorTest(RepoCase):
         super().setUp()
         (self.repo / "src").mkdir()
         (self.repo / "src" / "same.py").write_text("\n".join(numbered(10)) + "\n", encoding="utf-8")
-        (self.repo / ".ratchet").mkdir()
-        (self.repo / ".ratchet" / "notes.txt").write_text("\n".join(numbered(10)) + "\n", encoding="utf-8")
+        (self.repo / ".house-rules").mkdir()
+        (self.repo / ".house-rules" / "notes.txt").write_text("\n".join(numbered(10)) + "\n", encoding="utf-8")
         (self.repo / ".style-findings.jsonl").write_text("\n".join(numbered(10)) + "\n", encoding="utf-8")
         git(self.repo, "add", "-A")
         self.head = self.commit("c1")
@@ -1172,8 +1172,8 @@ class CommittedSnippetLocatorTest(RepoCase):
         self.assertEqual(self.locate("src/same.py", omitted_files=["src/same.py"]), (None, "unavailable"))
         self.assertEqual(self.locate("src/same.py", omitted_files=["src/other.py"]), (joined(2, 8), "review"))
 
-    def test_the_files_ratchet_writes_itself_have_no_snippet(self) -> None:
-        for name in (".ratchet/notes.txt", ".style-findings.jsonl"):
+    def test_the_files_house_rules_writes_itself_have_no_snippet(self) -> None:
+        for name in (".house-rules/notes.txt", ".style-findings.jsonl"):
             with self.subTest(name=name):
                 self.assertEqual(self.locate(name), (None, "unavailable"))
 
@@ -1400,7 +1400,7 @@ class CommittedFileSnippetTest(SnippetCase):
             self.commit_files("late edit", unchanged_py="late")
             return review_text(self.at("src/unchanged.py"))
 
-        with mock.patch("ratchet.cli.run_claude", side_effect=commit_while_claude_is_busy):
+        with mock.patch("house_rules.cli.run_claude", side_effect=commit_while_claude_is_busy):
             code, _, err = self.review(self.fake_claude(), "--run", "R1")
         self.assertEqual(code, 0, err)
         (finding,) = self.findings()
@@ -1455,7 +1455,7 @@ class CommittedFileSnippetTest(SnippetCase):
         (self.repo / "src" / "b.py").write_bytes(b"binary now\0\n")
         (self.repo / "src" / "gone.py").unlink()
         items = [self.at(name) for name in ("src/a.py", "src/b.py", "src/gone.py", "src/unchanged.py")]
-        with mock.patch("ratchet.review_evidence.MAX_TEXT_BYTES", 40):  # src/a.py is 70 bytes
+        with mock.patch("house_rules.review_evidence.MAX_TEXT_BYTES", 40):  # src/a.py is 70 bytes
             self.assertEqual(self.review(self.fake_claude(review_text(*items)), "--run", "R1")[0], 0)
         evidence = json.loads((self.reviews_dir() / "R1.evidence.json").read_text(encoding="utf-8"))
         self.assertEqual({name: entry["status"] for name, entry in evidence["files"].items() if name.startswith("src/")},
@@ -1469,11 +1469,11 @@ class CommittedFileSnippetTest(SnippetCase):
 
     def test_a_changed_file_beyond_the_evidence_cap_never_falls_back_to_the_commit(self) -> None:
         self.commit_files("old file", b_py="old")
-        git(self.repo, "add", "rules.md", ".ratchet.json")  # so that only the two src files differ from HEAD
+        git(self.repo, "add", "rules.md", ".house-rules.json")  # so that only the two src files differ from HEAD
         self.commit("rules and config")
         self.write_numbered("src/a.py", "edit")  # committed together with b.py above; changed again
         self.write_numbered("src/b.py", "new")
-        with mock.patch("ratchet.review_evidence.MAX_FILES", 1):
+        with mock.patch("house_rules.review_evidence.MAX_FILES", 1):
             self.assertEqual(self.review(self.fake_claude(review_text(self.at("src/a.py"), self.at("src/b.py"))), "--run", "R1")[0], 0)
         evidence = json.loads((self.reviews_dir() / "R1.evidence.json").read_text(encoding="utf-8"))
         self.assertEqual((list(evidence["files"]), evidence["omitted_files"]), (["src/a.py"], ["src/b.py"]))
@@ -1482,19 +1482,19 @@ class CommittedFileSnippetTest(SnippetCase):
         self.assertEqual(by_file["src/b.py"]["snippet_source"], "unavailable")
         self.assertNotIn("snippet", by_file["src/b.py"])
 
-    def test_the_files_ratchet_writes_itself_never_fall_back_to_the_commit(self) -> None:
-        (self.repo / ".ratchet").mkdir()
-        (self.repo / ".ratchet" / "notes.txt").write_text("".join(f"note {number}\n" for number in range(1, 11)), encoding="utf-8")
+    def test_the_files_house_rules_writes_itself_never_fall_back_to_the_commit(self) -> None:
+        (self.repo / ".house-rules").mkdir()
+        (self.repo / ".house-rules" / "notes.txt").write_text("".join(f"note {number}\n" for number in range(1, 11)), encoding="utf-8")
         self.append_raw(review_finding(display_id="X-1", run="X"))
-        git(self.repo, "add", ".ratchet/notes.txt", ".style-findings.jsonl")
-        self.commit("ratchet's own files")
-        (self.repo / ".ratchet" / "notes.txt").write_text("changed\n", encoding="utf-8")
+        git(self.repo, "add", ".house-rules/notes.txt", ".style-findings.jsonl")
+        self.commit("the tool's own files")
+        (self.repo / ".house-rules" / "notes.txt").write_text("changed\n", encoding="utf-8")
         self.append_raw(review_finding(display_id="X-2", run="X", line=11))
-        items = [self.at(".ratchet/notes.txt", 1), self.at(".style-findings.jsonl", 1)]
+        items = [self.at(".house-rules/notes.txt", 1), self.at(".style-findings.jsonl", 1)]
         self.assertEqual(self.review(self.fake_claude(review_text(*items)), "--run", "R1")[0], 0)
         by_file = {event["file"]: event for event in self.findings() if event["run_id"] == "R1"}
         self.assertEqual({name: event["snippet_source"] for name, event in by_file.items()},
-                         {".ratchet/notes.txt": "unavailable", ".style-findings.jsonl": "unavailable"})
+                         {".house-rules/notes.txt": "unavailable", ".style-findings.jsonl": "unavailable"})
 
     def test_an_untracked_file_git_ignores_has_no_snippet(self) -> None:
         (self.repo / ".gitignore").write_text("ignored.log\n", encoding="utf-8")
@@ -1530,7 +1530,7 @@ class UnbornSnippetTest(ReviewCase):
             self.commit("late")
             return review_text(review_item(file="late.py", line=1, category="p0e-1"))
 
-        with mock.patch("ratchet.cli.run_claude", side_effect=commit_while_claude_is_busy):
+        with mock.patch("house_rules.cli.run_claude", side_effect=commit_while_claude_is_busy):
             code, _, err = self.review(self.fake_claude(), "--run", "R1")
         self.assertEqual(code, 0, err)
         (finding,) = self.findings()
@@ -1572,7 +1572,7 @@ class LinkedWorktreeTest(SnippetCase):
         return review_text(self.at("src/a.py"), self.at("src/unchanged.py"))
 
     def review_in(self, tree: Path, claude: Path, *argv: str) -> tuple[int, str, str]:
-        with mock.patch.dict(os.environ, {"RATCHET_CLAUDE_CMD": str(claude)}):
+        with mock.patch.dict(os.environ, {"HOUSE_RULES_CLAUDE_CMD": str(claude)}):
             return self.cli("review", *argv, "--repo", str(tree), with_repo=False)
 
     def snippets(self) -> dict[str, tuple[str, str]]:
@@ -1586,7 +1586,7 @@ class LinkedWorktreeTest(SnippetCase):
         cwd = os.getcwd()
         os.chdir(self.tree / "sub")
         self.addCleanup(os.chdir, cwd)
-        with mock.patch.dict(os.environ, {"RATCHET_CLAUDE_CMD": str(script)}):
+        with mock.patch.dict(os.environ, {"HOUSE_RULES_CLAUDE_CMD": str(script)}):
             self.assertEqual(self.cli("review", "--run", "R2", with_repo=False)[0], 0)  # no --repo: the current directory, one level down
         self.assertEqual(Path(self.call()["cwd"]).resolve(), self.tree.resolve())
 
@@ -1608,7 +1608,7 @@ class LinkedWorktreeTest(SnippetCase):
         self.assertEqual(self.saved(), ["R1.txt"])
         self.assertTrue((self.reviews_dir() / "R1.evidence.json").exists())
         self.assertEqual(len(self.findings()), 2)
-        self.assertFalse((self.tree / ".ratchet").exists())
+        self.assertFalse((self.tree / ".house-rules").exists())
         self.assertFalse((self.tree / ".style-findings.jsonl").exists())
 
     def test_the_main_worktree_is_reviewed_as_itself_while_a_linked_one_exists(self) -> None:
@@ -1663,8 +1663,8 @@ class LinkedWorktreeTest(SnippetCase):
 
     def test_the_real_executable_run_from_inside_a_linked_worktree(self) -> None:
         script = self.fake_claude(self.both_files())
-        proc = subprocess.run([sys.executable, str(REPO_ROOT / "bin" / "ratchet"), "review", "--run", "R1"], cwd=self.tree,
-                              capture_output=True, text=True, env={**os.environ, "RATCHET_CLAUDE_CMD": str(script)})
+        proc = subprocess.run([sys.executable, str(REPO_ROOT / "bin" / "house-rules"), "review", "--run", "R1"], cwd=self.tree,
+                              capture_output=True, text=True, env={**os.environ, "HOUSE_RULES_CLAUDE_CMD": str(script)})
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(Path(self.call()["cwd"]).resolve(), self.tree.resolve())
         self.assertEqual(self.review_runs()[0]["head"], self.tree_head)
@@ -1672,7 +1672,7 @@ class LinkedWorktreeTest(SnippetCase):
 
 
 class ReviewTreeTest(SnippetCase):
-    """The `tree` of a review_run is the worktree as the review started: what a later `ratchet wrapup` measures new work from."""
+    """The `tree` of a review_run is the worktree as the review started: what a later `house-rules wrapup` measures new work from."""
 
     def object_files(self) -> set[str]:
         root = self.repo / ".git" / "objects"
@@ -1738,8 +1738,8 @@ class ReviewTreeTest(SnippetCase):
         self.assertEqual((self.object_files(), self.review_runs()), (before, []))
 
     def test_a_tree_that_cannot_be_taken_is_said_and_the_review_goes_on_without_it(self) -> None:
-        refusal = RatchetError("`git add -A` failed in /x (rc=128): no space left\nthe second line is not shown")
-        with mock.patch("ratchet.cli.state_tree", side_effect=refusal):
+        refusal = HouseRulesError("`git add -A` failed in /x (rc=128): no space left\nthe second line is not shown")
+        with mock.patch("house_rules.cli.state_tree", side_effect=refusal):
             code, _, err = self.review(self.fake_claude(review_text(review_item(file="src/a.py", line=5, category="p0e-1"))), "--run", "R1")
             saved_code, _, saved_err = self.cli("review", "--from-file", str(self.saved_review()), "--run", "F1")
         warning = ("warning: working tree not recorded (`git add -A` failed in /x (rc=128): no space left); "
@@ -1790,7 +1790,7 @@ class WholeValueRunIdTest(ReviewCase):
 
     def test_a_run_id_with_a_final_newline_is_refused(self) -> None:
         for bad in ("F1\n", "r1\n", "a.b-c_d\n"):
-            with self.subTest(run=bad), self.assertRaises(RatchetError):
+            with self.subTest(run=bad), self.assertRaises(HouseRulesError):
                 check_run_id(bad)
         self.assertEqual(check_run_id("a.b-c_d"), "a.b-c_d")
 

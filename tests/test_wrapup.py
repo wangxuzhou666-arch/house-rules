@@ -1,4 +1,4 @@
-"""`ratchet wrapup`: the base, what counts as a change, the thresholds, the review it runs and what it reports."""
+"""`house-rules wrapup`: the base, what counts as a change, the thresholds, the review it runs and what it reports."""
 import dataclasses
 import json
 import os
@@ -11,14 +11,14 @@ from unittest import mock
 import support  # noqa: F401  (puts the repo root on sys.path)
 from support import STYLE_RULES, RepoCase, git, review_finding, review_item, review_round
 
-from ratchet.config import load_config
-from ratchet.git import run_git
-from ratchet.ledger import read_events
-from ratchet.review import REFUSE_CLAUDE, REFUSE_ROUND_CAP, round_key
-from ratchet.review_evidence import snippet_around
-from ratchet.start_point import START_POINTS_NAME, record_start_point
-from ratchet.state_tree import MAX_UNTRACKED_BYTES, OVERSIZE_STAND_IN, numstat_since, state_tree, tree_exists
-from ratchet.wrapup import (
+from house_rules.config import load_config
+from house_rules.git import run_git
+from house_rules.ledger import read_events
+from house_rules.review import REFUSE_CLAUDE, REFUSE_ROUND_CAP, round_key
+from house_rules.review_evidence import snippet_around
+from house_rules.start_point import START_POINTS_NAME, record_start_point
+from house_rules.state_tree import MAX_UNTRACKED_BYTES, OVERSIZE_STAND_IN, numstat_since, state_tree, tree_exists
+from house_rules.wrapup import (
     BASE_FLAG, BASE_MERGE_BASE, Changes, Thresholds, WrapupPlan, code_window, plan_wrapup, round_key_branch, run_blind_spots,
 )
 
@@ -39,7 +39,7 @@ def blind_spot(summary: str, **overrides: object) -> dict:
     return item
 
 
-IGNORE_STATE = ".ratchet/\n.style-findings.jsonl\n"  # what `ratchet init` git-ignores: a test's `git add -A` then leaves ratchet's files out
+IGNORE_STATE = ".house-rules/\n.style-findings.jsonl\n"  # what `house-rules init` git-ignores: a test's `git add -A` then leaves the tool's files out
 
 
 class WrapupCase(RepoCase):
@@ -47,7 +47,7 @@ class WrapupCase(RepoCase):
         super().setUp()
         self.calls_path = self.tmp / "claude-calls.jsonl"
         self.last_err = ""
-        patcher = mock.patch.dict(os.environ, {"RATCHET_CLAUDE_CMD": "/nonexistent/claude"})  # no test reaches the real claude
+        patcher = mock.patch.dict(os.environ, {"HOUSE_RULES_CLAUDE_CMD": "/nonexistent/claude"})  # no test reaches the real claude
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -120,7 +120,7 @@ class WrapupCase(RepoCase):
         return script
 
     def with_claude(self, script: Path, *argv: str, expect: int = 0) -> dict:
-        with mock.patch.dict(os.environ, {"RATCHET_CLAUDE_CMD": str(script)}):
+        with mock.patch.dict(os.environ, {"HOUSE_RULES_CLAUDE_CMD": str(script)}):
             return self.wrap(*argv, expect=expect)
 
     def claude_calls(self) -> list[list[str]]:
@@ -139,7 +139,7 @@ class WrapupCase(RepoCase):
         return review_round(key=f"{branch}@0a1b2c3d4e5f", run=run, **overrides)
 
     def set_start(self, commit: str, branch: str = "main") -> None:
-        """Record `commit` as the start point of `branch`, as `ratchet init` or the automatic wrap-up would."""
+        """Record `commit` as the start point of `branch`, as `house-rules init` or the automatic wrap-up would."""
         record_start_point(load_config(self.repo, None, None, self.repo), branch, commit)
 
     def objects(self) -> dict[str, int]:
@@ -360,10 +360,10 @@ class ChangeCountTest(WrapupCase):
         data = self.measure("--base", base)
         self.assertEqual((data["changed_lines"], data["changed_files"]), (2, 1))
 
-    def test_the_files_ratchet_itself_writes_do_not_count_even_when_nothing_ignores_them(self) -> None:
+    def test_the_files_house_rules_itself_writes_do_not_count_even_when_nothing_ignores_them(self) -> None:
         base = self.start()
-        self.cli_ok("review", "--from-file", str(self.write_review(blind_spot("No rule covers this"))))  # ledger and .ratchet/
-        self.assertTrue((self.repo / ".ratchet" / "reviews").is_dir())
+        self.cli_ok("review", "--from-file", str(self.write_review(blind_spot("No rule covers this"))))  # ledger and .house-rules/
+        self.assertTrue((self.repo / ".house-rules" / "reviews").is_dir())
         self.put("mine.txt", numbered(3))
         data = self.measure("--base", base)
         self.assertEqual((data["changed_lines"], data["changed_files"]), (3, 1))
@@ -426,13 +426,13 @@ class ThresholdTest(WrapupCase):
         self.put("b.txt", "x\n")
         claude = self.fake_claude(review_text())
         before = self.ledger_bytes()
-        with mock.patch.dict(os.environ, {"RATCHET_CLAUDE_CMD": str(claude)}):
+        with mock.patch.dict(os.environ, {"HOUSE_RULES_CLAUDE_CMD": str(claude)}):
             code, out, err = self.cli("wrapup")
         self.assertEqual((code, err), (0, ""))
         self.assertIn("wrapup: skipped, changed lines 13 < wrapup_min_changed_lines 200 and changed files 2 < wrapup_min_files 5; no review run", out)
         self.assertEqual(self.claude_calls(), [])
         self.assertEqual(self.ledger_bytes(), before)
-        self.assertFalse((self.repo / ".ratchet").exists())
+        self.assertFalse((self.repo / ".house-rules").exists())
 
     def test_the_lines_threshold_alone_triggers_at_exactly_the_number(self) -> None:
         self.put("big.txt", numbered(199))
@@ -474,14 +474,14 @@ class ThresholdTest(WrapupCase):
 
 
 class ReviewRunTest(WrapupCase):
-    """Above the threshold the review is `ratchet review` itself, and what it found is read back from the ledger."""
+    """Above the threshold the review is `house-rules review` itself, and what it found is read back from the ledger."""
 
     def setUp(self) -> None:
         super().setUp()
         self.base = self.start()
         self.put("big.py", numbered(250))
 
-    def test_a_saved_review_is_recorded_as_ratchet_review_records_it(self) -> None:
+    def test_a_saved_review_is_recorded_as_house_rules_review_records_it(self) -> None:
         saved = self.write_review(blind_spot("Retry has no limit", file="big.py", line=4),
                                   review_item(category="p1-1", file="big.py", line=9, summary="Deep nesting"))
         data = self.wrap("--from-file", str(saved))
@@ -501,7 +501,7 @@ class ReviewRunTest(WrapupCase):
         self.assertIn("review round 1/3 for main@", out)
         self.assertIn("wrapup: 1 new unmapped finding(s) from run r1, which no rule covers:\n"
                       "  r1-1  big.py:4  should-fix  Retry has no limit\n", out)
-        self.assertIn("/review-ratchet:maintain drafts rule proposals from them (at most 3 per wrap-up)", out)
+        self.assertIn("/house-rules:maintain drafts rule proposals from them (at most 3 per wrap-up)", out)
         self.assertTrue(out.rstrip().endswith("wrapup: open unmapped findings: 1"))
 
     def test_a_review_that_found_nothing_new_says_so(self) -> None:
@@ -545,7 +545,7 @@ class ReviewRunTest(WrapupCase):
         (run,) = self.review_runs()
         self.assertEqual((run["source"], run["level"], run["reviewer"]), ("claude", "max", "claude-code"))
 
-    def test_the_default_level_is_the_one_ratchet_review_uses(self) -> None:
+    def test_the_default_level_is_the_one_house_rules_review_uses(self) -> None:
         self.with_claude(self.fake_claude(review_text()))
         self.assertEqual(self.claude_calls(), [["-p", "/code-review high"]])
 
@@ -576,12 +576,12 @@ class RoundCapTest(WrapupCase):
         self.assertEqual(self.with_claude(self.claude)["status"], "reviewed")
         self.more_work()
         before = self.ledger_bytes()
-        with mock.patch.dict(os.environ, {"RATCHET_CLAUDE_CMD": str(self.claude)}):
+        with mock.patch.dict(os.environ, {"HOUSE_RULES_CLAUDE_CMD": str(self.claude)}):
             code, out, err = self.cli("wrapup")
         self.assertEqual(code, 3)
         self.assertIn("round cap reached for main@", err)
         self.assertIn("1/1 rounds used", err)
-        self.assertIn("ratchet wrapup has no --over-cap: `ratchet review --over-cap` runs one more round, recorded", err)
+        self.assertIn("house-rules wrapup has no --over-cap: `house-rules review --over-cap` runs one more round, recorded", err)
         self.assertEqual(len(self.claude_calls()), 1)
         self.assertEqual(self.ledger_bytes(), before)
         self.assertNotIn("wrapup: no new unmapped", out)
@@ -639,14 +639,14 @@ class JsonAndDryRunTest(WrapupCase):
         self.put("big.py", numbered(250))
         claude = self.fake_claude(review_text())
         before = self.ledger_bytes()
-        with mock.patch.dict(os.environ, {"RATCHET_CLAUDE_CMD": str(claude)}):
+        with mock.patch.dict(os.environ, {"HOUSE_RULES_CLAUDE_CMD": str(claude)}):
             code, out, err = self.cli("wrapup", "--dry-run")
         self.assertEqual((code, err), (0, ""))
         self.assertIn("[dry-run] wrapup: changed lines 250 >= wrapup_min_changed_lines 200; "
-                      f"would run `{claude} -p '/code-review high'`; nothing run or written", out)  # RATCHET_CLAUDE_CMD is honored
+                      f"would run `{claude} -p '/code-review high'`; nothing run or written", out)  # HOUSE_RULES_CLAUDE_CMD is honored
         self.assertEqual(self.claude_calls(), [])
         self.assertEqual(self.ledger_bytes(), before)
-        self.assertFalse((self.repo / ".ratchet").exists())
+        self.assertFalse((self.repo / ".house-rules").exists())
 
     def test_a_dry_run_of_a_saved_review_says_which_file_and_still_writes_nothing(self) -> None:
         self.put("big.py", numbered(250))
@@ -725,15 +725,15 @@ class PlanWrapupTest(WrapupCase):
         self.assertIsNone(self.plan().would_refuse)
         refusal = self.plan(foresee_refusal=True).would_refuse
         self.assertEqual((refusal.kind, refusal.round_key), (REFUSE_ROUND_CAP, key))
-        self.assertTrue(refusal.message.endswith("ratchet wrapup has no --over-cap: `ratchet review --over-cap` runs one more round, recorded"))
+        self.assertTrue(refusal.message.endswith("house-rules wrapup has no --over-cap: `house-rules review --over-cap` runs one more round, recorded"))
 
     def test_a_refusal_is_looked_for_only_when_a_review_is_due(self) -> None:
-        with mock.patch("ratchet.wrapup.review_refusal", side_effect=AssertionError("a review nobody would run was looked at")):
+        with mock.patch("house_rules.wrapup.review_refusal", side_effect=AssertionError("a review nobody would run was looked at")):
             plan = self.plan(foresee_refusal=True)
         self.assertEqual((plan.due, plan.would_refuse), (False, None))
 
     def test_a_saved_review_needs_no_claude_to_start(self) -> None:
-        self.put("big.py", numbered(250))  # RATCHET_CLAUDE_CMD names nothing that exists here
+        self.put("big.py", numbered(250))  # HOUSE_RULES_CLAUDE_CMD names nothing that exists here
         self.assertEqual(self.plan(foresee_refusal=True).would_refuse.kind, REFUSE_CLAUDE)
         self.assertIsNone(self.plan(foresee_refusal=True, from_file=True).would_refuse)
 
@@ -926,8 +926,8 @@ class SnapshotBaseTest(WrapupCase):
         (self.repo / "big.py").unlink()
         self.assertEqual(self.measure()["changed_lines"], 250)
 
-    def test_the_files_ratchet_writes_after_the_snapshot_do_not_count(self) -> None:
-        self.review_uncommitted_work()  # the ledger and .ratchet/ are written after the snapshot, and nothing here ignores them
+    def test_the_files_house_rules_writes_after_the_snapshot_do_not_count(self) -> None:
+        self.review_uncommitted_work()  # the ledger and .house-rules/ are written after the snapshot, and nothing here ignores them
         data = self.measure()
         self.assertEqual((data["changed_lines"], data["changed_files"]), (0, 0))
 
@@ -955,7 +955,7 @@ class SnapshotBaseTest(WrapupCase):
         self.put("big.py", numbered(250))
         git(self.repo, "status", "--porcelain")  # git refreshes its own index here; what follows must leave it as it is
         index, big = self.repo / ".git" / "index", self.repo / "big.py"
-        status, cached = git(self.repo, "status", "--porcelain", "-uno"), git(self.repo, "diff", "--cached")  # -uno: the review writes .ratchet/ and the ledger
+        status, cached = git(self.repo, "status", "--porcelain", "-uno"), git(self.repo, "diff", "--cached")  # -uno: the review writes .house-rules/ and the ledger
         index_before, big_before = index.read_bytes(), (big.read_bytes(), big.stat().st_mtime_ns)
         self.wrap("--from-file", str(self.write_review()))
         self.measure()
@@ -1118,8 +1118,8 @@ class StateTreeTest(WrapupCase):
         self.put("small.txt", "small")
         self.put("e1.bin", "e1")  # small files the glob readings of `e[1].bin` and `f*.bin` would match
         self.put("fx.bin", "fx")
-        with mock.patch("ratchet.state_tree.MAX_UNTRACKED_BYTES", 10), mock.patch("ratchet.state_tree.INDEX_ENTRIES_PER_CALL", 2), \
-                mock.patch("ratchet.state_tree.run_git", wraps=run_git) as spy:
+        with mock.patch("house_rules.state_tree.MAX_UNTRACKED_BYTES", 10), mock.patch("house_rules.state_tree.INDEX_ENTRIES_PER_CALL", 2), \
+                mock.patch("house_rules.state_tree.run_git", wraps=run_git) as spy:
             tree = state_tree(self.repo)
         calls = [call.args[0] for call in spy.call_args_list if call.args[0][0] == "update-index"]
         self.assertEqual([call.count("--cacheinfo") for call in calls], [2, 2, 1])  # five entries, two to a call
@@ -1490,7 +1490,7 @@ class StartPointBaseTest(WrapupCase):
         self.measure()
         self.assertEqual(self.wrap()["status"], "skipped")
         self.assertEqual(path.read_bytes(), before)
-        self.assertEqual(sorted(entry.name for entry in (self.repo / ".ratchet").iterdir()), ["start-points.json"])
+        self.assertEqual(sorted(entry.name for entry in (self.repo / ".house-rules").iterdir()), ["start-points.json"])
 
 
 class ReviewRangeTest(WrapupCase):
@@ -1505,7 +1505,7 @@ class ReviewRangeTest(WrapupCase):
         self.claude = self.fake_claude(review_text())
 
     def cli_with_claude(self, *argv: str, with_repo: bool = True) -> tuple[int, str, str]:
-        with mock.patch.dict(os.environ, {"RATCHET_CLAUDE_CMD": str(self.claude)}):
+        with mock.patch.dict(os.environ, {"HOUSE_RULES_CLAUDE_CMD": str(self.claude)}):
             return self.cli(*argv, with_repo=with_repo)
 
     def tree_of(self, commit: str) -> str:
@@ -1623,7 +1623,7 @@ class ReviewRangeTest(WrapupCase):
         code, _, err = self.cli_with_claude("review", "--target", "feature/x")
         self.assertEqual(code, 0, err)
         self.assertEqual(self.claude_calls(), [["-p", "/code-review high feature/x"]])
-        record = json.loads((self.repo / ".ratchet" / "reviews" / "r1.evidence.json").read_text(encoding="utf-8"))
+        record = json.loads((self.repo / ".house-rules" / "reviews" / "r1.evidence.json").read_text(encoding="utf-8"))
         self.assertEqual((record["committed_range"], record["basis"]), (None, "local_pre_review_target_unverified"))
         self.assertIn("wip.py", record["files"])  # the local changes, as for any review that is not of a range
 
@@ -1680,7 +1680,7 @@ class ReviewRangeTest(WrapupCase):
         self.assertEqual(code, 0, err)
         self.assertIn(f"since {self.base[:12]} (the start point recorded for main)", out)
         self.assertIn(f"would run `{self.claude} -p '/code-review high {self.base}..{second}'`", out)
-        self.assertFalse((linked / ".ratchet").exists())
+        self.assertFalse((linked / ".house-rules").exists())
         _, out, _ = self.cli_with_claude("wrapup", "--dry-run")  # the main worktree stands on feature: its fork point decides
         self.assertIn(f"since {self.first[:12]} (where this branch forked from main)", out)
 

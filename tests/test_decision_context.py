@@ -4,10 +4,10 @@ from pathlib import Path
 from unittest import mock
 
 from support import RepoCase, git, review_finding
-from ratchet.config import load_config
-from ratchet.decision_context import _read_source, assess, build_context
-from ratchet.errors import RatchetError
-from ratchet.proposals import apply_batch, create_batch, rollback_batch
+from house_rules.config import load_config
+from house_rules.decision_context import _read_source, assess, build_context
+from house_rules.errors import HouseRulesError
+from house_rules.proposals import apply_batch, create_batch, rollback_batch
 
 
 class DecisionContextTest(RepoCase):
@@ -50,7 +50,7 @@ class DecisionContextTest(RepoCase):
         self.assertEqual(result["cards"][0]["action"], "keep")
         self.assertEqual(result["cards"][0]["verification"]["by"], "model")
         self.assertEqual(result["drafts"], [])
-        self.assertFalse((self.repo / ".ratchet").exists())
+        self.assertFalse((self.repo / ".house-rules").exists())
         self.assertEqual(before, (self.ledger_bytes(), (self.repo / "rules.md").read_bytes()))
 
     def test_missing_or_moved_source_is_not_replaced_with_invented_code(self):
@@ -84,12 +84,12 @@ class DecisionContextTest(RepoCase):
         for path in (self.repo / "src/a.py", self.repo / "rules.md"):
             payload = self.payload()
             path.write_text(path.read_text() + "\nchanged\n")
-            with self.assertRaisesRegex(RatchetError, "context changed"):
+            with self.assertRaisesRegex(HouseRulesError, "context changed"):
                 self.prepare(payload)
         payload = self.payload()
         self.append_raw({"v": 1, "kind": "outcome", "id": self.finding["id"], "outcome": "false_positive",
                          "outcome_by": "human", "evidence": "reviewed", "ts": "2026-01-08T10:00:00"})
-        with self.assertRaisesRegex(RatchetError, "context changed"):
+        with self.assertRaisesRegex(HouseRulesError, "context changed"):
             self.prepare(payload)
 
     def test_covered_requires_real_rule_and_includes_definition_location(self):
@@ -98,30 +98,30 @@ class DecisionContextTest(RepoCase):
         self.assertEqual(rule["absolute_path"], str(self.repo / "rules.md"))
         self.assertIn("[P0E.1]", rule["text"])
         self.assertGreater(rule["line"], 0)
-        with self.assertRaisesRegex(RatchetError, "existing clauses"):
+        with self.assertRaisesRegex(HouseRulesError, "existing clauses"):
             self.prepare(self.payload(action="covered", rule_ids=["UNKNOWN.1"]))
 
     def test_omitted_duplicate_and_invented_findings_are_rejected(self):
         payload = self.payload()
         payload["assessments"] *= 2
-        with self.assertRaisesRegex(RatchetError, "exactly once"):
+        with self.assertRaisesRegex(HouseRulesError, "exactly once"):
             self.prepare(payload)
-        with self.assertRaisesRegex(RatchetError, "exactly once"):
+        with self.assertRaisesRegex(HouseRulesError, "exactly once"):
             self.prepare(self.payload(finding_ids=["invented"]))
         self.append_raw(review_finding(display_id="R1-002", file="src/a.py", line=3))
-        with self.assertRaisesRegex(RatchetError, "every selected finding"):
+        with self.assertRaisesRegex(HouseRulesError, "every selected finding"):
             self.prepare(self.payload())
 
     def test_model_cannot_inject_code_locations_or_change_without_supported_basis(self):
         payload = self.payload()
         payload["assessments"][0]["absolute_path"] = "/invented"
-        with self.assertRaisesRegex(RatchetError, "exactly"):
+        with self.assertRaisesRegex(HouseRulesError, "exactly"):
             self.prepare(payload)
         change = {"action": "add", "rule_id": "REL.1", "file": "rules.md",
                   "after": "- [REL.1] Preserve usable state during replacement. (should-fix)"}
-        with self.assertRaisesRegex(RatchetError, "uncertain/refuted"):
+        with self.assertRaisesRegex(HouseRulesError, "uncertain/refuted"):
             self.prepare(self.payload(action="add", changes=[change]))
-        with self.assertRaisesRegex(RatchetError, "no changes"):
+        with self.assertRaisesRegex(HouseRulesError, "no changes"):
             self.prepare(self.payload(changes=[change]))
 
     def test_structured_assessment_to_existing_proposal_apply_and_rollback(self):
@@ -132,11 +132,11 @@ class DecisionContextTest(RepoCase):
         payload_file = self.tmp / "assessment.json"
         payload_file.write_text(json.dumps(payload))
         result = json.loads(self.cli_ok("decision-context", "--assessment", str(payload_file)))
-        self.assertFalse((self.repo / ".ratchet").exists())
+        self.assertFalse((self.repo / ".house-rules").exists())
         batch = create_batch(self.config, self.events(), result["drafts"])
         before = (self.repo / "rules.md").read_bytes()
         rejected = {"v": 1, "batch_id": batch["id"], "confirmed_by": "Synthetic operator", "decisions": []}
-        with self.assertRaisesRegex(RatchetError, "every proposal"):
+        with self.assertRaisesRegex(HouseRulesError, "every proposal"):
             apply_batch(self.config, self.events(), rejected)
         self.assertEqual((self.repo / "rules.md").read_bytes(), before)
         decisions = {**rejected, "decisions": [{"id": "p1", "decision": "accept"}]}
@@ -156,7 +156,7 @@ class DecisionContextTest(RepoCase):
         self.assertEqual(len(self.prepare(payload)["drafts"]), 2)
         broken = copy.deepcopy(payload)
         broken["assessments"][0]["changes"].pop()
-        with self.assertRaisesRegex(RatchetError, "merge must"):
+        with self.assertRaisesRegex(HouseRulesError, "merge must"):
             self.prepare(broken)
 
 

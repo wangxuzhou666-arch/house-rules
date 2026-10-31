@@ -5,13 +5,13 @@ from unittest import mock
 import unittest
 
 from support import REPO_ROOT, RepoCase, make_config, review_finding
-from ratchet.config import load_config
-from ratchet.rules import parse_rules_text
-from ratchet.errors import RatchetError
-from ratchet.ledger import read_events
-from ratchet.proposal_page import build_page
-from ratchet.proposal_store import JOURNAL, encoded, fingerprint, recover, replace_local
-from ratchet.proposals import (
+from house_rules.config import load_config
+from house_rules.rules import parse_rules_text
+from house_rules.errors import HouseRulesError
+from house_rules.ledger import read_events
+from house_rules.proposal_page import build_page
+from house_rules.proposal_store import JOURNAL, encoded, fingerprint, recover, replace_local
+from house_rules.proposals import (
     CHANGELOG, CHANGELOG_TITLE, SNIPPET_MAX_LINES, STATE, VERSION, _add_clause, apply_batch, create_batch, rollback_batch, statistics,
 )
 
@@ -122,30 +122,30 @@ class ProposalsTest(ProposalFixture):
         batch = self.batch()
         payload = self.decision(batch)
         payload["decisions"] = []
-        with self.assertRaisesRegex(RatchetError, "every proposal"):
+        with self.assertRaisesRegex(HouseRulesError, "every proposal"):
             apply_batch(self.config, self.events(), payload)
         self.assertEqual((self.repo / "rules.md").read_text(), RULES)
 
     def test_unknown_evidence_cannot_create_a_proposal(self):
-        with self.assertRaisesRegex(RatchetError, "evidence_ids"):
+        with self.assertRaisesRegex(HouseRulesError, "evidence_ids"):
             self.batch(evidence_ids=["invented"])
 
     def test_foreign_file_and_parent_path_are_rejected(self):
         for name in ["../rules.md", "reviewer.md", ".env", "/tmp/rules.md"]:
-            with self.subTest(name=name), self.assertRaises(RatchetError):
+            with self.subTest(name=name), self.assertRaises(HouseRulesError):
                 self.batch(file=name)
 
     def test_symlinked_rules_are_rejected_without_reading_the_target(self):
         path = self.repo / "rules.md"
         path.unlink()
         path.symlink_to(self.tmp / "unreadable-target")
-        with self.assertRaisesRegex(RatchetError, "symlink"):
+        with self.assertRaisesRegex(HouseRulesError, "symlink"):
             self.batch()
 
     def test_rule_edit_after_approval_page_makes_the_batch_stale(self):
         batch = self.batch()
         (self.repo / "rules.md").write_text(RULES + "\nChanged later\n")
-        with self.assertRaisesRegex(RatchetError, "changed"):
+        with self.assertRaisesRegex(HouseRulesError, "changed"):
             self.apply(batch)
 
     def test_evidence_outcome_change_requires_a_fresh_proposal(self):
@@ -153,7 +153,7 @@ class ProposalsTest(ProposalFixture):
         event = {"v": 1, "kind": "outcome", "id": self.finding["id"], "repo": "demo-repo",
                  "ts": "2026-01-08T11:00:00", "outcome": "false_positive", "outcome_by": "human", "evidence": "test"}
         self.append_raw(event)
-        with self.assertRaisesRegex(RatchetError, "evidence changed"):
+        with self.assertRaisesRegex(HouseRulesError, "evidence changed"):
             self.apply(batch)
 
     def test_tampered_batch_and_wrong_id_are_rejected(self):
@@ -161,11 +161,11 @@ class ProposalsTest(ProposalFixture):
         path = self.repo / STATE / batch["id"] / "batch.json"
         batch["proposals"][0]["after"] = "different"
         path.write_text(json.dumps(batch))
-        with self.assertRaisesRegex(RatchetError, "batch changed"):
+        with self.assertRaisesRegex(HouseRulesError, "batch changed"):
             self.apply(batch)
         payload = self.decision(batch)
         payload["batch_id"] = "../unsafe"
-        with self.assertRaises(RatchetError):
+        with self.assertRaises(HouseRulesError):
             apply_batch(self.config, self.events(), payload)
 
     def test_all_decisions_are_validated_before_any_write(self):
@@ -173,7 +173,7 @@ class ProposalsTest(ProposalFixture):
             rule_id="P1.2", action="add", after="- [P1.2] A second rule. (nice)"))
         payload = self.decision(batch)
         payload["decisions"].append({"id": "p2", "decision": "rewrite", "after": "- [X9.1] Wrong ID."})
-        with self.assertRaises(RatchetError):
+        with self.assertRaises(HouseRulesError):
             apply_batch(self.config, self.events(), payload)
         self.assertEqual((self.repo / "rules.md").read_text(), RULES)
 
@@ -181,9 +181,9 @@ class ProposalsTest(ProposalFixture):
         batch = self.batch(action="retire", after="")
         self.apply(batch)
         text = (self.repo / "rules.md").read_text()
-        self.assertIn("ratchet-retired: P1.1", text)
+        self.assertIn("house-rules-retired: P1.1", text)
         self.assertIn("[R.1]", text)
-        with self.assertRaisesRegex(RatchetError, "cannot be reused"):
+        with self.assertRaisesRegex(HouseRulesError, "cannot be reused"):
             self.batch(action="add")
 
     def test_rollback_refuses_to_destroy_later_edits(self):
@@ -191,7 +191,7 @@ class ProposalsTest(ProposalFixture):
         self.apply(batch)
         path = self.repo / "rules.md"
         path.write_text(path.read_text() + "\nUser edit\n")
-        with self.assertRaisesRegex(RatchetError, "later edit"):
+        with self.assertRaisesRegex(HouseRulesError, "later edit"):
             rollback_batch(self.config, batch["id"])
 
     def test_crash_after_a_partial_write_is_recoverable_and_blocks_next_apply(self):
@@ -201,11 +201,11 @@ class ProposalsTest(ProposalFixture):
             if name == "CODING-STYLE.digest.md":
                 raise OSError("synthetic disk failure")
             return original(root, name, text)
-        with mock.patch("ratchet.proposal_store.replace_local", side_effect=failing):
-            with self.assertRaisesRegex(RatchetError, "interrupted"):
+        with mock.patch("house_rules.proposal_store.replace_local", side_effect=failing):
+            with self.assertRaisesRegex(HouseRulesError, "interrupted"):
                 self.apply(batch)
         self.assertTrue((self.repo / JOURNAL).exists())
-        with self.assertRaisesRegex(RatchetError, "interrupted"):
+        with self.assertRaisesRegex(HouseRulesError, "interrupted"):
             self.apply(batch)
         self.assertGreater(recover(self.repo, self.repo), 0)
         self.assertEqual((self.repo / "rules.md").read_text(), RULES)
@@ -216,7 +216,7 @@ class ProposalsTest(ProposalFixture):
         (self.repo / JOURNAL).parent.mkdir(parents=True)
         (self.repo / JOURNAL).write_text(encoded({"v": 1, "changes": {"rules.md": [RULES, "partial"]}}))
         (self.repo / "rules.md").write_text("later edit")
-        with self.assertRaisesRegex(RatchetError, "later edit"):
+        with self.assertRaisesRegex(HouseRulesError, "later edit"):
             recover(self.repo, self.repo)
 
     def test_html_treats_findings_as_text_and_has_no_default_approval(self):
@@ -291,7 +291,7 @@ class ChangelogTest(ProposalFixture):
         return {name: (self.repo / name).read_bytes() if (self.repo / name).exists() else None for name in names}
 
     def apply_payload(self, payload):
-        with mock.patch("ratchet.proposals.now_iso", return_value=APPLIED_AT):
+        with mock.patch("house_rules.proposals.now_iso", return_value=APPLIED_AT):
             return apply_batch(self.config, self.events(), payload)
 
     def apply_on(self, batch, choice="accept", **extra):
@@ -410,7 +410,7 @@ class ChangelogTest(ProposalFixture):
         self.assertIn('"revision": 2', (self.repo / VERSION).read_text())
 
     def test_revision_numbers_continue_from_the_changelog_when_the_local_state_is_gone(self):
-        # version.json lives under the ignored .ratchet/, the changelog is committed: a fresh clone has only the changelog.
+        # version.json lives under the ignored .house-rules/, the changelog is committed: a fresh clone has only the changelog.
         cases = {"this version's heading": ("## Revision 5 — 2026-10-01 (batch x)\n\n### add A.1\n", 6),
                  "an earlier version's heading": ("## Revision 3\n\nBatch `x`.\n\n- add A.1 (p1)\n", 4)}
         for label, (entry, expected) in cases.items():
@@ -443,7 +443,7 @@ class ChangelogTest(ProposalFixture):
         self.apply_on(batch)
         path = self.repo / CHANGELOG
         path.write_text(path.read_text(encoding="utf-8") + "\nA note added by hand.\n", encoding="utf-8")
-        with self.assertRaisesRegex(RatchetError, "later edit: " + re.escape(CHANGELOG)):
+        with self.assertRaisesRegex(HouseRulesError, "later edit: " + re.escape(CHANGELOG)):
             rollback_batch(self.config, batch["id"])
         self.assertIn("convey boolean meaning", (self.repo / "rules.md").read_text())
 
@@ -458,8 +458,8 @@ class ChangelogTest(ProposalFixture):
                 raise OSError("synthetic disk failure")
             return original(root, name, text)
 
-        with mock.patch("ratchet.proposal_store.replace_local", side_effect=failing):
-            with self.assertRaisesRegex(RatchetError, "interrupted"):
+        with mock.patch("house_rules.proposal_store.replace_local", side_effect=failing):
+            with self.assertRaisesRegex(HouseRulesError, "interrupted"):
                 self.apply_on(batch)
         self.assertNotEqual(self.files()[CHANGELOG], PLAIN_LOG)
         recover(self.repo, self.repo)

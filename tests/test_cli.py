@@ -8,7 +8,7 @@ from support import (
     FIXTURES, REPO_ROOT, RepoCase, gate_finding, gate_pass, git, report_item, review_finding, review_item, review_round,
 )
 
-from ratchet.config import load_config
+from house_rules.config import load_config
 
 
 class DryRunTest(RepoCase):
@@ -56,7 +56,7 @@ class DryRunTest(RepoCase):
         finding = review_finding("R1-001")
         self.append_raw(finding)
         self.cli_ok("label-page")
-        batch = json.loads((self.repo / ".ratchet-label-batch.json").read_text(encoding="utf-8"))
+        batch = json.loads((self.repo / ".house-rules-label-batch.json").read_text(encoding="utf-8"))
         before = self.repo_files()
         payload = json.dumps({"batch_id": batch["batch_id"], "labels": [{"id": finding["id"], "outcome": "fixed"}]})
         out = self.cli_ok("apply-labels", "--dry-run", stdin=payload)
@@ -222,7 +222,7 @@ class ConfigTest(RepoCase):
         self.assertIn("unknown config key", err)
 
     def test_malformed_config_is_rejected(self) -> None:
-        (self.repo / ".ratchet.json").write_text("{not json", encoding="utf-8")
+        (self.repo / ".house-rules.json").write_text("{not json", encoding="utf-8")
         code, _, err = self.cli("count")
         self.assertEqual(code, 1)
         self.assertIn("invalid JSON", err)
@@ -289,9 +289,9 @@ class ConfigTest(RepoCase):
 
 
 class ExecutableTest(RepoCase):
-    def test_bin_ratchet_runs_end_to_end(self) -> None:
+    def test_bin_house_rules_runs_end_to_end(self) -> None:
         self.with_sample_rules()
-        base = [sys.executable, str(REPO_ROOT / "bin" / "ratchet")]
+        base = [sys.executable, str(REPO_ROOT / "bin" / "house-rules")]
         add = subprocess.run([*base, "add", "--source", "l1", "--run", "R1", "--repo", str(self.repo)],
                              input=json.dumps([report_item()]), capture_output=True, text=True)
         self.assertEqual(add.returncode, 0, add.stderr)
@@ -300,16 +300,16 @@ class ExecutableTest(RepoCase):
 
     def test_cwd_is_used_when_repo_is_not_given(self) -> None:
         self.with_sample_rules()
-        base = [sys.executable, str(REPO_ROOT / "bin" / "ratchet")]
+        base = [sys.executable, str(REPO_ROOT / "bin" / "house-rules")]
         subprocess.run([*base, "add", "--source", "l1", "--run", "R1"], input=json.dumps([report_item()]),
                        capture_output=True, text=True, cwd=self.repo, check=True)
         self.assertTrue(self.ledger.exists())
 
     def test_error_exit_code_and_no_traceback(self) -> None:
-        proc = subprocess.run([sys.executable, str(REPO_ROOT / "bin" / "ratchet"), "count", "--repo", str(self.tmp)],
+        proc = subprocess.run([sys.executable, str(REPO_ROOT / "bin" / "house-rules"), "count", "--repo", str(self.tmp)],
                               capture_output=True, text=True)
         self.assertEqual(proc.returncode, 1)
-        self.assertIn("ratchet: error:", proc.stderr)
+        self.assertIn("house-rules: error:", proc.stderr)
         self.assertNotIn("Traceback", proc.stderr)
 
 

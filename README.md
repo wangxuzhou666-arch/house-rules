@@ -78,8 +78,8 @@ for observed results and limitations; the examples are not a general benchmark.
 As a Claude Code plugin, from the marketplace in this repository:
 
 ```sh
-claude plugin marketplace add wangxuzhou666-arch/review-ratchet
-claude plugin install review-ratchet@review-ratchet
+claude plugin marketplace add wangxuzhou666-arch/house-rules
+claude plugin install house-rules@house-rules
 ```
 
 The marketplace commands require a published repository revision. For an unpublished
@@ -88,13 +88,13 @@ checkout, use the local loading route below; local acceptance does not verify a 
 From a local checkout, load it for one session without installing:
 
 ```sh
-claude --plugin-dir /path/to/review-ratchet
+claude --plugin-dir /path/to/house-rules
 ```
 
 Without the plugin, run the command straight from the checkout (Python 3.10+, standard library only):
 
 ```sh
-/path/to/review-ratchet/bin/ratchet init
+/path/to/house-rules/bin/house-rules init
 ```
 
 ## Quickstart

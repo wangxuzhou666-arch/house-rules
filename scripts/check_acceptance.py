@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-PAYLOAD = ("ratchet", "bin", "schemas", "templates", "skills", "hooks", ".claude-plugin", "docs", "samples", "scripts", "LICENSE", "README.md")
+PAYLOAD = ("house_rules", "bin", "schemas", "templates", "skills", "hooks", ".claude-plugin", "docs", "samples", "scripts", "LICENSE", "README.md")
 
 
 def main() -> None:
@@ -42,7 +42,7 @@ def main() -> None:
     env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
                GIT_AUTHOR_NAME="Synthetic acceptance", GIT_AUTHOR_EMAIL="acceptance@example.invalid",
                GIT_COMMITTER_NAME="Synthetic acceptance", GIT_COMMITTER_EMAIL="acceptance@example.invalid",
-               PYTHON_DOTENV_DISABLED="1", PYTHONDONTWRITEBYTECODE="1", RATCHET_STATE_DIR=str(output / "state"))
+               PYTHON_DOTENV_DISABLED="1", PYTHONDONTWRITEBYTECODE="1", HOUSE_RULES_STATE_DIR=str(output / "state"))
     commands = []
 
     def run(argv, cwd=repo, expected=0):
@@ -55,17 +55,17 @@ def main() -> None:
             raise RuntimeError(f"unexpected exit {proc.returncode} for {argv}: {proc.stderr}")
         return proc.stdout
 
-    def ratchet(*argv):
-        return [sys.executable, "-B", tool / "bin/ratchet", *argv]
+    def house_rules(*argv):
+        return [sys.executable, "-B", tool / "bin/house-rules", *argv]
 
     run(["git", "init", "-q", "-b", "main"])
     sample = tool / "samples/config-replacement"
     shutil.copy2(sample / "CODING-STYLE.md", repo / "MY-STYLE.md")
     shutil.copy2(sample / "safe_config.py", repo / "app.py")
-    run(ratchet("init", "--dry-run", "--rules-file", "MY-STYLE.md"))
-    assert not (repo / ".ratchet.json").exists()
-    run(ratchet("init", "--yes", "--rules-file", "MY-STYLE.md"))
-    run(ratchet("compile", "--check", "--strict"))
+    run(house_rules("init", "--dry-run", "--rules-file", "MY-STYLE.md"))
+    assert not (repo / ".house-rules.json").exists()
+    run(house_rules("init", "--yes", "--rules-file", "MY-STYLE.md"))
+    run(house_rules("compile", "--check", "--strict"))
     assert "REL.1 | should-fix" in (repo / "CODING-STYLE.digest.md").read_text()
     assert "P0E.1" not in (repo / "CODING-STYLE.digest.md").read_text()
     run(["git", "add", "."])
@@ -78,12 +78,12 @@ def main() -> None:
                "category": "rel-1", "severity": "should-fix"}]
     report = output / "synthetic-review.json"
     report.write_text(json.dumps(review))
-    run(ratchet("review", "--from-file", report, "--run", "install-r1"))
+    run(house_rules("review", "--from-file", report, "--run", "install-r1"))
     ledger_path = repo / ".style-findings.jsonl"
     before_replay = ledger_path.read_bytes()
-    run(ratchet("review", "--from-file", report, "--run", "install-r1"))
+    run(house_rules("review", "--from-file", report, "--run", "install-r1"))
     assert ledger_path.read_bytes() == before_replay
-    context = json.loads(run(ratchet("decision-context")))
+    context = json.loads(run(house_rules("decision-context")))
     finding_id = context["findings"][0]["finding"]["id"]
     assessment = {"v": 1, "context_id": context["context_id"], "assessments": [{
         "finding_ids": [finding_id], "verification": {"status": "supported", "basis": "Synthetic failure/control sample."},
@@ -91,8 +91,8 @@ def main() -> None:
         "changes": []}]}
     assessment_file = output / "assessment.json"
     assessment_file.write_text(json.dumps(assessment))
-    prepared = json.loads(run(ratchet("prepare-decisions", "--assessment", assessment_file)))
-    batch_dir = repo / ".ratchet/proposals" / prepared["batch_id"]
+    prepared = json.loads(run(house_rules("prepare-decisions", "--assessment", assessment_file)))
+    batch_dir = repo / ".house-rules/proposals" / prepared["batch_id"]
     assert (batch_dir / "batch.json").exists() and not (batch_dir / "receipt.json").exists()
     # There was no human decision in this offline run, so never manufacture a receipt.
     shutil.copy2(sample / "safe_config.py", repo / "app.py")
@@ -100,18 +100,18 @@ def main() -> None:
         handle.write("\nSynthetic acceptance: changed source hash.\n")
     run(["git", "add", "app.py", "MY-STYLE.md"])
     run(["git", "-c", "commit.gpgsign=false", "commit", "-qm", "Must fail: stale staged digest"], expected=1)
-    run(ratchet("compile"))
+    run(house_rules("compile"))
     run(["git", "add", "CODING-STYLE.digest.md"])
     run(["git", "-c", "commit.gpgsign=false", "commit", "-qm",
          f"Restore safe synthetic implementation\n\nFixes-Finding: {finding_id}"])
-    counts = run(ratchet("count"))
+    counts = run(house_rules("count"))
     assert "1 total, 0 open" in counts
-    run(ratchet("compile", "--check", "--strict"))
+    run(house_rules("compile", "--check", "--strict"))
     bundled = output / "bundled-style-repo"
     bundled.mkdir()
     run(["git", "init", "-q", "-b", "main"], cwd=bundled)
-    run(ratchet("init", "--yes", "--template", "--no-hooks"), cwd=bundled)
-    run(ratchet("compile", "--check", "--strict"), cwd=bundled)
+    run(house_rules("init", "--yes", "--template", "--no-hooks"), cwd=bundled)
+    run(house_rules("compile", "--check", "--strict"), cwd=bundled)
     run([sys.executable, "-B", sample / "check_examples.py"])
     result = {"status": "passed", "kind": "offline_synthetic_acceptance", "human_decision": "not exercised",
               "checks": ["copied distribution runs independently", "own style and bundled template",

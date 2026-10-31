@@ -3,13 +3,13 @@ import subprocess
 from pathlib import Path
 
 from support import _GIT_ENV, RepoCase, git, review_finding
-from ratchet.config import load_config
-from ratchet.errors import RatchetError
-from ratchet.git import commit_sha, committed_blob
-from ratchet.proposal_store import local_path, read_local, replace_local
-from ratchet.review import save_review
-from ratchet.review_evidence import capture, save, snapshot_snippets, source_for
-from ratchet.source_evidence import MAX_SOURCE_BYTES, read_committed_source, read_source
+from house_rules.config import load_config
+from house_rules.errors import HouseRulesError
+from house_rules.git import commit_sha, committed_blob
+from house_rules.proposal_store import local_path, read_local, replace_local
+from house_rules.review import save_review
+from house_rules.review_evidence import capture, save, snapshot_snippets, source_for
+from house_rules.source_evidence import MAX_SOURCE_BYTES, read_committed_source, read_source
 
 
 class ReviewEvidenceTest(RepoCase):
@@ -18,7 +18,7 @@ class ReviewEvidenceTest(RepoCase):
         self.with_sample_rules()
         self.config = load_config(self.repo, None, None, self.repo)
         (self.repo / "source.py").write_text("original\n")
-        git(self.repo, "add", "source.py", "rules.md", ".ratchet.json")
+        git(self.repo, "add", "source.py", "rules.md", ".house-rules.json")
         self.commit("baseline")
         (self.repo / "source.py").write_text("reviewed change\n")
         self.finding = review_finding(file="source.py", line=1)
@@ -51,10 +51,10 @@ class ReviewEvidenceTest(RepoCase):
 
     def test_changed_raw_review_and_reused_snapshot_are_rejected(self):
         snapshot = self.capture_and_save()
-        with self.assertRaisesRegex(RatchetError, "already exists"):
+        with self.assertRaisesRegex(HouseRulesError, "already exists"):
             save(self.config, self.repo, "R1", snapshot, "synthetic review")
-        (self.repo / ".ratchet/reviews/R1.txt").write_text("different review")
-        with self.assertRaisesRegex(RatchetError, "no longer matches"):
+        (self.repo / ".house-rules/reviews/R1.txt").write_text("different review")
+        with self.assertRaisesRegex(HouseRulesError, "no longer matches"):
             source_for(self.config, self.finding)
 
 
@@ -68,7 +68,7 @@ class LinkedTreeEvidenceTest(RepoCase):
         super().setUp()
         self.with_sample_rules()
         (self.repo / "source.py").write_text("base\n")
-        git(self.repo, "add", "source.py", "rules.md", ".ratchet.json")
+        git(self.repo, "add", "source.py", "rules.md", ".house-rules.json")
         self.commit("base")
         self.tree = self.tmp / "feature-tree"
         git(self.repo, "worktree", "add", "-q", "-b", "feature", str(self.tree))
@@ -94,8 +94,8 @@ class LinkedTreeEvidenceTest(RepoCase):
         save_review(self.repo, "R1", "synthetic review")
         (self.tree / "source.py").write_text("changed during review\n")
         save(self.config, self.tree, "R1", snapshot, "synthetic review")
-        self.assertFalse((self.tree / ".ratchet").exists())
-        record = json.loads((self.repo / ".ratchet" / "reviews" / "R1.evidence.json").read_text(encoding="utf-8"))
+        self.assertFalse((self.tree / ".house-rules").exists())
+        record = json.loads((self.repo / ".house-rules" / "reviews" / "R1.evidence.json").read_text(encoding="utf-8"))
         self.assertEqual(record["source_stable_during_review"], {"only_in_feature.py": True, "source.py": False})
 
     def test_the_rules_are_those_of_the_tree_being_reviewed(self):
@@ -166,7 +166,7 @@ class RangeEvidenceTest(RepoCase):
     def saved_stability(self, snapshot):
         save_review(self.repo, "R1", "synthetic review")
         save(self.config, self.repo, "R1", snapshot, "synthetic review")
-        record = json.loads((self.repo / ".ratchet" / "reviews" / "R1.evidence.json").read_text(encoding="utf-8"))
+        record = json.loads((self.repo / ".house-rules" / "reviews" / "R1.evidence.json").read_text(encoding="utf-8"))
         return record["source_stable_during_review"]
 
     def test_a_file_the_working_tree_edits_while_the_review_runs_is_not_unstable(self):
@@ -268,7 +268,7 @@ class CommittedBlobTest(RepoCase):
                 self.assertIsNone(committed_blob(self.repo, self.head, name, 100))
 
     def test_a_commit_git_does_not_know_is_an_error(self):
-        with self.assertRaisesRegex(RatchetError, "failed"):
+        with self.assertRaisesRegex(HouseRulesError, "failed"):
             committed_blob(self.repo, "0" * 40, "dir/file.txt", 100)
 
     def test_pathspec_magic_in_a_path_is_part_of_a_name_that_no_file_has(self):
@@ -310,7 +310,7 @@ class ProtectedNameCaseTest(RepoCase):
 
     def test_every_spelling_of_a_protected_name_is_refused_by_name(self):
         for name in PROTECTED_SPELLINGS:
-            with self.subTest(name=name), self.assertRaisesRegex(RatchetError, "unsafe proposal path"):
+            with self.subTest(name=name), self.assertRaisesRegex(HouseRulesError, "unsafe proposal path"):
                 local_path(self.repo, name)
 
     def test_names_that_only_resemble_a_protected_one_are_not_refused(self):
@@ -333,9 +333,9 @@ class ProtectedNameCaseTest(RepoCase):
 
     def test_a_protected_name_in_another_case_is_neither_read_nor_overwritten_through_the_store(self):
         (self.repo / ".env").write_text("TOKEN=secret\n")
-        with self.assertRaisesRegex(RatchetError, "unsafe proposal path"):
+        with self.assertRaisesRegex(HouseRulesError, "unsafe proposal path"):
             read_local(self.repo, ".ENV")
-        with self.assertRaisesRegex(RatchetError, "unsafe proposal path"):
+        with self.assertRaisesRegex(HouseRulesError, "unsafe proposal path"):
             replace_local(self.repo, ".ENV", "overwritten\n")
         self.assertEqual((self.repo / ".env").read_text(), "TOKEN=secret\n")
 

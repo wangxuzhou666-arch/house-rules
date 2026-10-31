@@ -1,4 +1,4 @@
-"""The book of the daily cap (ratchet/reservations.py): how a line is read and how damage is met, the 24 hours the reservations count
+"""The book of the daily cap (house_rules/reservations.py): how a line is read and how damage is met, the 24 hours the reservations count
 over, the reservation a `wrapup --auto` may use, how the book is written again, and the lock that makes processes take turns.
 
 Nothing here reaches git or claude. The times are fixed instants a test chooses (`NOON` and its neighbours); only the processes run on
@@ -23,9 +23,9 @@ from unittest import mock
 import support  # noqa: F401  (puts the repo root on sys.path)
 from support import REPO_ROOT, book_entries, book_lines, book_of, local_zone
 
-from ratchet import reservations
-from ratchet.errors import RatchetError
-from ratchet.reservations import (
+from house_rules import reservations
+from house_rules.errors import HouseRulesError
+from house_rules.reservations import (
     BOOK_NAME, BY_HOOK, BY_WRAPUP, DAILY_WINDOW, EMPTY_BOOK, HOLD_TTL, LOCK_NAME, Reservation, consume_line, parse_book, read_book,
     reservation_lock, reserve_line, reusable, window_times, write_book,
 )
@@ -290,7 +290,7 @@ class WriteBookTest(RootCase):
     def test_the_book_is_the_owners_alone_and_no_temporary_file_is_left(self) -> None:
         self.write([], reserve_line(WORKTREE, HEAD, BY_HOOK, NOON))
         self.assertEqual(stat.S_IMODE((self.root / BOOK_NAME).stat().st_mode), 0o600)
-        self.assertEqual([path.name for path in (self.root / ".ratchet").iterdir()], [Path(BOOK_NAME).name])
+        self.assertEqual([path.name for path in (self.root / ".house-rules").iterdir()], [Path(BOOK_NAME).name])
 
     def test_a_path_with_characters_that_split_lines_or_need_escaping_round_trips(self) -> None:
         worktree = "/tmp/a b é \"quoted\" \\ back\ttab"
@@ -304,15 +304,15 @@ class WriteBookTest(RootCase):
         (young,) = book_lines((HOUR, BY_HOOK), now=NOON)
         self.write([], young)
         before = (self.root / BOOK_NAME).read_bytes()
-        with mock.patch("os.replace", side_effect=OSError("disk full")), self.assertRaises(RatchetError) as caught:
+        with mock.patch("os.replace", side_effect=OSError("disk full")), self.assertRaises(HouseRulesError) as caught:
             self.write([young], reserve_line(WORKTREE, HEAD, BY_WRAPUP, NOON))
         self.assertIn(f"cannot write {self.root / BOOK_NAME}: disk full", str(caught.exception))
         self.assertEqual((self.root / BOOK_NAME).read_bytes(), before)
-        self.assertEqual([path.name for path in (self.root / ".ratchet").iterdir()], [Path(BOOK_NAME).name])
+        self.assertEqual([path.name for path in (self.root / ".house-rules").iterdir()], [Path(BOOK_NAME).name])
 
     def test_a_directory_that_cannot_be_made_is_a_named_error_and_not_a_traceback(self) -> None:
-        (self.root / ".ratchet").write_text("a file where the directory should be", encoding="utf-8")
-        with self.assertRaises(RatchetError) as caught:
+        (self.root / ".house-rules").write_text("a file where the directory should be", encoding="utf-8")
+        with self.assertRaises(HouseRulesError) as caught:
             self.write([], reserve_line(WORKTREE, HEAD, BY_HOOK, NOON))
         self.assertIn(f"cannot write {self.root / BOOK_NAME}", str(caught.exception))
 
@@ -323,19 +323,19 @@ class ReadBookTest(RootCase):
     def test_a_repo_without_a_book_has_an_empty_one_and_reading_creates_nothing(self) -> None:
         self.assertIs(read_book(self.root), EMPTY_BOOK)
         self.assertEqual(list(self.root.iterdir()), [])
-        (self.root / ".ratchet").mkdir()
+        (self.root / ".house-rules").mkdir()
         self.assertIs(read_book(self.root), EMPTY_BOOK)
-        self.assertEqual(list((self.root / ".ratchet").iterdir()), [])
+        self.assertEqual(list((self.root / ".house-rules").iterdir()), [])
 
     def test_a_book_is_read_as_it_is_written(self) -> None:
         lines = book_lines((HOUR, BY_HOOK), (2 * HOUR, BY_WRAPUP), now=NOON)
-        (self.root / ".ratchet").mkdir()
+        (self.root / ".house-rules").mkdir()
         (self.root / BOOK_NAME).write_text("\n".join(lines) + "\n", encoding="utf-8")
         self.assertEqual(read_book(self.root), parse_book("\n".join(lines)))
 
     def test_bytes_that_are_not_utf8_do_not_stop_the_read_and_the_line_they_are_in_is_named(self) -> None:
         (good,) = book_lines((HOUR, BY_HOOK), now=NOON)
-        (self.root / ".ratchet").mkdir()
+        (self.root / ".house-rules").mkdir()
         (self.root / BOOK_NAME).write_bytes(b"\xff\xfe not text\n" + good.encode() + b"\n")
         book = read_book(self.root)
         self.assertEqual((len(book.reservations), len(book.damaged)), (1, 1))
@@ -344,18 +344,18 @@ class ReadBookTest(RootCase):
         path = self.root / BOOK_NAME
         path.parent.mkdir()
         path.symlink_to(self.root / "elsewhere")
-        with self.assertRaises(RatchetError) as caught:
+        with self.assertRaises(HouseRulesError) as caught:
             read_book(self.root)
         self.assertIn(BOOK_NAME, str(caught.exception))
         path.unlink()
         path.mkdir()
-        with self.assertRaises(RatchetError) as caught:
+        with self.assertRaises(HouseRulesError) as caught:
             read_book(self.root)
         self.assertIn(BOOK_NAME, str(caught.exception))
 
     def test_a_state_directory_that_cannot_be_read_is_a_named_error_too(self) -> None:
-        (self.root / ".ratchet").write_text("a file where the directory should be", encoding="utf-8")
-        with self.assertRaises(RatchetError) as caught:
+        (self.root / ".house-rules").write_text("a file where the directory should be", encoding="utf-8")
+        with self.assertRaises(HouseRulesError) as caught:
             read_book(self.root)
         self.assertIn(f"cannot read {self.root / BOOK_NAME}", str(caught.exception))
 
@@ -364,7 +364,7 @@ WAITER = """
 import sys
 sys.path.insert(0, sys.argv[1])
 from pathlib import Path
-from ratchet.reservations import reservation_lock
+from house_rules.reservations import reservation_lock
 print("ready", flush=True)
 with reservation_lock(Path(sys.argv[2]), wait=30):
     print("got", flush=True)
@@ -373,7 +373,7 @@ HOLDER = """
 import sys, time
 sys.path.insert(0, sys.argv[1])
 from pathlib import Path
-from ratchet.reservations import reservation_lock
+from house_rules.reservations import reservation_lock
 with reservation_lock(Path(sys.argv[2])):
     print("held", flush=True)
     time.sleep(60)
@@ -395,7 +395,7 @@ class LockTest(RootCase):
     def test_the_wait_ends_with_an_error_that_names_the_lock_file_and_the_seconds(self) -> None:
         with reservation_lock(self.root):
             started = time.monotonic()
-            with self.assertRaises(RatchetError) as caught, reservation_lock(self.root, wait=0.2):
+            with self.assertRaises(HouseRulesError) as caught, reservation_lock(self.root, wait=0.2):
                 self.fail("the lock was held by this very test")
             waited = time.monotonic() - started
         self.assertIn(f"{self.root / LOCK_NAME} stayed locked for 0.2s", str(caught.exception))
@@ -405,7 +405,7 @@ class LockTest(RootCase):
         self.assertEqual(reservations.LOCK_WAIT_SECONDS, 5.0)
         with reservation_lock(self.root), mock.patch.object(reservations, "LOCK_WAIT_SECONDS", 0.2):
             started = time.monotonic()
-            with self.assertRaises(RatchetError) as caught, reservation_lock(self.root):
+            with self.assertRaises(HouseRulesError) as caught, reservation_lock(self.root):
                 self.fail("the lock was held by this very test")
         self.assertIn("stayed locked for 0.2s", str(caught.exception))
         self.assertLess(time.monotonic() - started, 3)
@@ -421,7 +421,7 @@ class LockTest(RootCase):
     def test_a_lock_the_file_system_refuses_is_a_named_error_and_not_a_plain_os_error(self) -> None:
         refused = OSError(errno.ENOLCK, os.strerror(errno.ENOLCK))  # as a network file system answers when it cannot take the lock
         with mock.patch("fcntl.flock", side_effect=refused):
-            with self.assertRaises(RatchetError) as caught, reservation_lock(self.root):
+            with self.assertRaises(HouseRulesError) as caught, reservation_lock(self.root):
                 self.fail("the lock was refused")
         self.assertEqual(str(caught.exception), f"cannot lock {self.root / LOCK_NAME}: [Errno {errno.ENOLCK}] {os.strerror(errno.ENOLCK)}")
         self.assertIs(caught.exception.__cause__, refused)
@@ -447,7 +447,7 @@ class LockTest(RootCase):
     def test_a_lock_held_by_a_process_that_is_killed_is_free_at_once(self) -> None:
         holder = self.spawn(HOLDER)
         self.assertEqual(holder.stdout.readline(), "held\n")
-        with self.assertRaises(RatchetError), reservation_lock(self.root, wait=0.2):
+        with self.assertRaises(HouseRulesError), reservation_lock(self.root, wait=0.2):
             self.fail("another process holds it")
         holder.send_signal(signal.SIGKILL)  # no chance to clean up, as in a crash
         holder.wait(timeout=30)
@@ -468,20 +468,20 @@ class LockTest(RootCase):
         path = self.root / LOCK_NAME
         path.parent.mkdir()
         path.symlink_to(self.root / "elsewhere")
-        with self.assertRaises(RatchetError) as caught, reservation_lock(self.root):
+        with self.assertRaises(HouseRulesError) as caught, reservation_lock(self.root):
             self.fail("a lock behind a symlink")
         self.assertIn(LOCK_NAME, str(caught.exception))
         path.unlink()
         path.mkdir()
-        with self.assertRaises(RatchetError) as caught, reservation_lock(self.root):
+        with self.assertRaises(HouseRulesError) as caught, reservation_lock(self.root):
             self.fail("a lock that is a directory")
         self.assertIn(LOCK_NAME, str(caught.exception))
 
     def test_a_state_directory_that_cannot_be_made_is_a_named_error(self) -> None:
-        (self.root / ".ratchet").write_text("a file where the directory should be", encoding="utf-8")
-        with self.assertRaises(RatchetError) as caught, reservation_lock(self.root):
+        (self.root / ".house-rules").write_text("a file where the directory should be", encoding="utf-8")
+        with self.assertRaises(HouseRulesError) as caught, reservation_lock(self.root):
             self.fail("no directory for the lock")
-        self.assertIn(f"cannot create {self.root / '.ratchet'}", str(caught.exception))
+        self.assertIn(f"cannot create {self.root / '.house-rules'}", str(caught.exception))
 
     @unittest.skipIf(os.geteuid() == 0, "root opens a file whatever its mode")
     def test_a_lock_file_that_cannot_be_opened_is_a_named_error(self) -> None:
@@ -489,7 +489,7 @@ class LockTest(RootCase):
         path.parent.mkdir()
         path.touch()
         path.chmod(0)
-        with self.assertRaises(RatchetError) as caught, reservation_lock(self.root):
+        with self.assertRaises(HouseRulesError) as caught, reservation_lock(self.root):
             self.fail("no lock file to hold")
         self.assertIn(f"cannot open {path}", str(caught.exception))
 
@@ -499,7 +499,7 @@ import sys, time
 sys.path.insert(0, sys.argv[1])
 from pathlib import Path
 from types import SimpleNamespace
-from ratchet.review import take_automatic_slot
+from house_rules.review import take_automatic_slot
 root = Path(sys.argv[2])
 config = SimpleNamespace(root=root, worktree=root / "worktree", wrapup_auto_max_per_day=3)
 (root / f"ready-{sys.argv[3]}").write_text("")
@@ -527,7 +527,7 @@ class ConcurrencyTest(RootCase):
         self.assertEqual(sorted(answers), ["REFUSED"] * 9 + ["TAKEN"] * 3, answers)
         entries = book_entries(self.root)
         self.assertEqual([(entry["kind"], entry["by"]) for entry in entries], [("reserve", "wrapup")] * 3)
-        self.assertEqual(sorted(path.name for path in (self.root / ".ratchet").iterdir()),
+        self.assertEqual(sorted(path.name for path in (self.root / ".house-rules").iterdir()),
                          sorted([Path(BOOK_NAME).name, Path(LOCK_NAME).name]))  # no temporary file is left behind
 
     def test_while_the_lock_is_held_elsewhere_a_process_neither_reads_nor_writes_the_book_and_it_goes_on_after(self) -> None:

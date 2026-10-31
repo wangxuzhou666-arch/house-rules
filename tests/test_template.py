@@ -4,7 +4,7 @@ import unittest
 import support  # noqa: F401  (puts the repo root on sys.path)
 from support import RepoCase
 
-from ratchet.onboard import TEMPLATE_PATH
+from house_rules.onboard import TEMPLATE_PATH
 
 DIGEST = "CODING-STYLE.digest.md"
 FAMILIES = ("P0E", "P0F", "P1", "P2", "P3", "R")
@@ -86,8 +86,8 @@ class TemplateTest(RepoCase):
 
     def test_every_clause_is_usable_as_a_category_for_ingest(self) -> None:
         self.cli_ok("compile")
-        from ratchet.config import load_config
-        from ratchet.rules import load_rules
+        from house_rules.config import load_config
+        from house_rules.rules import load_rules
         rules = load_rules(load_config(self.repo, None, None, self.repo))
         for clause in rules.clauses:
             self.assertEqual(rules.from_kebab(clause.lower()), clause)

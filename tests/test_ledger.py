@@ -7,8 +7,8 @@ import support  # noqa: F401  (puts the repo root on sys.path)
 import schema_check
 from support import REPO_ROOT, RepoCase, gate_finding, gate_pass, report_item, review_finding, review_round
 
-from ratchet import ledger
-from ratchet.errors import RatchetError
+from house_rules import ledger
+from house_rules.errors import HouseRulesError
 
 SCHEMA = json.loads((REPO_ROOT / "schemas" / "finding.v1.schema.json").read_text(encoding="utf-8"))
 
@@ -30,7 +30,7 @@ class FoldTest(unittest.TestCase):
         self.assertEqual(len(ledger.open_findings(events + [finding])), 1)
 
     def test_outcome_for_unknown_finding_is_an_error(self) -> None:
-        with self.assertRaisesRegex(RatchetError, "not in the ledger"):
+        with self.assertRaisesRegex(HouseRulesError, "not in the ledger"):
             ledger.fold([self.outcome("demo-repo:l1:R1:R1-001")])
 
     def test_select_new_events_drops_review_replays_but_reopens_gate_findings(self) -> None:
@@ -46,7 +46,7 @@ class FoldTest(unittest.TestCase):
 
     def test_reused_review_id_with_different_content_is_refused(self) -> None:
         existing = [review_finding("R1-001", summary="original")]
-        with self.assertRaisesRegex(RatchetError, "different file/line/summary"):
+        with self.assertRaisesRegex(HouseRulesError, "different file/line/summary"):
             ledger.select_new_events(existing, [review_finding("R1-001", summary="something else")])
 
     def test_legacy_padded_review_replay_keeps_original_id_and_outcome(self):
@@ -58,7 +58,7 @@ class FoldTest(unittest.TestCase):
 
     def test_legacy_alias_still_rejects_changed_content_and_does_not_merge_other_runs(self):
         old = review_finding("R1-001")
-        with self.assertRaisesRegex(RatchetError, "different file/line/summary"):
+        with self.assertRaisesRegex(HouseRulesError, "different file/line/summary"):
             ledger.select_new_events([old], [review_finding("R1-1", summary="different")])
         other = review_finding("R2-1", run="R2")
         self.assertEqual(ledger.select_new_events([old], [other]), [other])
@@ -66,7 +66,7 @@ class FoldTest(unittest.TestCase):
 
 class ValidateTest(unittest.TestCase):
     def test_invalid_event_is_rejected_with_every_problem(self) -> None:
-        with self.assertRaisesRegex(RatchetError, "line.*severity|severity.*line"):
+        with self.assertRaisesRegex(HouseRulesError, "line.*severity|severity.*line"):
             ledger.validate(review_finding(line=0, severity="high"))
 
     def test_effective_rule_id_alias_is_scoped_to_review_sources(self) -> None:
@@ -187,7 +187,7 @@ class FileIoTest(unittest.TestCase):
         self.assertEqual([e["display_id"] for e in ledger.read_events(self.path)], ["R1-001", "R1-002"])
 
     def test_invalid_batch_writes_nothing(self) -> None:
-        with self.assertRaises(RatchetError):
+        with self.assertRaises(HouseRulesError):
             ledger.append_events(self.path, [review_finding("R1-001"), review_finding("R1-002", line=0)])
         self.assertFalse(self.path.exists())
 
@@ -196,12 +196,12 @@ class FileIoTest(unittest.TestCase):
 
     def test_bad_json_line_is_reported_with_its_line_number(self) -> None:
         self.path.write_text(json.dumps(review_finding()) + "\n{broken\n", encoding="utf-8")
-        with self.assertRaisesRegex(RatchetError, r"ledger\.jsonl:2: not valid JSON"):
+        with self.assertRaisesRegex(HouseRulesError, r"ledger\.jsonl:2: not valid JSON"):
             ledger.read_events(self.path)
 
     def test_invalid_event_line_is_reported_with_its_line_number(self) -> None:
         self.path.write_text(json.dumps(review_finding(severity="high")) + "\n", encoding="utf-8")
-        with self.assertRaisesRegex(RatchetError, r"ledger\.jsonl:1: .*severity"):
+        with self.assertRaisesRegex(HouseRulesError, r"ledger\.jsonl:1: .*severity"):
             ledger.read_events(self.path)
 
     def test_blank_lines_are_skipped(self) -> None:
