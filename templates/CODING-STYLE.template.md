@@ -1,6 +1,6 @@
 # Coding Style (DRAFT template)
 
-<!-- ADJUST: a starting point, not a standard. Every knob below is marked ADJUST. Change thresholds, tool codes and examples to what your repo enforces, and delete the clauses you will not hold people to. After editing, run `ratchet compile` to regenerate the digest. -->
+<!-- ADJUST: a starting point, not a standard. Every knob below is marked ADJUST. Change thresholds, tool codes and examples to what your repo enforces, and delete the clauses you will not hold people to. After editing, run `house-rules compile` to regenerate the digest. -->
 
 > Readers: engineers and coding agents who write code, and reviewers (human or model) who judge it.
 > Role: the single source of truth for review standards. A reviewer does not invent thresholds; they live here.

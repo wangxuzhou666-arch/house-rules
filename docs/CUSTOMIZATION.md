@@ -1,6 +1,6 @@
 # Bring your own review standards
 
-review-ratchet is a workflow blueprint: review findings become evidence-backed
+house-rules is a workflow blueprint: review findings become evidence-backed
 rule proposals, a person decides, and approved rules feed the next review. The
 bundled coding style and decision layout are starting points, not universal standards.
 
@@ -16,8 +16,8 @@ bundled coding style and decision layout are starting points, not universal stan
 Use an existing file instead of accepting the bundled template:
 
 ```sh
-ratchet init --rules-file docs/CODING-STYLE.md
-ratchet compile --check --strict
+house-rules init --rules-file docs/CODING-STYLE.md
+house-rules compile --check --strict
 ```
 
 The equivalent configuration points at your files:
@@ -78,7 +78,7 @@ The current CLI does not automatically manage that two-file mapping. Additional
 custom fields are not automatically preserved as ledger fields; keep them in the
 original report. See the [ledger contract](LEDGER.md).
 
-For supported output, use `ratchet review --from-file review.txt --run RUN_ID`.
+For supported output, use `house-rules review --from-file review.txt --run RUN_ID`.
 For a different format, supply the normalized file and retain its original beside
 it. Imports cannot recreate missing historical code snapshots. The digest's generated
 Labeling section describes the canonical format; change the reviewer instructions
@@ -100,6 +100,6 @@ when the visible question changes. Preview feedback is not another rule adoption
 
 ## Personal feedback over time
 
-`ratchet decision-summary` currently reports decision counts. A personal acceptance
+`house-rules decision-summary` currently reports decision counts. A personal acceptance
 rate or consistency benchmark is future work, described separately in
 [decision metrics](DECISION-METRICS.md). No shared target, including 90%, is enforced.

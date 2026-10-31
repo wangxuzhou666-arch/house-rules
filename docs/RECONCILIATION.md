@@ -1,6 +1,6 @@
 # Historical finding reconciliation — 2026-10-28
 
-Scope: the ten `r1` findings and six `r2` findings in review-ratchet's local ledger.
+Scope: the ten `r1` findings and six `r2` findings in house-rules' local ledger.
 The conclusions below describe the implementation verified for this local closeout,
 not an already published release. Original findings and their rule attribution are preserved. Rule adoption
 and code-defect closure are different events.
@@ -25,13 +25,13 @@ The `r2-6` tests establish current behavior, not removal of its deferred cleanup
 | r2-1 | Fixed in working tree | A recorded ID without `--from-file` is rejected before calling the reviewer, including with `--over-cap` or `--dry-run`. The two `test_review.RoundCapTest.test_a_recorded_run_id_is_refused_without_from_file...` tests assert the reviewer was not invoked. |
 | r2-2 | Fixed in working tree | In a corpus with no severity data, valid clause categories are retained. `test_ingest.IngestWithoutSeveritiesTest.test_a_category_naming_a_clause_is_the_models_answer`. |
 | r2-3 | Fixed in working tree | The same no-severity convention applies to prose attribution. `test_ingest.IngestWithoutSeveritiesTest.test_a_clause_cited_in_the_text_is_attributed` and `test_rules.LoadRulesTest.test_rules_where_no_clause_has_a_severity_have_no_reviewer_rules`. |
-| r2-4 | Fixed in working tree | Hook internals use private temporary variables and unset them; documented `RATCHET_PY`/`RATCHET_BIN` values survive. `test_init.PortableBlockRuntimeTest` exercises the runtime branches and pinned/portable preservation checks. |
+| r2-4 | Fixed in working tree | Hook internals use private temporary variables and unset them; documented `HOUSE_RULES_PY`/`HOUSE_RULES_BIN` values survive. `test_init.PortableBlockRuntimeTest` exercises the runtime branches and pinned/portable preservation checks. |
 | r2-5 | Fixed in working tree | `place_block` requires a shebang; the unreachable fallback was removed. `test_init.PlaceBlockTest.test_a_script_without_a_shebang_is_a_programmer_error_because_plan_hook_never_passes_one` and `test_init.HooksTest.test_a_hook_without_a_shebang_is_not_touched`. |
 | r2-6 | Nonblocking cleanup deferred | A real reviewer call with a reused ID is already refused; file replay at the cap correctly says it is not a new round and writes no event. `cmd_review` still constructs an unused `review_run_event` on the replay path. Move event construction inside the non-replay branch in a later cleanup; retain the no-new-event tests. Do not claim this redundancy has been removed. |
 
-Code: [CLI](../ratchet/cli.py), [rules](../ratchet/rules.py),
-[ingest](../ratchet/ingest.py), [ledger](../ratchet/ledger.py),
-[hooks](../ratchet/hooks.py), [gate](../ratchet/gate.py), [vendor](../ratchet/vendor.py).
+Code: [CLI](../house_rules/cli.py), [rules](../house_rules/rules.py),
+[ingest](../house_rules/ingest.py), [ledger](../house_rules/ledger.py),
+[hooks](../house_rules/hooks.py), [gate](../house_rules/gate.py), [vendor](../house_rules/vendor.py).
 
 Tests can be rerun from the checkout with:
 

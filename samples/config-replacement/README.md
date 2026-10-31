@@ -37,10 +37,10 @@ Repeated findings are not additional reasons to duplicate the clause.
 1. Copy the chosen Python files and your selected rule corpus to a new scratch git
    repository. Commit a small baseline so the review target is explicit; then add
    or change the sample files. Do not review unrelated personal projects.
-2. Run `ratchet init --rules-file CODING-STYLE.md`, or the setup skill. Verify the
+2. Run `house-rules init --rules-file CODING-STYLE.md`, or the setup skill. Verify the
    compiled digest and its import before reviewing.
 3. Use the host's native Code Review capability with [this prompt](reviewer-prompt.md).
-   The supported wrapper is `ratchet review`; for a native review already completed
+   The supported wrapper is `house-rules review`; for a native review already completed
    elsewhere, save its output and import once with `review --from-file FILE --run ID`.
 4. Give the saved findings to the maintenance agent with [this prompt](maintenance-prompt.md).
    Inspect source, evidence, coverage and exact changes in the native question.

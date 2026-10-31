@@ -2,7 +2,7 @@
 
 # 为什么这样设计这个循环
 
-我做 review-ratchet，是因为我总在 code review 里一遍遍重新学自己的编码规范，然后又把教训弄丢。这一页讲设计、搭建过程中踩过的坑，以及怎么把这个循环搬到你自己的仓库和 reviewer 上。它只是一个人在几个仓库、几十条 reviewer 发现上的笔记：请把里面的数字当成附带计数的轶事。这里没有任何东西在训练模型，我也还没有证据表明 review 会随时间变好（[局限](#8-局限与待解问题)）。命令见 [README](../README.zh.md)。
+我做 house-rules，是因为我总在 code review 里一遍遍重新学自己的编码规范，然后又把教训弄丢。这一页讲设计、搭建过程中踩过的坑，以及怎么把这个循环搬到你自己的仓库和 reviewer 上。它只是一个人在几个仓库、几十条 reviewer 发现上的笔记：请把里面的数字当成附带计数的轶事。这里没有任何东西在训练模型，我也还没有证据表明 review 会随时间变好（[局限](#8-局限与待解问题)）。命令见 [README](../README.zh.md)。
 
 ## 术语
 
@@ -12,7 +12,7 @@
 | 条款、ID、条款族 | 一条规则及其稳定 ID（`P0E.2`）；条款族是点号前的前缀（`P0E`） |
 | 严重度 | `blocker`、`should-fix` 或 `nice`：先取条款自己的标签，否则取规则文件里的族表（[COMPILE.md](COMPILE.md#severity-table)） |
 | reviewer 行为准则 | 不带严重度的条款（`R.*` 族）：规定怎么 review，不是缺陷 |
-| Digest | `ratchet compile` 生成的短文本；编码 agent 和 reviewer 都会加载 |
+| Digest | `house-rules compile` 生成的短文本；编码 agent 和 reviewer 都会加载 |
 | Ledger | 只追加的本地 JSONL 文件，记录发现和处置结果 |
 | 发现（finding） | reviewer 报告的一个缺陷，标注为某个条款 ID 或 `unmapped` |
 | `source` | 发现的来源：`gate`，或 `l1` / `l2`（两档 review，同等对待；`add` 也能记录人工 review 的评论） |
@@ -35,7 +35,7 @@
 
 ```mermaid
 flowchart LR
-  R["规则文件<br/>(策略 policy)"] -->|"ratchet compile"| D["由 CLAUDE.md 导入的 digest"]
+  R["规则文件<br/>(策略 policy)"] -->|"house-rules compile"| D["由 CLAUDE.md 导入的 digest"]
   D --> A["编码 agent<br/>(行动者 actor)"]
   D --> C["/code-review<br/>(评论者 critic，每个改动默认 3 轮)"]
   A -->|"diff"| C
@@ -74,13 +74,13 @@ flowchart LR
 
 - **发生了什么。** 试点里的 skill 文本写着要运行关闭发现的那个步骤，但没有任何东西去运行它。后来一次 dry run 显示，它能关闭 97 条未关闭的 gate 发现中的 95 条（21 条 reviewer 发现里则是 0 条，因为当时没有 commit 约定）。自动处置结果：0。
 - **为什么。** 奖励是缺失，而不是偏低：修复率和误报率都无从定义，可一长串「未关闭」的列表看上去像一大堆 bug。
-- **防线。** 用机械触发，不靠提醒。post-commit hook 运行 `ratchet infer`，当 commit message 以 `Fixes-Finding: <id>` 结尾时关闭对应的发现；gate 通过会关闭它所覆盖文件里的 gate 发现；其余的由本地页面收集人工标注。这两条自动路径目前只在 fixture 上跑过（[局限](#8-局限与待解问题)）。（[LEDGER.md](LEDGER.md#attribution)）
+- **防线。** 用机械触发，不靠提醒。post-commit hook 运行 `house-rules infer`，当 commit message 以 `Fixes-Finding: <id>` 结尾时关闭对应的发现；gate 通过会关闭它所覆盖文件里的 gate 发现；其余的由本地页面收集人工标注。这两条自动路径目前只在 fixture 上跑过（[局限](#8-局限与待解问题)）。（[LEDGER.md](LEDGER.md#attribution)）
 
 ### 永不触发的防线
 
 - **发生了什么。** 在第二个仓库里，`init` 把它的 pre-commit 检查追加到了已有 hook 的 `exit 0` 之后：这是死代码，却被报告为成功，重跑时还显示「already ok」。
 - **为什么。** 「从未触发」和「没有可抓的东西」看起来一模一样。
-- **防线。** 这个代码块放在 shebang 的正下方。安装之后，`init` 用 `RATCHET_HOOK_PROBE=1` 把每个 hook 各运行一次；这个块必须在你的任何代码运行之前就作出应答，否则这一步失败（没有跳过开关）。每个 gate 还需要一次变异检查（R.7，[第 4 节](#4-规则何时升级为机械-gate)）：`tests/mutation_check.py` 每次植入一个刻意的 bug，并要求测试套件变红（最近一次完整运行，328 个变异抓到了 328 个，见 [ACCEPTANCE.md](ACCEPTANCE.md)）。这检验的是工具自己的代码，不是这个循环的效果。（[ONBOARDING.md](ONBOARDING.md#where-the-block-goes-and-the-live-check)）
+- **防线。** 这个代码块放在 shebang 的正下方。安装之后，`init` 用 `HOUSE_RULES_HOOK_PROBE=1` 把每个 hook 各运行一次；这个块必须在你的任何代码运行之前就作出应答，否则这一步失败（没有跳过开关）。每个 gate 还需要一次变异检查（R.7，[第 4 节](#4-规则何时升级为机械-gate)）：`tests/mutation_check.py` 每次植入一个刻意的 bug，并要求测试套件变红（最近一次完整运行，328 个变异抓到了 328 个，见 [ACCEPTANCE.md](ACCEPTANCE.md)）。这检验的是工具自己的代码，不是这个循环的效果。（[ONBOARDING.md](ONBOARDING.md#where-the-block-goes-and-the-live-check)）
 
 ### 只看 precision 会奖励沉默
 
@@ -112,7 +112,7 @@ flowchart LR
 
 升级的证据是反复出现、且工具能判定的那类发现；ledger 给出计数，由人来决定，工具不会替你写 gate。降级也会发生：一个检查布尔变量名前缀的机械检查，拦下了 `truncated` 这类明明正当的惯用名，于是它被改成 reviewer 判断（见[模板](../templates/CODING-STYLE.template.zh.md)里 P2.5 的 ADJUST 注释）。
 
-一个新的 gate 需要：一个证明它会触发的失败示例、一个保持干净的合规示例（先从该规则声明的例外开始）、证明撤销后会变绿，以及一次变异检查，这些都要提交（R.7；[CONTRIBUTING.md](../CONTRIBUTING.md)）。Gate 通过 `ratchet gate record` 和 `ratchet gate pass` 把结果喂进同一个 ledger（[GATES.md](GATES.md)）；一次 pass 会关闭该文件的 gate 发现，这比「确认已修复」弱。
+一个新的 gate 需要：一个证明它会触发的失败示例、一个保持干净的合规示例（先从该规则声明的例外开始）、证明撤销后会变绿，以及一次变异检查，这些都要提交（R.7；[CONTRIBUTING.md](../CONTRIBUTING.md)）。Gate 通过 `house-rules gate record` 和 `house-rules gate pass` 把结果喂进同一个 ledger（[GATES.md](GATES.md)）；一次 pass 会关闭该文件的 gate 发现，这比「确认已修复」弱。
 
 ## 5. 把循环搬到别的 reviewer
 
@@ -140,7 +140,7 @@ flowchart LR
 
 内置 reviewer，在我 2026 年 10 月测试的那个 Claude Code 版本（`claude -p`）上，默认最多输出 10 条发现（更新的版本新增了 `--max-findings`），形式是纯文本 JSON，带 `file`、`line`、`summary` 和 `failure_scenario`。当 `CLAUDE.md` 要求时，它会加上 `category` 和 `severity`（2 次运行里有 2 次），所以 digest 把这条写成命令的口吻。标签并不稳定：第二次运行里，它把对不上的问题硬凑进已有条款，还把一个缺陷拆成三条发现、挂在三个 ID 下。模型给的标签只是一个提议。
 
-**3. 发现的身份。** 对 review 来说，ID 由导入器生成，而不是由 reviewer 生成：同一次 review 里的发现得到显示 ID `<run>-1`、`<run>-2`……（如 `r3-2`，run 为 `r3`），存储时用完整 ID `<repo>:<source>:<run>:<display ID>`。修复的人必须看得到显示 ID：`ratchet review` 会在它的表格里打印；如果搬到 PR 评论的场景，应该把它放进每条评论。修复的 commit 随后以一条 `Fixes-Finding: r3-2` trailer 结尾（[LEDGER.md](LEDGER.md#finding)）。
+**3. 发现的身份。** 对 review 来说，ID 由导入器生成，而不是由 reviewer 生成：同一次 review 里的发现得到显示 ID `<run>-1`、`<run>-2`……（如 `r3-2`，run 为 `r3`），存储时用完整 ID `<repo>:<source>:<run>:<display ID>`。修复的人必须看得到显示 ID：`house-rules review` 会在它的表格里打印；如果搬到 PR 评论的场景，应该把它放进每条评论。修复的 commit 随后以一条 `Fixes-Finding: r3-2` trailer 结尾（[LEDGER.md](LEDGER.md#finding)）。
 
 **4. Ledger 与机械的处置结果。** 一个只追加的 JSONL 文件，有四种事件：`finding`、`outcome`（由 commit trailer、gate 通过或人工给出，附证据）、`gate_pass` 和 `review_run`（一轮 review，用于上限）。一个发现的状态是它的事件按文件顺序的 fold（[LEDGER.md](LEDGER.md#events)）。做匹配时有两个陷阱：不要去解析 commit 标题（像 `S1` 这样的 ID 会和 scope 标签撞车），也不要比较时间戳（修复可能比发现被记账更早提交）。
 

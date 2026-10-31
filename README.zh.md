@@ -1,6 +1,6 @@
 [English](README.md) | 中文
 
-# review-ratchet
+# house-rules
 
 把 code review 的反馈变成可检视的提案，用来改进你自己的编码规范。
 你的 reviewer 负责找缺陷；模型把缺陷和你的规则对照；由你决定哪些改动应该进规则手册。
@@ -17,7 +17,7 @@ flowchart LR
   F --> B
 ```
 
-装上 Claude Code 插件后，这个循环会自己转：运行一次 `/review-ratchet:setup`，之后照常提交。
+装上 Claude Code 插件后，这个循环会自己转：运行一次 `/house-rules:setup`，之后照常提交。
 改动攒够了，Claude 会去跑 review；只有发现了新的盲点（没有任何规则覆盖的问题）时，
 才会问你一个问题。见[快速开始](#快速开始)和[融进日常工作](docs/INTEGRATION.md)。
 
@@ -75,8 +75,8 @@ python3 scripts/check_acceptance.py --output-dir /absolute/new/scratch-directory
 作为 Claude Code 插件，从本仓库自带的 marketplace 安装：
 
 ```sh
-claude plugin marketplace add wangxuzhou666-arch/review-ratchet
-claude plugin install review-ratchet@review-ratchet
+claude plugin marketplace add wangxuzhou666-arch/house-rules
+claude plugin install house-rules@house-rules
 ```
 
 marketplace 命令需要仓库已发布的某个版本。对尚未发布的 checkout，
@@ -85,13 +85,13 @@ marketplace 命令需要仓库已发布的某个版本。对尚未发布的 chec
 从本地 checkout 加载，仅用于一个会话，不做安装：
 
 ```sh
-claude --plugin-dir /path/to/review-ratchet
+claude --plugin-dir /path/to/house-rules
 ```
 
 不用插件的话，直接从 checkout 里运行命令（Python 3.10+，仅用标准库）：
 
 ```sh
-/path/to/review-ratchet/bin/ratchet init
+/path/to/house-rules/bin/house-rules init
 ```
 
 ## 快速开始
@@ -99,33 +99,33 @@ claude --plugin-dir /path/to/review-ratchet
 使用插件：
 
 1. [安装插件](#安装)。
-2. 在你的仓库里运行一次 `/review-ratchet:setup`。它先预览，再运行 `ratchet init`：一个规则文件（内置模板只是待调整的草稿）、编译出的风格 digest、`CLAUDE.md` 里的一行 `@import`、git hooks（每个都会被实际运行一次，证明确实被触发）、`.gitignore` 条目、默认分支的 start point（它的第一次收口从这个提交开始度量），以及（由你选择是否开启的）自动收口。结尾会给出一行现成的 `git add ... && git commit`，对应它创建的那些文件：请执行它，因为 pre-commit hook 检查的是暂存的副本。
+2. 在你的仓库里运行一次 `/house-rules:setup`。它先预览，再运行 `house-rules init`：一个规则文件（内置模板只是待调整的草稿）、编译出的风格 digest、`CLAUDE.md` 里的一行 `@import`、git hooks（每个都会被实际运行一次，证明确实被触发）、`.gitignore` 条目、默认分支的 start point（它的第一次收口从这个提交开始度量），以及（由你选择是否开启的）自动收口。结尾会给出一行现成的 `git add ... && git commit`，对应它创建的那些文件：请执行它，因为 pre-commit hook 检查的是暂存的副本。
 3. 照常提交。当某个回合在一次提交之后结束、并且上次 review 之后的改动已达到阈值（`wrapup_min_changed_lines` 默认 200 行，或 `wrapup_min_files` 默认 5 个文件）时，Claude 会在后台跑一次收口 review。只有 review 发现了没有任何规则覆盖、而且你还没被问过的盲点时，才会问你一个问题。没到阈值，什么都不会运行；任意 24 小时内默认最多自动请求或启动 2 次 review，失败的也算（`wrapup_auto_max_per_day`；超过之后只会告诉你一次，下一次等窗口腾出名额：[每日上限](docs/WRAPUP.md#the-daily-cap)）。这需要 Claude Code 2.1.163 或更高版本；详见[自动收口](docs/WRAPUP.md#automatic-wrap-up)。
-4. 想根据这些发现维护规则，运行 `/review-ratchet:maintain`；那个问题会提议替你启动它。agent 会收集代码证据，提出限定范围的改动，并通过宿主原生的提问工具来问你。被接受的改动会更新规则和 digest；拒绝、暂缓和要求修改也都会被记录。不需要自定义 UI，也不需要手动复制 JSON。详见[工作流与评估契约](docs/DECISION-CARDS.md)。
+4. 想根据这些发现维护规则，运行 `/house-rules:maintain`；那个问题会提议替你启动它。agent 会收集代码证据，提出限定范围的改动，并通过宿主原生的提问工具来问你。被接受的改动会更新规则和 digest；拒绝、暂缓和要求修改也都会被记录。不需要自定义 UI，也不需要手动复制 JSON。详见[工作流与评估契约](docs/DECISION-CARDS.md)。
 
-整个循环就是这些。[把 review-ratchet 融进日常工作](docs/INTEGRATION.md)补充了多 worktree、共享规则层、隐私和成本。想改为手动跑某一步：`/review-ratchet:review` 做一次 review，按你规则的条款 ID 记录发现，并用表格展示；`/review-ratchet:wrapup`（或直接说“收口”）统计上次 review 之后改了多少，只有改动够多才 review 一次。详见[收口](docs/WRAPUP.md)。
+整个循环就是这些。[把 house-rules 融进日常工作](docs/INTEGRATION.md)补充了多 worktree、共享规则层、隐私和成本。想改为手动跑某一步：`/house-rules:review` 做一次 review，按你规则的条款 ID 记录发现，并用表格展示；`/house-rules:wrapup`（或直接说“收口”）统计上次 review 之后改了多少，只有改动够多才 review 一次。详见[收口](docs/WRAPUP.md)。
 
-不用插件的话，没有任何东西会自动触发：自己运行命令，或者在自己的收尾步骤里调用 `ratchet wrapup`（[做法](docs/INTEGRATION.md#with-and-without-the-plugin)）。在你仓库的终端里：
+不用插件的话，没有任何东西会自动触发：自己运行命令，或者在自己的收尾步骤里调用 `house-rules wrapup`（[做法](docs/INTEGRATION.md#with-and-without-the-plugin)）。在你仓库的终端里：
 
 ```sh
-/path/to/review-ratchet/bin/ratchet init            # 会问几个问题；--yes 接受默认值，--dry-run 只打印计划
-/path/to/review-ratchet/bin/ratchet review          # 运行 claude -p "/code-review high"（在默认分支上会带上要读的提交范围），并记录发现
-/path/to/review-ratchet/bin/ratchet wrapup          # 统计上次 review 之后的改动；够多才 review 一次
-/path/to/review-ratchet/bin/ratchet count --by-rule # 按条款统计还有哪些未关闭
+/path/to/house-rules/bin/house-rules init            # 会问几个问题；--yes 接受默认值，--dry-run 只打印计划
+/path/to/house-rules/bin/house-rules review          # 运行 claude -p "/code-review high"（在默认分支上会带上要读的提交范围），并记录发现
+/path/to/house-rules/bin/house-rules wrapup          # 统计上次 review 之后的改动；够多才 review 一次
+/path/to/house-rules/bin/house-rules count --by-rule # 按条款统计还有哪些未关闭
 ```
 
-提交 `init` 列出的文件（它打印的那一行就能做到）。修复一条发现时，在提交信息里加一个 `Fixes-Finding: <id>` trailer，其中 `<id>` 是 review 表格里显示的短 id（比如 `r3-2`）；post-commit hook 会把它关闭。把 `bin/` 加进 PATH，就可以直接敲 `ratchet`，不用写完整路径；放在会被提交的目录（如 `.githooks`）里的 hooks，则通过 `PATH`、`$RATCHET_BIN` 或 `.ratchet.json` 里的 `"bin"` 找到这个工具。`init` 改了什么、怎么撤销：[docs/ONBOARDING.md](docs/ONBOARDING.md)。
+提交 `init` 列出的文件（它打印的那一行就能做到）。修复一条发现时，在提交信息里加一个 `Fixes-Finding: <id>` trailer，其中 `<id>` 是 review 表格里显示的短 id（比如 `r3-2`）；post-commit hook 会把它关闭。把 `bin/` 加进 PATH，就可以直接敲 `house-rules`，不用写完整路径；放在会被提交的目录（如 `.githooks`）里的 hooks，则通过 `PATH`、`$HOUSE_RULES_BIN` 或 `.house-rules.json` 里的 `"bin"` 找到这个工具。`init` 改了什么、怎么撤销：[docs/ONBOARDING.md](docs/ONBOARDING.md)。
 
 ### 使用中文规则模板
 
-`ratchet init` 默认复制的是英文模板。想用中文模板，先把它复制进你的仓库，再让 `init` 指向它：
+`house-rules init` 默认复制的是英文模板。想用中文模板，先把它复制进你的仓库，再让 `init` 指向它：
 
 ```sh
-cp /path/to/review-ratchet/templates/CODING-STYLE.template.zh.md CODING-STYLE.md
-/path/to/review-ratchet/bin/ratchet init --rules-file CODING-STYLE.md
+cp /path/to/house-rules/templates/CODING-STYLE.template.zh.md CODING-STYLE.md
+/path/to/house-rules/bin/house-rules init --rules-file CODING-STYLE.md
 ```
 
-仓库里已经有 `CODING-STYLE.md` 或 `docs/CODING-STYLE.md` 时，`ratchet init`（包括 `/review-ratchet:setup`）会把它当作默认值，所以只做第一步复制也行。几点说明：
+仓库里已经有 `CODING-STYLE.md` 或 `docs/CODING-STYLE.md` 时，`house-rules init`（包括 `/house-rules:setup`）会把它当作默认值，所以只做第一步复制也行。几点说明：
 
 - 中文模板和英文模板的条款 ID、严重度完全一致，`<!-- ADJUST: ... -->` 注释也在同样的位置，标出需要按你的仓库调整的阈值、白名单和工具代码。它同样只是草稿。
 - 严重度表的表头（`family` / `severity`）和 `blocker` / `should-fix` / `nice` 这三个严重度词必须保持英文，解析器按它们识别。规则正文用中文不影响解析。
@@ -139,33 +139,33 @@ cp /path/to/review-ratchet/templates/CODING-STYLE.template.zh.md CODING-STYLE.md
 [规则编写](docs/RULE-WRITING.zh.md)，以及未来的[个人决策指标](docs/DECISION-METRICS.md)方向。
 
 ```sh
-bin/ratchet init [--yes] [--dry-run] [--no-wrapup-auto]                    # 初始化当前仓库（配置、规则文件、digest、CLAUDE.md、hooks、.gitignore、start point）
-bin/ratchet review [--level high] [--target T] [--from-file F] [--over-cap] # 运行 /code-review，保存原始输出，记录发现；每个改动最多 3 轮，之后以退出码 3 退出
-bin/ratchet wrapup [--level high] [--base REF] [--from-file F] [--json] [--dry-run] [--auto] # 统计上次 review 之后的改动；够多才 review 一次（见 docs/WRAPUP.md）；到轮次上限以退出码 3 退出；--auto 标记自动 review、占用每日上限的一个名额，超过上限以退出码 4 退出
-bin/ratchet ingest-code-review --source l1 --run R12 < review-output.txt   # JSON 数组，或包含 ```json 代码块的文本
-bin/ratchet add --source l2 --run R12 --input report.json                  # 显式指定的报告格式
-bin/ratchet count [--by-rule [--label-source]]                             # 总数、未关闭的发现，按来源 / 规则 / 规则的标注方式统计
-bin/ratchet decision-context [--finding ID] [--assessment FILE]            # 证据包或经过校验的模型评估，只读
-bin/ratchet prepare-decisions --assessment FILE [--finding ID]            # 持久化分析结果和拟议的编辑，供原生的人工提问使用
-bin/ratchet apply-decisions --input FILE                                  # 记录实际回答，并应用被接受的分组
-bin/ratchet decision-summary                                             # 针对作者个人的接受/修改/拒绝/暂缓计数，不是准确率
-bin/ratchet rollback-proposals --batch ID [--dry-run]                      # 还原一个已应用批次的规则、digest 和 changelog（之后被改过则拒绝）
-bin/ratchet recover-proposals                                              # 还原被中断的应用或回滚留下的文件（不接受 --dry-run：它只做还原）
-bin/ratchet infer [--all] [--quiet]                                        # 根据 Fixes-Finding trailer 和 gate 通过记录关闭发现
-bin/ratchet label r3-2 r3-5 --outcome false_positive [--note TEXT]         # 按 id 直接记录处置结果（用 review 表格里显示的短 id），不用标注页；要么全部记录要么都不记
-bin/ratchet label-page                                                     # 本地 HTML 页面，用来给仍未关闭的发现打标注
-bin/ratchet apply-labels < labels.json                                     # 记录从该页面复制出来的标注
-bin/ratchet compile                                                        # 规则文件 -> CODING-STYLE.digest.md（以及 inject_targets 里的标记块）
-bin/ratchet compile --check [--staged]                                     # 不写入任何东西；列出所有过期产物并以退出码 1 退出（pre-commit / CI）；--staged 读取 git 暂存区
-bin/ratchet gate record --input reports.json                               # 一个 gate 的发现 [{file, line, code, message}] -> ledger
-bin/ratchet gate pass --files a.py b.py                                    # gate 对这些文件通过
-bin/ratchet vendor --into third_party/ratchet [--check [--against-source]] # 把工具复制进一个仓库 / 校验该副本
-bin/ratchet auto {note|stop}                                               # 由 git post-commit hook（note）和插件的 Stop hook（stop）调用；不供直接使用（见 docs/WRAPUP.md#automatic-wrap-up）
+bin/house-rules init [--yes] [--dry-run] [--no-wrapup-auto]                    # 初始化当前仓库（配置、规则文件、digest、CLAUDE.md、hooks、.gitignore、start point）
+bin/house-rules review [--level high] [--target T] [--from-file F] [--over-cap] # 运行 /code-review，保存原始输出，记录发现；每个改动最多 3 轮，之后以退出码 3 退出
+bin/house-rules wrapup [--level high] [--base REF] [--from-file F] [--json] [--dry-run] [--auto] # 统计上次 review 之后的改动；够多才 review 一次（见 docs/WRAPUP.md）；到轮次上限以退出码 3 退出；--auto 标记自动 review、占用每日上限的一个名额，超过上限以退出码 4 退出
+bin/house-rules ingest-code-review --source l1 --run R12 < review-output.txt   # JSON 数组，或包含 ```json 代码块的文本
+bin/house-rules add --source l2 --run R12 --input report.json                  # 显式指定的报告格式
+bin/house-rules count [--by-rule [--label-source]]                             # 总数、未关闭的发现，按来源 / 规则 / 规则的标注方式统计
+bin/house-rules decision-context [--finding ID] [--assessment FILE]            # 证据包或经过校验的模型评估，只读
+bin/house-rules prepare-decisions --assessment FILE [--finding ID]            # 持久化分析结果和拟议的编辑，供原生的人工提问使用
+bin/house-rules apply-decisions --input FILE                                  # 记录实际回答，并应用被接受的分组
+bin/house-rules decision-summary                                             # 针对作者个人的接受/修改/拒绝/暂缓计数，不是准确率
+bin/house-rules rollback-proposals --batch ID [--dry-run]                      # 还原一个已应用批次的规则、digest 和 changelog（之后被改过则拒绝）
+bin/house-rules recover-proposals                                              # 还原被中断的应用或回滚留下的文件（不接受 --dry-run：它只做还原）
+bin/house-rules infer [--all] [--quiet]                                        # 根据 Fixes-Finding trailer 和 gate 通过记录关闭发现
+bin/house-rules label r3-2 r3-5 --outcome false_positive [--note TEXT]         # 按 id 直接记录处置结果（用 review 表格里显示的短 id），不用标注页；要么全部记录要么都不记
+bin/house-rules label-page                                                     # 本地 HTML 页面，用来给仍未关闭的发现打标注
+bin/house-rules apply-labels < labels.json                                     # 记录从该页面复制出来的标注
+bin/house-rules compile                                                        # 规则文件 -> CODING-STYLE.digest.md（以及 inject_targets 里的标记块）
+bin/house-rules compile --check [--staged]                                     # 不写入任何东西；列出所有过期产物并以退出码 1 退出（pre-commit / CI）；--staged 读取 git 暂存区
+bin/house-rules gate record --input reports.json                               # 一个 gate 的发现 [{file, line, code, message}] -> ledger
+bin/house-rules gate pass --files a.py b.py                                    # gate 对这些文件通过
+bin/house-rules vendor --into third_party/house-rules [--check [--against-source]] # 把工具复制进一个仓库 / 校验该副本
+bin/house-rules auto {note|stop}                                               # 由 git post-commit hook（note）和插件的 Stop hook（stop）调用；不供直接使用（见 docs/WRAPUP.md#automatic-wrap-up）
 ```
 
 除 `vendor` 和 `auto` 外，每个命令都接受 `--repo PATH`；除 `init`、`vendor` 和 `auto` 外，其余命令还接受 `--ledger FILE` 和 `--config FILE`。两个 `auto` 命令是给 hook 调用的：`auto note` 只接受 `--repo`，`auto stop` 不接受任何选项，因为它从 stdin 读取 hook 传来的 JSON。每个会写入的命令都接受 `--dry-run`，只有 `recover-proposals`（它只还原被中断的写入留下的半成品）和两个 `auto` 命令（它们只写[本机的状态目录](docs/WRAPUP.md#the-state-directory)）例外。`--dry-run` 什么都不写，只打印本来会写的内容（`compile` 打印 diff，`init` 打印计划，`review` 打印它将要运行的命令，`wrapup` 打印统计结果以及是否会 review）。
 
-如果不用 `init`，想手动让 Claude Code 内置的 `/code-review` 拿到这些规则，运行 `ratchet compile`，并在仓库的 `CLAUDE.md` 里加一行：
+如果不用 `init`，想手动让 Claude Code 内置的 `/code-review` 拿到这些规则，运行 `house-rules compile`，并在仓库的 `CLAUDE.md` 里加一行：
 
 ```
 @CODING-STYLE.digest.md

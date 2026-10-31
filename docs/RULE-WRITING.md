@@ -57,7 +57,7 @@ the reviewer; they are not executed tests unless a separate test actually runs t
   try the phrasing, not as evidence that it improves reviews in your repository. A
   requirement with no clean negation (a required step, an ordering) stays positive.
 - **Merge or retire before you add.** The digest has a byte budget (`digest_max_bytes`,
-  default 4096) and the whole digest is loaded into every session. `ratchet compile`
+  default 4096) and the whole digest is loaded into every session. `house-rules compile`
   only warns when it is over budget, but a proposal that would push it over is refused
   when it is prepared or applied. When the budget is nearly full, first look for two
   clauses that can become one, or one that no longer applies, and propose that change

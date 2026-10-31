@@ -11,12 +11,12 @@ the existing proposal application tools. An assessment is not an approval.
 ## Collect the evidence
 
 The host's built-in Code Review capability supplies the findings. The harness does
-not implement a replacement reviewer. `ratchet review` wraps the supported Claude
+not implement a replacement reviewer. `house-rules review` wraps the supported Claude
 Code path; other hosts can retain their native review and import its formatted
 output with `review --from-file`. Analysis and rule drafting are performed by the
 calling model; tools own evidence persistence, validation and approved writes.
 
-`ratchet decision-context --finding <full-id>` prints a read-only JSON packet.
+`house-rules decision-context --finding <full-id>` prints a read-only JSON packet.
 Repeat `--finding` to select a batch; omitting it includes all ledger findings.
 The packet preserves the original finding and outcome, the current rules, a bounded
 source excerpt, absolute path, line range, content hash and saved-review location.
@@ -25,9 +25,9 @@ It neither calls a model nor changes the ledger or rules.
 The ledger's recorded SHA is import-time HEAD, not proof of the reviewed tree.
 Current excerpts are explicitly labeled `current_workspace`. New local reviews save
 bounded pre-review text, rules, content hashes and raw-output binding in
-`.ratchet/reviews/<run>.evidence.json`; `review_source` exposes the reported excerpt.
+`.house-rules/reviews/<run>.evidence.json`; `review_source` exposes the reported excerpt.
 Files changed during review are marked unstable. A review of a commit range, which
-`ratchet review` starts on the default branch
+`house-rules review` starts on the default branch
 ([WRAPUP.md](WRAPUP.md#on-the-default-branch)), read commits only, so its evidence is
 the files that range changed, as the commit HEAD was at when it started holds them.
 Uncommitted edits and untracked files are not in it, and the rules are still read
@@ -94,7 +94,7 @@ A merge rewrites one survivor and retires the other matched clauses.
 
 ## Validate and present
 
-Run `ratchet decision-context` with the same selection and locations, adding
+Run `house-rules decision-context` with the same selection and locations, adding
 `--assessment <assessment.json>`. It checks the context fingerprint, finding and
 rule references, action consistency, and proposed rule compilation. Changes to
 evidence or rules require reassessment. `supported` remains a **model judgment**,
@@ -104,7 +104,7 @@ The result contains `cards` (a data field, not a prescribed UI) and `drafts` in 
 legacy proposal format. For the complete workflow, run `prepare-decisions` with
 the same `--assessment`, `--finding` and `--location` arguments. It saves the
 context, original findings, source excerpts, assessments and proposed changes in
-`.ratchet/proposals/<batch-id>/batch.json`. No HTML or rule edit is produced.
+`.house-rules/proposals/<batch-id>/batch.json`. No HTML or rule edit is produced.
 Groups `a1`, `a2`, ... include covered/keep assessments as well as mutations.
 
 ## Native human decisions
@@ -206,19 +206,19 @@ recovery commands apply; accepting a rule never marks its source findings fixed.
 
 ## Rolling back and recovering
 
-The batch ID is the `batch_id` that `prepare-decisions` printed (it is also the folder name under `.ratchet/proposals/`). To take an applied batch back, run `ratchet rollback-proposals --batch <batch-id>`; add `--dry-run` first to see which files it would restore, which writes nothing. It restores the rules file, the digest, the consumers and the changelog to their exact previous bytes, and refuses (naming the file) if any of them was edited after the apply: a rollback never discards a later edit. In a linked worktree it runs only in the worktree that applied the batch ([Worktrees](#worktrees)).
+The batch ID is the `batch_id` that `prepare-decisions` printed (it is also the folder name under `.house-rules/proposals/`). To take an applied batch back, run `house-rules rollback-proposals --batch <batch-id>`; add `--dry-run` first to see which files it would restore, which writes nothing. It restores the rules file, the digest, the consumers and the changelog to their exact previous bytes, and refuses (naming the file) if any of them was edited after the apply: a rollback never discards a later edit. In a linked worktree it runs only in the worktree that applied the batch ([Worktrees](#worktrees)).
 
 A rolled-back batch is spent: `apply-decisions` refuses it ("batch already decided or rolled back; create a new batch"). To apply the change again, run `prepare-decisions` again, which makes a new batch with a new ID, and ask the human again; the old answer does not carry over.
 
-`ratchet recover-proposals` is for an apply that was interrupted half way (the next apply says "interrupted proposal transaction; run ratchet recover-proposals first"). It restores the files of the unfinished write from the journal, and refuses if one of them was edited since. It takes no `--batch` and no `--dry-run`. In a linked worktree it runs only in the worktree the interrupted write was in ([Worktrees](#worktrees)).
+`house-rules recover-proposals` is for an apply that was interrupted half way (the next apply says "interrupted proposal transaction; run house-rules recover-proposals first"). It restores the files of the unfinished write from the journal, and refuses if one of them was edited since. It takes no `--batch` and no `--dry-run`. In a linked worktree it runs only in the worktree the interrupted write was in ([Worktrees](#worktrees)).
 
 ### Worktrees
 
-The batch, its receipt, the write lock, the journal and `version.json` are shared state in the main worktree's `.ratchet/proposals/`, so every worktree sees them. The rules files, the digest, the inject targets and `CODING-STYLE.changelog.md` belong to the worktree a command runs in: the one `--repo` points into, else the one the current directory is in ([Linked worktrees](ONBOARDING.md#linked-worktrees)). `decision-context` and `prepare-decisions` read that worktree's rules and code, and `distill --drafts` the files a rule change would write; the raw review a packet points to is the main worktree's, and a finding whose `file` is an absolute path is read only in the worktree that contains it (from any other worktree its source is `unavailable`).
+The batch, its receipt, the write lock, the journal and `version.json` are shared state in the main worktree's `.house-rules/proposals/`, so every worktree sees them. The rules files, the digest, the inject targets and `CODING-STYLE.changelog.md` belong to the worktree a command runs in: the one `--repo` points into, else the one the current directory is in ([Linked worktrees](ONBOARDING.md#linked-worktrees)). `decision-context` and `prepare-decisions` read that worktree's rules and code, and `distill --drafts` the files a rule change would write; the raw review a packet points to is the main worktree's, and a finding whose `file` is an absolute path is read only in the worktree that contains it (from any other worktree its source is `unavailable`).
 
-- **A batch is applied in one worktree.** The receipt records it in a `worktree` field, the top of the worktree that applied the batch (a receipt from before the field existed counts as the main worktree's). `ratchet rollback-proposals --batch <batch-id>`, with or without `--dry-run`, is refused in any other worktree, and so is applying the same decisions there; both name the worktree that applied the batch. Only in that worktree does applying the same decisions again do nothing (`already_applied`). Files that happen to hold the same bytes elsewhere do not change whose batch it is: after a change is merged into another branch, the receipt still names the worktree that applied it, so `rollback-proposals` cannot undo the merged change there; use `git revert`.
+- **A batch is applied in one worktree.** The receipt records it in a `worktree` field, the top of the worktree that applied the batch (a receipt from before the field existed counts as the main worktree's). `house-rules rollback-proposals --batch <batch-id>`, with or without `--dry-run`, is refused in any other worktree, and so is applying the same decisions there; both name the worktree that applied the batch. Only in that worktree does applying the same decisions again do nothing (`already_applied`). Files that happen to hold the same bytes elsewhere do not change whose batch it is: after a change is merged into another branch, the receipt still names the worktree that applied it, so `rollback-proposals` cannot undo the merged change there; use `git revert`.
 - **Getting the change into another worktree.** The change is in the files of the worktree that applied it: commit it there and merge that commit into the branch of the worktree that needs it. Making the same change again in the second worktree, with a new batch, records a second revision, numbered from the shared `version.json` so that the two entries do not both read `Revision 1`; merging the two branches then conflicts in `CODING-STYLE.changelog.md`.
-- **An interrupted write belongs to a worktree.** The journal names it in a `tree` field (a journal from before the field existed counts as the main worktree's). While a journal exists, `distill --drafts`, `prepare-decisions`, applying and rolling back are refused in every worktree: the interrupted worktree is told to run `ratchet recover-proposals` first, and any other gets `interrupted proposal transaction in <worktree>; run ratchet recover-proposals there first`. `ratchet recover-proposals` restores files only in the worktree the journal names, is refused elsewhere and names that worktree, and still refuses to overwrite a later edit.
+- **An interrupted write belongs to a worktree.** The journal names it in a `tree` field (a journal from before the field existed counts as the main worktree's). While a journal exists, `distill --drafts`, `prepare-decisions`, applying and rolling back are refused in every worktree: the interrupted worktree is told to run `house-rules recover-proposals` first, and any other gets `interrupted proposal transaction in <worktree>; run house-rules recover-proposals there first`. `house-rules recover-proposals` restores files only in the worktree the journal names, is refused elsewhere and names that worktree, and still refuses to overwrite a later edit.
 - **A batch fits the files it was prepared from.** A batch records the files it will change as the worktree it was prepared in holds them (rules files, digest, inject targets, changelog), plus the shared `version.json`. Another worktree applies the batch only if its own copies are byte for byte the same; otherwise the apply fails with `rules, consumers or configuration changed; create a fresh proposal batch`. A `prepare-decisions` batch also fixes the paths and text of the rules and code the human was shown, so it applies only in the worktree it was prepared in: anywhere else `apply-decisions` says `decision evidence or source code changed`, even when the files match.
 
 ## Rules outside this repository
@@ -231,18 +231,18 @@ A rules file in `rules_files` that lies outside the repository (a shared `../sha
   - the target is not a rules file of the config: `draft N: target must be a configured rules file`
   - every file in `rules_files` is outside: `every file in rules_files lies outside this repository, so there is none to write a proposal into: list a rules file of this repository's own after them (a project layer), then propose again`
 - **Where a new clause goes.** It is placed after the last clause of its family in the file the change names. A family that exists only in an outer layer has none there, so the clause goes to the end of the file, and the outer layer's severity table applies to it as usual.
-- **An ID is never reused.** A new clause cannot take an ID that any layer has defined or retired. ratchet looks at the clauses of every layer, at the `<!-- ratchet-retired: ID -->` markers of this repository's files and of the outer layers, and at the `used_ids` in `version.json`. A reused ID is refused with `clause ID X has already been used; IDs cannot be reused`.
+- **An ID is never reused.** A new clause cannot take an ID that any layer has defined or retired. house-rules looks at the clauses of every layer, at the `<!-- house-rules-retired: ID -->` markers of this repository's files and of the outer layers, and at the `used_ids` in `version.json`. A reused ID is refused with `clause ID X has already been used; IDs cannot be reused`.
 - **A change in an outer layer makes a batch stale.** With outer layers, the batch records their names and the first 12 hex digits of their hashes as `shared: [[name, sha12], ...]` in its `config`, which also goes into the batch ID; without outer layers the field is absent. If one changed since, applying fails with `rules, consumers or configuration changed; create a fresh proposal batch`.
 - **Outer layers are evidence.** `decision-context` reads each one as a source, with its `absolute_path`, so a change in an outer layer changes the `context_id` and the assessment is made again. Review evidence saves their text.
 - **A missing layer stops most of the flow.** `decision-context`, `distill --drafts`, `prepare-decisions` and applying a batch are refused while an outer layer is not on the machine ([Outer layers](COMPILE.md#outer-layers)). `rollback-proposals` and `recover-proposals` do not need the layer and run without it.
 
-Moving a rule up into the shared layer is not a ratchet command. Make that edit in the repository that owns the shared file.
+Moving a rule up into the shared layer is not a house-rules command. Make that edit in the repository that owns the shared file.
 
 ## The rule-change record
 
 Every applied batch also appends one entry to `CODING-STYLE.changelog.md`, beside the
 rules file, in the same recoverable transaction that writes the rules, the digest and
-the consumers. The batch folder, receipts and saved reviews under `.ratchet/` are local,
+the consumers. The batch folder, receipts and saved reviews under `.house-rules/` are local,
 shared by every worktree and git-ignored; the changelog is plain Markdown meant to be committed with the rules,
 so anyone reading the repository can see what changed, why, on what evidence and who
 decided, without the receipts.
@@ -294,7 +294,7 @@ decided, without the receipts.
   than any backtick run inside the block it closes.
 - **Revision numbers continue from the changelog.** The number is one more than the
   larger of the local `version.json` revision and the highest `## Revision N` already in
-  the changelog, so a fresh clone without `.ratchet/` carries on the sequence instead of
+  the changelog, so a fresh clone without `.house-rules/` carries on the sequence instead of
   restarting it. Only `## Revision N` headings count: a hand-written section such as
   `## Backfill — DATE` does not disturb the numbering.
 - **Rollback and recovery restore it.** `rollback-proposals` and `recover-proposals`

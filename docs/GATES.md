@@ -1,17 +1,17 @@
 # Gates
 
-A gate is an automated check that runs on every commit (a linter, a syntax-tree script, a style checker). `ratchet gate` lets one feed the ledger, so its findings are tracked like a reviewer's: recorded once, closed when the gate later passes over the file.
+A gate is an automated check that runs on every commit (a linter, a syntax-tree script, a style checker). `house-rules gate` lets one feed the ledger, so its findings are tracked like a reviewer's: recorded once, closed when the gate later passes over the file.
 
-- `ratchet gate record` records findings the gate raised (source `gate`).
-- `ratchet gate pass` records that the gate passed over some files. `ratchet infer` then closes the open gate findings in those files ([LEDGER.md](LEDGER.md#gate-passes)).
+- `house-rules gate record` records findings the gate raised (source `gate`).
+- `house-rules gate pass` records that the gate passed over some files. `house-rules infer` then closes the open gate findings in those files ([LEDGER.md](LEDGER.md#gate-passes)).
 
 A gate written in Python can import the same operations instead of running the command; see [the Python API](#python-api).
 
 ## `gate record`
 
 ```sh
-ratchet gate record --input reports.json
-some-linter --format=json | convert-to-reports | ratchet gate record
+house-rules gate record --input reports.json
+some-linter --format=json | convert-to-reports | house-rules gate record
 ```
 
 `--input` is a JSON file, the JSON itself (text starting with `[` or `{`), or `-` for stdin; without it stdin is read. The JSON is a list (or `{"findings": [...]}`) of reports:
@@ -55,10 +55,10 @@ This is the id recipe a gate that wrote the ledger by hand would already be usin
 ## `gate pass`
 
 ```sh
-ratchet gate pass --files src/a.py src/b.py
+house-rules gate pass --files src/a.py src/b.py
 ```
 
-Writes `{kind: "gate_pass", repo, ts, sha: HEAD, files}`: the HEAD of the worktree the gate runs in, and sorted, de-duplicated, worktree-relative paths. Call it when the gate passes, with the files it checked. Open gate findings in those files are closed by the next `ratchet infer` (the post-commit hook runs it).
+Writes `{kind: "gate_pass", repo, ts, sha: HEAD, files}`: the HEAD of the worktree the gate runs in, and sorted, de-duplicated, worktree-relative paths. Call it when the gate passes, with the files it checked. Open gate findings in those files are closed by the next `house-rules infer` (the post-commit hook runs it).
 
 A gate that only inspects changed lines can pass over a file that still holds a violation it let through on purpose. List the ids of those findings in the config's `skips_file` and a later pass will not close them ([LEDGER.md](LEDGER.md#gate-passes)). The skips file is shared state in the main worktree, like the ledger: a gate that appends to it writes that copy, not one in its own worktree.
 
@@ -69,10 +69,10 @@ A gate sees the worktree it runs in (`--repo`, else the current directory): `fil
 ## Python API
 
 ```python
-from ratchet.api import ledger_path, record_gate_findings, record_gate_pass
+from house_rules.api import ledger_path, record_gate_findings, record_gate_pass
 ```
 
-Three functions are the stable surface; nothing else in the package is promised to keep its name or signature. `repo` is any path inside the repo (default: the current directory); config, rules and ledger location come from its `.ratchet.json`, exactly as for the command line. In a linked worktree the files are that worktree's and the ledger is the main worktree's.
+Three functions are the stable surface; nothing else in the package is promised to keep its name or signature. `repo` is any path inside the repo (default: the current directory); config, rules and ledger location come from its `.house-rules.json`, exactly as for the command line. In a linked worktree the files are that worktree's and the ledger is the main worktree's.
 
 | call | does |
 |---|---|
@@ -80,13 +80,13 @@ Three functions are the stable surface; nothing else in the package is promised 
 | `record_gate_findings(findings, repo=None) -> GateRecording` | what `gate record` does. `findings` is an iterable of the report dicts above. `GateRecording.ids` lists the id of every report, including ones already open; `GateRecording.recorded` the events appended just now |
 | `record_gate_pass(files, repo=None) -> dict` | what `gate pass` does; returns the event it appended |
 
-Failures (a bad report, an unknown clause, a rules layer outside the repository that is not on this machine, a ledger that cannot be written) raise `ratchet.errors.RatchetError`, which `ratchet.api` re-exports (the missing layer raises a subclass of it, so catching `RatchetError` covers it). `record_gate_pass`, like `gate pass`, is not affected by a missing layer. A gate whose verdict must not depend on the ledger catches that one type and warns:
+Failures (a bad report, an unknown clause, a rules layer outside the repository that is not on this machine, a ledger that cannot be written) raise `house_rules.errors.HouseRulesError`, which `house_rules.api` re-exports (the missing layer raises a subclass of it, so catching `HouseRulesError` covers it). `record_gate_pass`, like `gate pass`, is not affected by a missing layer. A gate whose verdict must not depend on the ledger catches that one type and warns:
 
 ```python
 try:
     record_gate_findings(reports)
-except RatchetError as exc:
+except HouseRulesError as exc:
     print(f"warning: ledger not updated: {exc}", file=sys.stderr)
 ```
 
-If the gate runs from a vendored copy ([VENDORING.md](VENDORING.md)), put the directory that holds `ratchet/` on `sys.path` before importing.
+If the gate runs from a vendored copy ([VENDORING.md](VENDORING.md)), put the directory that holds `house_rules/` on `sys.path` before importing.

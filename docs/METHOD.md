@@ -2,7 +2,7 @@ English | [中文](METHOD.zh.md)
 
 # Why the loop is built this way
 
-I built review-ratchet because I kept re-learning my own coding standards through code review, then losing the lessons. This page covers the design, what broke while I built it, and how to carry the loop to your own repo and reviewer. It is one person's notes from a few repos and tens of reviewer findings: read the numbers as anecdotes with counts attached. Nothing here trains a model, and I have no evidence yet that reviews improve over time ([Limits](#8-limits-and-open-questions)). Commands are in the [README](../README.md).
+I built house-rules because I kept re-learning my own coding standards through code review, then losing the lessons. This page covers the design, what broke while I built it, and how to carry the loop to your own repo and reviewer. It is one person's notes from a few repos and tens of reviewer findings: read the numbers as anecdotes with counts attached. Nothing here trains a model, and I have no evidence yet that reviews improve over time ([Limits](#8-limits-and-open-questions)). Commands are in the [README](../README.md).
 
 ## Terms
 
@@ -12,7 +12,7 @@ I built review-ratchet because I kept re-learning my own coding standards throug
 | Clause, ID, family | one rule with a stable ID (`P0E.2`); the family is the prefix before the dot (`P0E`) |
 | Severity | `blocker`, `should-fix` or `nice`: the clause's own tag, else the rules file's family table ([COMPILE.md](COMPILE.md#severity-table)) |
 | Reviewer-conduct clause | no severity (the `R.*` family): how to review, not a defect |
-| Digest | short text from `ratchet compile`; coder and reviewer both load it |
+| Digest | short text from `house-rules compile`; coder and reviewer both load it |
 | Ledger | append-only local JSONL file of findings and outcomes |
 | Finding | one reported defect, labeled with a clause ID or `unmapped` |
 | `source` | where a finding came from: `gate`, or `l1` / `l2` (review tiers, treated alike; `add` can record human review comments too) |
@@ -35,7 +35,7 @@ So: one versioned rules file with stable clause IDs; the same compiled digest fo
 
 ```mermaid
 flowchart LR
-  R["Rules file<br/>(policy)"] -->|"ratchet compile"| D["Digest imported by CLAUDE.md"]
+  R["Rules file<br/>(policy)"] -->|"house-rules compile"| D["Digest imported by CLAUDE.md"]
   D --> A["Coding agent<br/>(actor)"]
   D --> C["/code-review<br/>(critic, 3 rounds per change by default)"]
   A -->|"diff"| C
@@ -74,13 +74,13 @@ Whatever produces a signal that feeds rule changes will tend to satisfy the sign
 
 - **What happened.** The pilot's skill text said to run the step that closes findings; nothing did. A dry run later showed it could close 95 of 97 open gate findings (and 0 of 21 reviewer findings, since no commit convention existed). Automatic outcomes: 0.
 - **Why.** The reward was absent, not low: fix and false-positive rates were undefined, yet a long "open" list looked like many bugs.
-- **Guard.** Mechanical triggers, not reminders. A post-commit hook runs `ratchet infer`, closing a finding when a commit message ends with `Fixes-Finding: <id>`; a gate pass closes gate findings in the files it covered; a local page collects human labels for the rest. The automatic two have run on fixtures only ([Limits](#8-limits-and-open-questions)). ([LEDGER.md](LEDGER.md#attribution))
+- **Guard.** Mechanical triggers, not reminders. A post-commit hook runs `house-rules infer`, closing a finding when a commit message ends with `Fixes-Finding: <id>`; a gate pass closes gate findings in the files it covered; a local page collects human labels for the rest. The automatic two have run on fixtures only ([Limits](#8-limits-and-open-questions)). ([LEDGER.md](LEDGER.md#attribution))
 
 ### A guard that never fires
 
 - **What happened.** In a second repo, `init` appended its pre-commit check below the existing hook's `exit 0`: dead code, reported as success, "already ok" on rerun.
 - **Why.** "Never fired" looks identical to "nothing to catch".
-- **Guard.** The block goes directly under the shebang. After install, `init` runs each hook once with `RATCHET_HOOK_PROBE=1`; the block must answer before any of your code runs, or the step fails (no skip flag). Every gate also needs a mutation check (R.7, [section 4](#4-when-a-rule-becomes-a-mechanical-gate)): `tests/mutation_check.py` injects one deliberate bug at a time and requires the suite to go red (328 of 328 caught in the last full run, per [ACCEPTANCE.md](ACCEPTANCE.md)). That tests the tool's own code, not the loop's effect. ([ONBOARDING.md](ONBOARDING.md#where-the-block-goes-and-the-live-check))
+- **Guard.** The block goes directly under the shebang. After install, `init` runs each hook once with `HOUSE_RULES_HOOK_PROBE=1`; the block must answer before any of your code runs, or the step fails (no skip flag). Every gate also needs a mutation check (R.7, [section 4](#4-when-a-rule-becomes-a-mechanical-gate)): `tests/mutation_check.py` injects one deliberate bug at a time and requires the suite to go red (328 of 328 caught in the last full run, per [ACCEPTANCE.md](ACCEPTANCE.md)). That tests the tool's own code, not the loop's effect. ([ONBOARDING.md](ONBOARDING.md#where-the-block-goes-and-the-live-check))
 
 ### Precision alone rewards silence
 
@@ -112,7 +112,7 @@ My rule of thumb ([CODING-STYLE.md](../CODING-STYLE.md), section 0): if a rule h
 
 Promotion evidence is repeated findings of a form a tool can decide; the ledger gives the counts, a person decides, and the tool does not write the gate. Demotion happens too: a mechanical prefix check for boolean names blocked clear idioms such as `truncated`, so it became reviewer judgment (see the ADJUST note on P2.5 in the [template](../templates/CODING-STYLE.template.md)).
 
-A new gate needs a failing example that proves it fires, a compliant one that stays clean (starting with the rule's stated exceptions), proof that reverting turns it green, and a mutation check, all committed (R.7; [CONTRIBUTING.md](../CONTRIBUTING.md)). Gates feed the same ledger through `ratchet gate record` and `ratchet gate pass` ([GATES.md](GATES.md)); a pass closes that file's gate findings, which is weaker than "verified fixed".
+A new gate needs a failing example that proves it fires, a compliant one that stays clean (starting with the rule's stated exceptions), proof that reverting turns it green, and a mutation check, all committed (R.7; [CONTRIBUTING.md](../CONTRIBUTING.md)). Gates feed the same ledger through `house-rules gate record` and `house-rules gate pass` ([GATES.md](GATES.md)); a pass closes that file's gate findings, which is weaker than "verified fixed".
 
 ## 5. Carrying the loop to another reviewer
 
@@ -140,7 +140,7 @@ Most of the loop is plain files and a standard-library Python CLI; Claude Code s
 
 The built-in reviewer, on the Claude Code version I tested in October 2026 (`claude -p`), printed at most 10 findings by default (newer versions add `--max-findings`), as plain-text JSON with `file`, `line`, `summary` and `failure_scenario`. It added `category` and `severity` when `CLAUDE.md` demanded them (2 of 2 runs), so the digest phrases it as an order. Labels were unstable: in the second run it stretched unmatched problems into existing clauses and split one defect into three findings under three IDs. A model's label is a proposal.
 
-**3. Finding identity.** For reviews, the importer mints IDs, not the reviewer: findings in one review get display IDs `<run>-1`, `<run>-2`, ... (such as `r3-2`, run `r3`), stored under the full ID `<repo>:<source>:<run>:<display ID>`. The fixer must see the display ID: `ratchet review` prints it in its table, and a PR-comment port should put it in each comment. The fixing commit then ends with a `Fixes-Finding: r3-2` trailer ([LEDGER.md](LEDGER.md#finding)).
+**3. Finding identity.** For reviews, the importer mints IDs, not the reviewer: findings in one review get display IDs `<run>-1`, `<run>-2`, ... (such as `r3-2`, run `r3`), stored under the full ID `<repo>:<source>:<run>:<display ID>`. The fixer must see the display ID: `house-rules review` prints it in its table, and a PR-comment port should put it in each comment. The fixing commit then ends with a `Fixes-Finding: r3-2` trailer ([LEDGER.md](LEDGER.md#finding)).
 
 **4. A ledger and mechanical outcomes.** An append-only JSONL file with four event kinds: `finding`, `outcome` (by commit trailer, gate pass or human, with evidence), `gate_pass` and `review_run` (one review round, for the cap). A finding's state is the fold of its events in file order ([LEDGER.md](LEDGER.md#events)). Two traps when you build matching: do not parse commit subjects (an ID like `S1` collides with scope tags), and do not compare timestamps (a fix can be committed before the finding is logged).
 

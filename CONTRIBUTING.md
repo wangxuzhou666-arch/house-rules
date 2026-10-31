@@ -1,6 +1,6 @@
 # Contributing
 
-review-ratchet keeps coding rules as versioned text with clause IDs, logs review findings
+house-rules keeps coding rules as versioned text with clause IDs, logs review findings
 to a ledger, and turns findings into rule changes that a person approves. Take what is
 useful for your own repo. If you want to give something back, this is what helps.
 
@@ -28,7 +28,7 @@ By default, do not upload findings, ledger rows, review transcripts or code from
 private repository, even with the names removed. Rewrite the mechanism as a synthetic
 reproduction that stands on its own: new names, the smallest code that shows the failure,
 nothing recognizable from the original project. The ledger (`.style-findings.jsonl`) and
-`.ratchet/` are git-ignored on purpose; do not force-add them. No secrets, tokens or
+`.house-rules/` are git-ignored on purpose; do not force-add them. No secrets, tokens or
 machine-specific paths either. If you think a real case is worth including, open an
 issue and describe it instead of attaching it.
 
@@ -40,7 +40,7 @@ severity needs a human decision. In a PR, put the exact new text, the failure it
 and why existing clauses do not cover it, and expect the maintainer to decide. This is
 the same contract the tool itself follows: the model proposes, a person approves
 ([docs/DECISION-CARDS.md](docs/DECISION-CARDS.md)). If you edit a rules file, run
-`bin/ratchet compile` so the digest is not stale; `bin/ratchet compile --check` tells you.
+`bin/house-rules compile` so the digest is not stale; `bin/house-rules compile --check` tells you.
 
 A new **mechanical gate** (a lint rule, a syntax-tree check, a hook: anything that
 blocks a commit or fails CI) needs more than the decision. R.7 in
@@ -79,7 +79,7 @@ you added or changed a gate, a parser or a check, not for a docs or typo change.
 first checks that every `Mutant` still matches exactly one place in its file and stops
 with exit code 2 if not, so if you edited a line a mutant targets, update that mutant.
 
-Code under `ratchet/` is reviewed against this repo's own [CODING-STYLE.md](CODING-STYLE.md),
+Code under `house_rules/` is reviewed against this repo's own [CODING-STYLE.md](CODING-STYLE.md),
 which `CLAUDE.md` imports as a compiled digest. Skim it before a larger change.
 
 ## License
