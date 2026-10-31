@@ -1,0 +1,1 @@
+I read both files against the digest and found nothing to report. save() in store_b.py writes beside the target and renames, which is the pattern REL.1 asks for.

@@ -1,0 +1,15 @@
+{
+  "v": 1,
+  "id": "rel-4",
+  "clause": "REL.4",
+  "learned_from": [
+    "review-ratchet:l1:r4:r4-2",
+    "review-ratchet:l1:r4:r4-3",
+    "review-ratchet:l1:r4:r4-4"
+  ],
+  "violation": "code/sms_codes.py",
+  "control": "code/mail_codes.py",
+  "control_kind": "compliant",
+  "mechanism": "send_code() checks the per-recipient daily limit, delivers the message, and only then stores the new count, so deliveries that fail after being billed are never counted and a second run that passes the check during a delivery is billed as well.",
+  "why_unseen": "The findings were a daily review cap on billed model calls recorded in a ledger, a success-only record and an opt-in flag; this is an in-process per-recipient limit on billed message sends, and the control reserves the count under a lock before delivering and keeps it when delivery fails."
+}

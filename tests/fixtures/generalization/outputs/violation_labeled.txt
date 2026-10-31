@@ -1,0 +1,24 @@
+Reviewed the two files in the range.
+
+```json
+[
+  {
+    "file": "code/store_a.py",
+    "line": 5,
+    "summary": "save() deletes the only copy before the new one is written.",
+    "failure_scenario": "If the write fails after os.remove, the old file is gone and the new one is incomplete; nothing usable is left. Write beside it and rename.",
+    "category": "rel-1",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/notes.py",
+    "line": 1,
+    "summary": "A file that is not part of the case.",
+    "failure_scenario": "Findings on other files are ignored by the scoring.",
+    "category": "p0e-1",
+    "severity": "blocker"
+  }
+]
+```
+
+Nothing else in the range needed a comment.

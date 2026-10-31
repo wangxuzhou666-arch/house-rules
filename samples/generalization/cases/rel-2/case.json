@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "id": "rel-2",
+  "clause": "REL.2",
+  "learned_from": [
+    "review-ratchet:l1:r1:r1-5"
+  ],
+  "violation": "code/item_index.py",
+  "control": "code/reading_list.py",
+  "control_kind": "exempt",
+  "mechanism": "The change moves the dedup and close key of a feed item from the feed URL to the feed host under a new key_version, and rows stored under the earlier version are ignored on lookup, so a re-import adds every known item again and marking one read closes only the new copy.",
+  "why_unseen": "The finding changed the zero-padding of a review-ledger display id inside a replayed ledger; this is a host-based feed-item key with an explicit stored key_version, and the exempt control changes only the label style of a reading list (both files modify earlier versions held in base/), while dedup and closing use an unchanged stored uid."
+}

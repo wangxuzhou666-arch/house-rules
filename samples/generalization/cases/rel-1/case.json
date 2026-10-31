@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "id": "rel-1",
+  "clause": "REL.1",
+  "learned_from": [
+    "review-ratchet:l1:r1:r1-4"
+  ],
+  "violation": "code/site_publisher.py",
+  "control": "code/preview_cache.py",
+  "control_kind": "exempt",
+  "mechanism": "publish() deletes the live site directory and then renders the replacement pages one by one, so a render failure part-way leaves the site with missing or partial pages and no copy of the previous ones.",
+  "why_unseen": "The finding was an installed tool replaced by a directory delete and file copy; this is a served static site regenerated from render callables, and the exempt control is a rebuildable preview cache that is repopulated on demand."
+}

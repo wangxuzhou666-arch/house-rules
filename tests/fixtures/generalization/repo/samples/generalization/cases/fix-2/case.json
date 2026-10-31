@@ -1,0 +1,1 @@
+{"v": 1, "id": "fix-2", "clause": "REL.2", "learned_from": ["synthetic"], "violation": "code/ids_a.py", "control": "code/ids_b.py", "control_kind": "exempt", "mechanism": "synthetic", "why_unseen": "synthetic"}

@@ -1,0 +1,12 @@
+```json
+[
+  {
+    "file": "code/store_a.py",
+    "line": 5,
+    "summary": "The call os.remove(path) runs before open(path, "w") has produced anything.",
+    "failure_scenario": "A failed write leaves "no file" where the old one was.",
+    "category": "rel-1",
+    "severity": "should-fix"
+  }
+]
+```
