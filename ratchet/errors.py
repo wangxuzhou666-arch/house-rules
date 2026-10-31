@@ -11,7 +11,8 @@ class RoundCapReached(RatchetError):
 
 
 class DailyCapReached(RatchetError):
-    """`ratchet wrapup --auto` refused to start another automatic review: `wrapup_auto_max_per_day` of them ran in the last 24 hours.
+    """`ratchet wrapup --auto` refused to start another automatic review: `wrapup_auto_max_per_day` of them were started or asked
+    for (by the Stop hook) in the last 24 hours.
 
     Not a RoundCapReached: a wrap-up re-words that one to say how to get past a full round cap, which is no way past this limit.
     """

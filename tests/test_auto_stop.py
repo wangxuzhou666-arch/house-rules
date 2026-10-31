@@ -5,7 +5,9 @@ all, in the main worktree and in a linked one (`git -C`). The hook is run as Cla
 stdin. No test reaches the real claude: the wrap-ups that run use an executable fake.
 """
 import contextlib
+import errno
 import io
+import itertools
 import json
 import os
 import re
@@ -23,13 +25,14 @@ from unittest import mock
 
 import support  # noqa: F401  (puts the repo root on sys.path, and starts every test from a clean environment)
 import test_wrapup
-from support import _GIT_ENV, REPO_ROOT, git, review_round
+from support import _GIT_ENV, REPO_ROOT, book_entries, book_lines, git, plant_book, review_round
 from test_wrapup import numbered, review_text
 
 from ratchet import auto, auto_stop
 from ratchet.auto import PendingCommit
 from ratchet.cli import main
 from ratchet.hooks import _PYTHON_OK_CHECK
+from ratchet.reservations import BOOK_NAME, BY_HOOK, BY_WRAPUP, LOCK_NAME, reservation_lock
 from ratchet.review import Refusal, round_key
 from ratchet.start_point import START_POINTS_NAME
 from ratchet.wrapup import (
@@ -131,9 +134,9 @@ class StopCase(test_wrapup.WrapupCase):
         git(self.repo, "worktree", "add", "-q", "-b", branch, str(path), "main")
         return path
 
-    def another_repo(self) -> Path:
-        """A second repo that init set up, on its branch `feature`, for a session that commits in two."""
-        path = self.tmp / "other"
+    def another_repo(self, name: str = "other") -> Path:
+        """A second repo that init set up, on its branch `feature`, for a session that commits in two (or in more, each with a name)."""
+        path = self.tmp / name
         shutil.copytree(TEMPLATE[0], path, symlinks=True)
         git(path, "checkout", "-q", "-b", "feature")
         return path
@@ -158,6 +161,11 @@ class StopCase(test_wrapup.WrapupCase):
         """Change keys of the config on disk, uncommitted."""
         path = (root or self.repo) / ".ratchet.json"
         path.write_text(json.dumps({**json.loads(path.read_text(encoding="utf-8")), **changes}), encoding="utf-8")
+
+    def clear_book(self) -> None:
+        """Forget the reservations the hook has made in `self.repo`. Every ask takes a slot of the daily cap, and a test that asks again
+        and again for one repo (a loop over cases, each ending in a new commit) would reach the cap of two on its third ask."""
+        (self.repo / BOOK_NAME).unlink(missing_ok=True)
 
     def cap_the_branch(self, top: Path | None = None) -> str:
         """One round used on the branch of `top`, with `max_review_rounds` of 1 (set it in `begin`): its next wrap-up is refused."""
@@ -252,6 +260,7 @@ class FastExitTest(StopCase):
     def test_only_a_review_child_marker_of_exactly_1_silences_it(self) -> None:
         for value in ("0", "", "true"):
             with self.subTest(value=value):
+                self.clear_book()
                 self.assert_asks_for(self.answer(env={"RATCHET_REVIEW_CHILD": value}))
                 self.commit_work()
 
@@ -270,6 +279,7 @@ class FastExitTest(StopCase):
     def test_an_attended_session_is_judged_whether_the_variable_says_so_or_is_missing_or_odd(self) -> None:
         for value in ("1", None, "yes", ""):
             with self.subTest(value=value):
+                self.clear_book()
                 self.assert_asks_for(self.answer(env={"CLAUDE_CODE_SESSION_ATTENDED": value}))
                 self.commit_work()
 
@@ -298,6 +308,7 @@ class FastExitTest(StopCase):
         self.assertTrue(self.pending_file().exists())
         for bad in ("../escape", ["x"], None, ""):
             with self.subTest(bad=bad):
+                self.clear_book()
                 self.assert_asks_for(self.answer(session_id=bad, env={auto.SESSION_ID_ENV: SESSION}))
                 self.commit_work()
 
@@ -378,12 +389,14 @@ class DeferralTest(StopCase):
                            task("shell", command="myratchet wrapup --repo /x"), task("shell", command="ratchet reviewer"),
                            task("shell"), task("monitor"), task("cloud session"), task("MCP task")):
             with self.subTest(background=background):
+                self.clear_book()
                 self.assert_asks_for(self.answer(background_tasks=[background]))
                 self.commit_work()
 
     def test_a_task_that_has_ended_holds_nothing_back(self) -> None:
         for status in ("completed", "Completed", "failed", "killed", "stopped", "cancelled", "exited"):
             with self.subTest(status=status):
+                self.clear_book()
                 self.assert_asks_for(self.answer(background_tasks=[task("subagent", status=status)]))
                 self.commit_work()
 
@@ -574,7 +587,7 @@ class SinceTest(StopCase):
 
 class StartPointTest(StopCase):
     """On the default branch the fork point is HEAD, so the commits a session makes there count only from a start point, and the Stop
-    records one when there is none: the parent of the first commit it was told about. The work is on main unless a test leaves it.
+    records one when there is none: the parent of the earliest commit it was told about. The work is on main unless a test leaves it.
     The repo init set up starts from a root commit, `set up ratchet`, that was made outside any session, so the hook never noted it."""
 
     def setUp(self) -> None:
@@ -586,12 +599,13 @@ class StartPointTest(StopCase):
         path = self.repo / START_POINTS_NAME
         return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
 
-    def commit_unnoted(self, *, lines: int = 0) -> str:
-        """A commit made outside any session, which the post-commit hook does not note: empty, or adding a file of `lines` lines."""
+    def commit_unnoted(self, *, lines: int = 0, subject: str = "by hand") -> str:
+        """A commit made outside any session, which the post-commit hook does not note: empty, or adding a file of `lines` lines. Two
+        empty commits of one parent, one subject and one second are one commit, so a test that makes two gives them subjects."""
         if lines:
             (self.repo / "by-hand.py").write_text(numbered(lines), encoding="utf-8")
             git(self.repo, "add", "by-hand.py")
-        git(self.repo, "-c", "commit.gpgsign=false", "commit", "-q", "--no-verify", "--allow-empty", "-m", "by hand")
+        git(self.repo, "-c", "commit.gpgsign=false", "commit", "-q", "--no-verify", "--allow-empty", "-m", subject)
         return git(self.repo, "rev-parse", "HEAD")
 
     def leave_main(self) -> None:
@@ -603,6 +617,10 @@ class StartPointTest(StopCase):
         path = self.tmp / "linked-main"
         git(self.repo, "worktree", "add", "-q", str(path), "main")
         return path
+
+    def notes_of(self, *heads: str) -> list[PendingCommit]:
+        """Notes of the main worktree for these commits, as the hook would have made them."""
+        return [PendingCommit(self.repo, head, auto.utc_timestamp()) for head in heads]
 
     # ---- which commit it starts from ------------------------------------------------------------------------------
 
@@ -652,6 +670,59 @@ class StartPointTest(StopCase):
         self.commit_work()
         self.assertEqual(self.context_lines(self.answer()), [due_line(self.repo, since=START)])
         self.assertEqual(self.recorded(), {"main": self.root_commit})
+        self.assertEqual(self.hook_log(), [])
+
+    def test_the_start_is_the_same_whatever_the_order_of_the_notes(self) -> None:
+        first, second = self.commit_work(lines=10), self.commit_work(lines=10)
+        for order in itertools.permutations(self.notes_of(self.root_commit, first, second)):
+            with self.subTest(order=[note.head[:8] for note in order]):
+                self.assertEqual(auto_stop._commit_before_notes(self.repo, list(order)), self.root_commit)
+
+    def test_a_stop_that_puts_commits_back_behind_a_newer_note_does_not_move_the_start_past_them(self) -> None:
+        first, second = self.commit_work(lines=100), self.commit_work(lines=100)
+        newer = []
+
+        def fails_as_another_commit_is_made(worktree: Path, notes: list[PendingCommit]) -> None:
+            newer.append(self.commit_work(lines=100))  # the git hook notes it while this Stop judges: it comes ahead of the two put back
+            raise OSError("index.lock")
+
+        with mock.patch.object(auto_stop, "_due_in", fails_as_another_commit_is_made), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(auto_stop.stop_hook(io.StringIO(stop_input())), 0)
+        self.assertEqual([note["head"] for note in read_lines(self.pending_file())], [*newer, first, second])
+        answer = self.answer()
+        self.assertEqual(self.recorded(), {"main": self.root_commit})
+        self.assertEqual(self.context_lines(answer), [due_line(self.repo, lines=300, files=3, since=START)])
+        self.assertEqual(len(self.hook_log()), 1)  # the lock of the first Stop, and nothing after it
+
+    def test_notes_on_two_merged_branches_start_from_where_the_branches_forked(self) -> None:
+        forked = self.commit_unnoted()
+        git(self.repo, "checkout", "-q", "-b", "side")
+        self.commit_unnoted(subject="side")  # each note has a parent of its own, and neither is where the branches forked
+        side = self.commit_work(lines=10)
+        git(self.repo, "checkout", "-q", "main")
+        self.commit_unnoted(subject="main")
+        main = self.commit_work(lines=10)
+        git(self.repo, "merge", "-q", "--no-ff", "-m", "merge side", "side")
+        for order in itertools.permutations(self.notes_of(side, main)):
+            with self.subTest(order=[note.head[:8] for note in order]):
+                self.assertEqual(auto_stop._commit_before_notes(self.repo, list(order)), forked)
+
+    def test_notes_whose_parents_share_no_ancestor_give_no_start(self) -> None:
+        main = self.commit_work(lines=10)
+        git(self.repo, "checkout", "-q", "--orphan", "unrelated")
+        self.commit_unnoted()  # a second root commit
+        unrelated = self.commit_work(lines=10)
+        git(self.repo, "checkout", "-q", "main")
+        git(self.repo, "merge", "-q", "--allow-unrelated-histories", "-m", "join", "unrelated")
+        self.assertIsNone(auto_stop._commit_before_notes(self.repo, self.notes_of(main, unrelated)))
+
+    def test_a_note_that_head_does_not_descend_from_does_not_pull_the_start_back(self) -> None:
+        self.commit_work()
+        git(self.repo, "reset", "-q", "--hard", self.root_commit)  # drops it: its note stays, and its parent, the root, is before the start
+        by_hand = self.commit_unnoted()
+        self.commit_work()
+        self.assertEqual(self.context_lines(self.answer()), [due_line(self.repo, since=START)])
+        self.assertEqual(self.recorded(), {"main": by_hand})
         self.assertEqual(self.hook_log(), [])
 
     # ---- when it does not start one -------------------------------------------------------------------------------
@@ -997,29 +1068,9 @@ class RefusalTest(StopCase):
 
 class DailyCapTest(StopCase):
     """The review the hook asks for runs as `ratchet wrapup --auto`, so the daily cap on automatic reviews decides whether Claude is
-    asked: at the cap the person is told instead, once. The reviews are planted in the ledger as hours old, or more than a day old,
-    so that the real clock cannot move one across the edge of the 24 hours while a test runs; that edge itself is tested on the
-    functions in test_daily_cap.py."""
-
-    def setUp(self) -> None:
-        super().setUp()
-        self.review_count = 0
-
-    def reviews(self, *ages: timedelta, auto: bool = True) -> list[dict]:
-        """The `review_run` of a review for each age: it ran that long ago (a ledger time is local, without a zone). `auto` False is
-        a review a person started, which carries no trigger."""
-        extra = {"trigger": "auto"} if auto else {}
-        events = []
-        for age in ages:
-            self.review_count += 1
-            ran_at = (datetime.now() - age).isoformat(timespec="seconds")
-            events.append(review_round(OTHER_CHANGE, run=f"past{self.review_count}", ts=ran_at, **extra))
-        return events
-
-    def set_ledger(self, *events: dict) -> None:
-        """The ledger holds these events and nothing else: a test moves the clock by writing it again, older."""
-        self.ledger.write_text("", encoding="utf-8")
-        self.append_raw(*events)
+    asked: at the cap the person is told instead, once. Asking takes a slot, a reservation in the book (ratchet/reservations.py), and
+    every ask takes one of its own. The book is planted with reservations that are hours old, or more than a day old, so that the
+    real clock cannot move one across the edge of the 24 hours while a test runs; that edge itself is tested in test_reservations.py."""
 
     def told_lines(self, answer: dict | None) -> list[str]:
         """What the hook told the person, a line for each worktree; the answer must be that and nothing else: Claude is not asked."""
@@ -1031,30 +1082,48 @@ class DailyCapTest(StopCase):
         """The refusal itself, without the words the hook puts before it."""
         return line.removeprefix(refusal_line(worktree or self.repo, ""))
 
+    def book_bytes(self, root: Path | None = None) -> bytes | None:
+        path = (root or self.repo) / BOOK_NAME
+        return path.read_bytes() if path.exists() else None
+
+    def assert_no_book_and_no_lock(self) -> None:
+        self.assertEqual([(self.repo / name).exists() for name in (BOOK_NAME, LOCK_NAME)], [False, False])
+
+    @staticmethod
+    def local_time(moment: datetime) -> str:
+        """A time the way the message of the cap says it: local, to the second, without a zone."""
+        return moment.astimezone().replace(tzinfo=None).isoformat(timespec="seconds")
+
     # ---- under the cap and at it ----------------------------------------------------------------------------------
 
-    def test_below_the_limit_claude_is_asked_for_the_wrapup_and_given_the_auto_command(self) -> None:
+    def test_below_the_limit_claude_is_asked_for_the_wrapup_and_the_ask_takes_a_slot(self) -> None:
         self.begin()
-        self.set_ledger(*self.reviews(2 * HOUR))
+        plant_book(self.repo, (2 * HOUR, BY_WRAPUP))
         self.commit_work()
         self.assertEqual(self.context_lines(self.answer()), [due_line(self.repo)])
         self.assertFalse((self.state / auto_stop.ANNOUNCED_NAME).exists())
+        *old, new = book_entries(self.repo)
+        self.assertEqual(len(old), 1)
+        self.assertEqual({key: new[key] for key in ("v", "kind", "worktree", "head", "by")},
+                         {"v": 1, "kind": "reserve", "worktree": str(self.repo), "head": git(self.repo, "rev-parse", "HEAD"), "by": "hook"})
+        self.assertLess(abs(datetime.now(timezone.utc) - datetime.fromisoformat(new["ts"])), timedelta(minutes=5))
 
-    def test_at_the_limit_the_person_is_told_and_claude_is_not_asked(self) -> None:
+    def test_at_the_limit_the_person_is_told_and_claude_is_not_asked_and_nothing_is_written(self) -> None:
         self.begin()
-        oldest, newest = self.reviews(20 * HOUR, 3 * HOUR)
-        self.set_ledger(oldest, newest)
+        oldest, _ = plant_book(self.repo, (20 * HOUR, BY_WRAPUP), (3 * HOUR, BY_HOOK))
+        before = self.book_bytes()
         self.commit_work()
         [line] = self.told_lines(self.answer())
-        self.assertTrue(line.startswith(refusal_line(self.repo, "daily cap reached: 2 automatic review(s) ran in the last 24 hours "
-                                                                "and wrapup_auto_max_per_day is 2. The next one can run after ")), line)
-        self.assertRegex(line, r"after \d{4}-\d\d-\d\dT\d\d:\d\d:\d\d, when the one from " + re.escape(oldest["ts"]) + r" leaves that window; ")
+        self.assertTrue(line.startswith(refusal_line(self.repo, "daily cap reached: 2 automatic review(s) were started or asked for in the "
+                                                                "last 24 hours and wrapup_auto_max_per_day is 2. The next one can run after ")), line)
+        self.assertRegex(line, r"after \d{4}-\d\d-\d\dT\d\d:\d\d:\d\d, when the one from " + re.escape(self.local_time(oldest.ts)) + r" leaves that window; ")
         self.assertTrue(line.endswith("/review-ratchet:wrapup (`ratchet wrapup` without --auto) reviews it now."), line)
         self.assertEqual(self.claude_calls(), [])
+        self.assertEqual(self.book_bytes(), before)
 
     def test_the_cap_is_told_once_and_the_stops_after_it_are_silent(self) -> None:
         self.begin()
-        self.set_ledger(*self.reviews(20 * HOUR, 3 * HOUR))
+        plant_book(self.repo, (20 * HOUR, BY_WRAPUP), (3 * HOUR, BY_WRAPUP))
         self.commit_work()
         self.told_lines(self.answer())
         for _ in range(2):
@@ -1064,7 +1133,7 @@ class DailyCapTest(StopCase):
 
     def test_what_was_told_is_kept_in_announced_json_by_repo_worktree_kind_and_message(self) -> None:
         self.begin()
-        self.set_ledger(*self.reviews(20 * HOUR, 3 * HOUR))
+        plant_book(self.repo, (20 * HOUR, BY_WRAPUP), (3 * HOUR, BY_WRAPUP))
         self.commit_work()
         [line] = self.told_lines(self.answer())
         [(stored, when)] = self.announced().items()
@@ -1073,16 +1142,15 @@ class DailyCapTest(StopCase):
 
     def test_a_cap_that_ended_and_is_reached_again_is_told_again(self) -> None:
         self.begin()
-        self.set_ledger(*self.reviews(20 * HOUR, 3 * HOUR))
+        plant_book(self.repo, (20 * HOUR, BY_WRAPUP), (3 * HOUR, BY_WRAPUP))
         self.commit_work()
         [first] = self.told_lines(self.answer())
         self.commit_work(lines=10)
         self.assert_silent()
-        self.set_ledger(*self.reviews(DAY + 6 * HOUR, 13 * HOUR))  # ten hours on: the oldest left the window and made room for one
+        plant_book(self.repo, (DAY + 6 * HOUR, BY_WRAPUP), (13 * HOUR, BY_WRAPUP))  # ten hours on: the oldest left the window, one slot is free
         self.commit_work(lines=10)
         self.assertEqual(self.context_lines(self.answer()), [due_line(self.repo, lines=270, files=3)])  # the work stayed counted
-        self.set_ledger(*self.reviews(DAY + 6 * HOUR, 13 * HOUR, HOUR))  # and the review Claude was asked for ran: the cap again
-        self.commit_work(lines=10)
+        self.commit_work(lines=10)  # and that ask took the slot: nobody has to run the review for the cap to hold again
         [second] = self.told_lines(self.answer())
         self.assertNotEqual(self.message_of(second), self.message_of(first))
         self.assertEqual(len(self.announced()), 2)
@@ -1091,24 +1159,39 @@ class DailyCapTest(StopCase):
 
     # ---- what is counted ------------------------------------------------------------------------------------------
 
-    def test_reviews_a_person_started_are_not_counted(self) -> None:
+    def test_every_ask_takes_a_slot_of_its_own_even_when_nobody_acted_on_the_one_before(self) -> None:
+        self.begin(wrapup_auto_max_per_day=3)
+        self.commit_work()
+        for asked in range(3):
+            with self.subTest(asked=asked + 1):
+                self.assert_asks_for(self.answer())
+                self.assertEqual([(entry["kind"], entry["by"]) for entry in book_entries(self.repo)], [("reserve", "hook")] * (asked + 1))
+                self.commit_work(lines=10)
+        self.told_lines(self.answer())  # the fourth: three waiting reservations are three slots used, and none of them is reused
+        self.assertEqual(len(book_entries(self.repo)), 3)
+        self.assertEqual(self.claude_calls(), [])
+
+    def test_the_ledger_counts_for_nothing_whatever_the_trigger_of_its_review_runs(self) -> None:
         self.begin()
-        self.set_ledger(*self.reviews(5 * HOUR, 4 * HOUR, 3 * HOUR, 2 * HOUR, auto=False), *self.reviews(HOUR))
+        recent = datetime.now().isoformat(timespec="seconds")
+        self.append_raw(*[review_round(OTHER_CHANGE, run=f"manual{number}", ts=recent) for number in range(1, 4)],
+                        *[review_round(OTHER_CHANGE, run=f"auto{number}", ts=recent, trigger="auto") for number in range(1, 4)])
         self.commit_work()
         self.assertEqual(self.context_lines(self.answer()), [due_line(self.repo)])
 
-    def test_a_review_more_than_a_day_old_is_not_counted(self) -> None:
+    def test_a_reservation_more_than_a_day_old_is_not_counted_and_the_ask_drops_it(self) -> None:
         self.begin()
-        self.set_ledger(*self.reviews(DAY + 6 * HOUR, 2 * HOUR))
+        plant_book(self.repo, (DAY + 6 * HOUR, BY_WRAPUP), (2 * HOUR, BY_WRAPUP))
         self.commit_work()
         self.assertEqual(self.context_lines(self.answer()), [due_line(self.repo)])
+        self.assertEqual(len(book_entries(self.repo)), 2)  # the one from the young reservation and the ask's own
 
     def test_the_limit_is_the_one_of_the_repos_config(self) -> None:
         self.begin(wrapup_auto_max_per_day=1)
-        self.set_ledger(*self.reviews(2 * HOUR))
+        plant_book(self.repo, (2 * HOUR, BY_WRAPUP))
         self.commit_work()
         [line] = self.told_lines(self.answer())
-        self.assertIn("1 automatic review(s) ran in the last 24 hours and wrapup_auto_max_per_day is 1. ", line)
+        self.assertIn("1 automatic review(s) were started or asked for in the last 24 hours and wrapup_auto_max_per_day is 1. ", line)
         self.set_config(wrapup_auto_max_per_day=2)
         self.commit_work(lines=10)
         self.assert_asks_for(self.answer())
@@ -1121,26 +1204,31 @@ class DailyCapTest(StopCase):
         [line] = self.hook_log()
         self.assertRegex(line, HOOK_LOG_LINE + re.escape(str(self.repo)) + ": RatchetError: config 'wrapup_auto_max_per_day' must be a positive")
         self.assertEqual(self.announced(), {})
+        self.assert_no_book_and_no_lock()
         self.set_config(wrapup_auto_max_per_day=2)
         self.assert_asks_for(self.answer())  # the commits were kept for the Stop after the repair
 
     # ---- who is told ----------------------------------------------------------------------------------------------
 
-    def test_the_cap_is_the_repos_so_another_repo_of_the_session_is_still_asked_for(self) -> None:
+    def test_the_cap_is_the_repos_so_another_repo_of_the_session_is_still_asked_for_with_a_book_of_its_own(self) -> None:
         self.begin()
         other = self.another_repo()
-        self.set_ledger(*self.reviews(20 * HOUR, 3 * HOUR))  # the ledger of self.repo; the other repo has a ledger of its own
+        plant_book(self.repo, (20 * HOUR, BY_WRAPUP), (3 * HOUR, BY_WRAPUP))  # the book of self.repo; the other repo has a book of its own
+        before = self.book_bytes()
         self.commit_work()
         self.commit_work(other)
         answer = self.answer()
         self.assertEqual(sorted(answer), ["hookSpecificOutput", "systemMessage"])
         self.assertEqual(answer["hookSpecificOutput"]["additionalContext"], due_line(other))
         self.assertTrue(answer["systemMessage"].startswith(refusal_line(self.repo, "daily cap reached: 2 automatic review(s)")))
+        self.assertEqual(self.book_bytes(), before)
+        [reserved] = book_entries(other)
+        self.assertEqual((reserved["by"], reserved["worktree"]), ("hook", str(other)))
 
     def test_each_worktree_of_the_repo_is_told_once_though_the_cap_is_the_repos(self) -> None:
         self.begin()
         linked = self.linked()
-        self.set_ledger(*self.reviews(20 * HOUR, 3 * HOUR))
+        plant_book(self.repo, (20 * HOUR, BY_WRAPUP), (3 * HOUR, BY_WRAPUP))
         self.commit_work()
         self.commit_work(linked)
         first, second = self.told_lines(self.answer())
@@ -1152,21 +1240,102 @@ class DailyCapTest(StopCase):
         self.commit_work(linked, lines=10)
         self.assert_silent()
 
+    def test_a_linked_worktree_that_is_asked_for_reserves_in_the_book_of_the_main_worktree(self) -> None:
+        self.begin()
+        linked = self.linked()
+        self.commit_work(linked)
+        self.assert_asks_for(self.answer(), linked)
+        [reserved] = book_entries(self.repo)
+        self.assertEqual((reserved["by"], reserved["worktree"], reserved["head"]), ("hook", str(linked), git(linked, "rev-parse", "HEAD")))
+        self.assertFalse((linked / ".ratchet").exists())
+
+    # ---- what takes no slot ---------------------------------------------------------------------------------------
+
+    def test_work_that_is_not_due_takes_no_slot(self) -> None:
+        self.begin()
+        self.commit_work(lines=10)
+        self.assert_silent()
+        self.assert_no_book_and_no_lock()
+
+    def test_a_full_round_cap_is_told_and_takes_no_slot(self) -> None:
+        self.begin(max_review_rounds=1)
+        self.cap_the_branch()
+        self.commit_work()
+        [line] = self.told_lines(self.answer())
+        self.assertTrue(line.startswith(refusal_line(self.repo, "round cap reached")), line)
+        self.assert_no_book_and_no_lock()
+
+    def test_a_missing_claude_is_told_before_the_cap_and_takes_no_slot(self) -> None:
+        self.begin()
+        plant_book(self.repo, (20 * HOUR, BY_WRAPUP), (3 * HOUR, BY_WRAPUP))  # at the limit: only the order of the checks tells claude first
+        before = self.book_bytes()
+        self.commit_work()
+        missing = self.tmp / "no-such-claude"
+        [line] = self.told_lines(self.answer(env={"RATCHET_CLAUDE_CMD": str(missing)}))
+        self.assertIn(f"`{missing}` not found on PATH", line)
+        self.assertNotIn("daily cap", line)
+        self.assertEqual(self.book_bytes(), before)
+        self.assertFalse((self.repo / LOCK_NAME).exists())
+
     # ---- the review the hook asked for ----------------------------------------------------------------------------
 
-    def test_the_review_the_hook_asks_for_is_counted_by_the_next_stop(self) -> None:
+    def test_the_review_the_hook_asks_for_uses_the_slot_of_the_ask_and_the_next_stop_counts_it_once(self) -> None:
         self.begin(wrapup_auto_max_per_day=1)
         self.commit_work()
         self.assertEqual(self.context_lines(self.answer()), [due_line(self.repo)])
+        [reserved] = book_entries(self.repo)
         self.assertEqual(self.with_claude(self.claude, "--auto")["status"], "reviewed")  # the command the line gave Claude
         [run] = self.review_runs()
         self.assertEqual(run["trigger"], "auto")
+        self.assertEqual([(entry["kind"], entry["id"]) for entry in book_entries(self.repo)], [("reserve", reserved["id"]), ("consume", reserved["id"])])
         self.commit_work(lines=260)
         [line] = self.told_lines(self.answer())
-        self.assertTrue(line.startswith(refusal_line(self.repo, "daily cap reached: 1 automatic review(s) ran in the last 24 hours "
-                                                                "and wrapup_auto_max_per_day is 1. ")), line)
-        self.assertIn(f"when the one from {run['ts']} leaves that window", line)
+        self.assertTrue(line.startswith(refusal_line(self.repo, "daily cap reached: 1 automatic review(s) were started or asked for in the last "
+                                                                "24 hours and wrapup_auto_max_per_day is 1. ")), line)
+        self.assertIn(f"when the one from {self.local_time(datetime.fromisoformat(reserved['ts']))} leaves that window", line)
         self.assertEqual(len(self.claude_calls()), 1)  # a Stop reviews nothing
+
+    # ---- a book that is damaged, and a lock that is held ----------------------------------------------------------
+
+    def damaged_book(self, *lines: str) -> None:
+        path = self.repo / BOOK_NAME
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
+
+    def test_a_damaged_line_is_told_in_hook_log_and_the_lines_around_it_count_and_it_is_gone_after_the_ask(self) -> None:
+        self.begin()
+        (young,) = book_lines((2 * HOUR, BY_WRAPUP), worktree=self.repo)
+        self.damaged_book(young, "{not json")
+        self.commit_work()
+        self.assertEqual(self.context_lines(self.answer()), [due_line(self.repo)])
+        [told] = self.hook_log()
+        self.assertRegex(told, HOOK_LOG_LINE + re.escape(f"{self.repo}: {self.repo / BOOK_NAME}: line 2: not valid JSON") + ".*dropped when the book is next written")
+        self.assertEqual([entry["kind"] for entry in book_entries(self.repo)], ["reserve", "reserve"])
+
+    def test_a_damaged_line_does_not_switch_the_cap_off(self) -> None:
+        self.begin()
+        old, young = book_lines((20 * HOUR, BY_WRAPUP), (3 * HOUR, BY_WRAPUP), worktree=self.repo)
+        naive = '{"v": 1, "kind": "reserve", "id": "x", "ts": "2026-01-15T12:00:00", "worktree": "/w", "head": "none", "by": "hook"}'
+        self.damaged_book(old, naive, young)
+        before = self.book_bytes()
+        self.commit_work()
+        self.assertEqual(len(self.told_lines(self.answer())), 1)  # the two intact lines are the limit
+        self.assertEqual(self.claude_calls(), [])
+        self.assertEqual(self.book_bytes(), before)  # a refusal writes nothing, so the line stays until the next ask that is not refused
+
+    def test_a_lock_that_stays_held_is_logged_and_the_commits_wait_for_the_stop_after(self) -> None:
+        self.begin()
+        self.commit_work()
+        with mock.patch.dict(os.environ, {"RATCHET_CLAUDE_CMD": str(self.claude)}), mock.patch("ratchet.reservations.LOCK_WAIT_SECONDS", 0.2), \
+                reservation_lock(self.repo), contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(auto_stop.stop_hook(io.StringIO(stop_input())), 0)
+        self.assertEqual(out.getvalue(), "")  # nobody was asked, and nobody was told
+        [line] = self.hook_log()
+        self.assertRegex(line, HOOK_LOG_LINE + re.escape(f"{self.repo}: RatchetError: another process is counting automatic reviews (") + ".*")
+        self.assertEqual(self.book_bytes(), None)
+        self.assertEqual(len(read_lines(self.pending_file())), 1)  # put back for the Stop after
+        self.assert_asks_for(self.answer())
+        self.assertEqual(len(book_entries(self.repo)), 1)
 
 
 # ---- two stops at once, and a hook that fails ---------------------------------------------------------------------
@@ -1281,6 +1450,13 @@ class RequeueTest(StopCase):
             self.assertEqual(auto_stop.stop_hook(io.StringIO(stop_input())), 0)
         self.assertEqual(out.getvalue(), "")
 
+    def stop_that_cannot_put_back(self, error: Exception) -> str:
+        """A Stop, run in this process with the fake claude, whose write of the commits it puts back fails with `error`; what it printed."""
+        with mock.patch.dict(os.environ, {"RATCHET_CLAUDE_CMD": str(self.claude)}):
+            with mock.patch.object(auto_stop, "append_pending", side_effect=error), contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(auto_stop.stop_hook(io.StringIO(stop_input())), 0)
+        return out.getvalue()
+
     def test_the_commits_of_a_worktree_that_cannot_be_judged_wait_for_the_stop_after(self) -> None:
         self.begin()
         self.commit_work()
@@ -1358,6 +1534,43 @@ class RequeueTest(StopCase):
                 self.assertEqual(back["head"], "b" * 40)
                 self.assertRegex(self.hook_log()[-1], HOOK_LOG_LINE + r"dropped 1 commit\(s\) .* or their time cannot be read")
                 self.pending_file().unlink()
+
+    def test_a_put_back_that_fails_does_not_take_the_answer_for_the_worktrees_that_were_judged(self) -> None:
+        self.begin()
+        other = self.another_repo()
+        self.commit_work(other)
+        self.commit_work()
+        self.break_config(other)
+        printed = self.stop_that_cannot_put_back(OSError(errno.ENOSPC, os.strerror(errno.ENOSPC)))
+        self.assertEqual(self.context_lines(json.loads(printed) if printed else None), [due_line(self.repo)])
+        self.assertFalse(self.pending_file().exists())
+        self.assertEqual(self.claimed_files(), [])
+
+    def test_the_commits_a_failed_put_back_loses_are_told_in_hook_log_with_their_worktrees(self) -> None:
+        other, second, stale = self.another_repo("other"), self.another_repo("second"), self.another_repo("stale")
+        self.commit_work(second)  # noted first, so the order the worktrees are told in is not the order of the notes
+        self.commit_work(other)
+        self.commit_work(other, lines=10)
+        self.plant(stale, head="a" * 40, ts=(datetime.now(timezone.utc) - timedelta(days=8)).isoformat(timespec="seconds"))
+        for worktree in (other, second, stale):
+            self.break_config(worktree)
+        self.stop_that_cannot_put_back(OSError(errno.ENOSPC, os.strerror(errno.ENOSPC)))
+        told = self.hook_log()
+        self.assertEqual(len(told), 5, told)  # three worktrees that could not be judged, the commit too old to go back, the write
+        self.assertRegex(told[3], HOOK_LOG_LINE + re.escape(f"dropped 1 commit(s) noted in {stale} that could not be judged: they are older"))
+        lost = f"dropped 3 commit(s) noted in {', '.join(sorted((str(second), str(other))))} that could not be judged: they could not be put back"
+        self.assertRegex(told[4], HOOK_LOG_LINE + re.escape(f"{lost} (OSError: [Errno {errno.ENOSPC}] {os.strerror(errno.ENOSPC)} (at ") + r".*\)\)$")
+        self.assertFalse(self.pending_file().exists())
+        self.assertEqual(self.claimed_files(), [])
+
+    def test_a_put_back_that_fails_for_a_reason_other_than_the_disk_is_a_failure_of_the_stop(self) -> None:
+        self.begin()
+        self.commit_work()
+        self.break_config()
+        self.assertEqual(self.stop_that_cannot_put_back(AssertionError("a bug")), "")
+        [_, bug] = self.hook_log()  # the worktree that could not be judged, then the Stop itself, as for any failure
+        self.assertRegex(bug, HOOK_LOG_LINE + r"AssertionError: a bug \(at .*\)$")
+        self.assertEqual(self.claimed_files(), [])
 
 
 # ---- the plugin's wrapper -----------------------------------------------------------------------------------------

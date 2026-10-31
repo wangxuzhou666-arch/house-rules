@@ -2,7 +2,7 @@
 
 On the default branch the fork point is HEAD itself, so without a start point the commits made there never count and a wrap-up
 sees only the work that is not committed yet. `ratchet init` records the branch as it stands; the automatic wrap-up records the
-parent of the first commit it was told about, when no init did.
+parent of the earliest commit it was told about, when no init did.
 
 The record is `.ratchet/start-points.json` in the main worktree, shared by every worktree like the ledger and git-ignored with
 the rest of `.ratchet/`: a flat `{branch: full sha}`. It is written whole and moved into place, so a reader never sees half of

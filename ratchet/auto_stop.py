@@ -23,7 +23,7 @@ import json
 import os
 import re
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
@@ -33,9 +33,10 @@ from .auto import (
     read_pending, session_id, state_dir, utc_timestamp,
 )
 from .config import Config, load_config
-from .git import commit_sha, is_ancestor
+from .git import commit_sha, common_ancestor, is_ancestor
 from .ledger import Event
-from .review import REVIEW_CHILD_ENV, Refusal, checked_out_default_branch
+from .reservations import BY_HOOK
+from .review import NO_COMMIT, REVIEW_CHILD_ENV, Refusal, checked_out_default_branch, take_automatic_slot
 
 if TYPE_CHECKING:
     from .wrapup import Base, WrapupPlan
@@ -133,22 +134,28 @@ def _claim(pending: Path) -> Path | None:
     return claimed
 
 
-def _parent_of_first_note(worktree: Path, notes: list[PendingCommit]) -> str | None:
-    """The parent of the first noted commit that HEAD still descends from (one a rebase or a reset dropped is passed over) and that
-    has a parent. A fresh repo's first round often starts with its root commit, which has none: it is passed over for the commit
-    after it, so the root commit's own work is the one thing the first wrap-up does not count. A session that noted only the root
-    gives nothing, and a later Stop with more commits does."""
+def _commit_before_notes(worktree: Path, notes: list[PendingCommit]) -> str | None:
+    """The commit the noted work began from: the best common ancestor of the parents of the noted commits that HEAD still descends
+    from (one a rebase or a reset dropped is passed over) and that have a parent. On one line of history that is the parent of the
+    earliest of them. It goes by ancestry and not by the order of the notes: a Stop puts the commits it could not judge back after
+    the notes made since, and a start point that is recorded once never moves.
+
+    A fresh repo's first round often starts with its root commit, which has no parent: it is passed over for the commits after it,
+    so the root commit's own work is the one thing the first wrap-up does not count. A session that noted only the root gives
+    nothing, and a later Stop with more commits does. Nothing either when the parents share no ancestor (unrelated histories merged)."""
+    parents = []
     for note in notes:
         parent = commit_sha(worktree, f"{note.head}^")
         if parent is not None and is_ancestor(worktree, note.head, "HEAD"):
-            return parent
-    return None
+            parents.append(parent)
+    return common_ancestor(worktree, parents) if parents else None
 
 
 def _note_start_point(config: Config, events: list[Event], notes: list[PendingCommit]) -> None:
-    """On the default branch, with no review and no start point to measure from, record the parent of the first commit noted there
-    as the start point: without one the fork point is HEAD and the commits made in the session would not count. A repo that ran
-    `ratchet init` after its first commit has one already, and the first wrap-up there is measured from it."""
+    """On the default branch, with no review and no start point to measure from, record the commit the noted work began from (the
+    parent of the earliest commit noted there) as the start point: without one the fork point is HEAD and the commits made in the
+    session would not count. A repo that ran `ratchet init` after its first commit has one already, and the first wrap-up there is
+    measured from it."""
     from .start_point import record_start_point, usable_start_point
     from .wrapup import last_reviewed
 
@@ -158,7 +165,7 @@ def _note_start_point(config: Config, events: list[Event], notes: list[PendingCo
     default_name, default_commit = default
     if usable_start_point(config, default_name, default_commit) is not None:
         return
-    start = _parent_of_first_note(config.worktree, notes)
+    start = _commit_before_notes(config.worktree, notes)
     if start is not None:
         record_start_point(config, default_name, start)
 
@@ -167,7 +174,10 @@ def _due_in(worktree: Path, notes: list[PendingCommit]) -> Due | None:
     """Judge one worktree the commits `notes` were made in. None when there is nothing to judge or the work is too little: the path
     is gone, its repo does not ask for the automatic wrap-up (any more), or it has not reached a threshold. The plan is that of
     `ratchet wrapup --auto`, the command Claude is given: the review it asks for counts against the daily cap, so a worktree
-    whose day is used up is foreseen as refused instead of being asked for."""
+    whose day is used up is foreseen as refused instead of being asked for. The cap counts reservations: asking Claude takes a
+    slot (`take_automatic_slot`, after every other refusal has been ruled out), whatever then becomes of the review, and the
+    `wrapup --auto` that answers uses that slot and takes none of its own. Every ask takes one, so a Stop that asks again for a
+    wrap-up nobody ran takes another; the cap bounds those too."""
     from .ledger import read_events
     from .wrapup import plan_wrapup  # the heavy part: a session with nothing noted never gets here
 
@@ -179,6 +189,10 @@ def _due_in(worktree: Path, notes: list[PendingCommit]) -> Due | None:
     events = read_events(config.ledger_path)
     _note_start_point(config, events, notes)
     plan = plan_wrapup(config, events, automatic=True, foresee_refusal=True)
+    if plan.due and plan.would_refuse is None:  # every other refusal has passed, so the cap is the last: it takes the slot, or refuses
+        capped = take_automatic_slot(config, by=BY_HOOK, head=commit_sha(worktree, "HEAD") or NO_COMMIT, may_consume=False,
+                                     note=lambda damage: log_failure(f"auto stop: {worktree}: {damage}"))
+        plan = replace(plan, would_refuse=capped)
     return Due(worktree, config.root, plan) if plan.due else None
 
 
@@ -214,7 +228,9 @@ def _requeue(session: str, failed: list[PendingCommit]) -> None:
     """Put the commits of the worktrees that could not be judged back into the session's pending file, for the next Stop: what failed
     may be a git lock or a timeout that is gone by then, and a commit dropped here is not judged again until another is made in that
     worktree. Only a commit noted within REQUEUE_KEEP goes back. prune() cannot bound this: it goes by the age of the file, and each
-    Stop that puts a commit back writes it afresh, so a worktree that fails at every Stop would keep its commits while the session lives."""
+    Stop that puts a commit back writes it afresh, so a worktree that fails at every Stop would keep its commits while the session lives.
+    A put-back that fails (a full disk) drops those commits too, told in hook.log: it must not take with it the answer for the
+    worktrees that were judged due in the same Stop."""
     cutoff = datetime.now(timezone.utc) - REQUEUE_KEEP
     recent = [note for note in failed if _is_recent(note, cutoff)]
     if len(recent) < len(failed):
@@ -222,7 +238,12 @@ def _requeue(session: str, failed: list[PendingCommit]) -> None:
         log_failure(f"auto stop: dropped {len(failed) - len(recent)} commit(s) noted in {', '.join(worktrees)} that could not be judged: "
                     f"they are older than {REQUEUE_KEEP.days} days, or their time cannot be read")
     if recent:
-        append_pending(session, recent)
+        try:
+            append_pending(session, recent)
+        except OSError as exc:
+            worktrees = sorted({str(note.worktree) for note in recent})
+            log_failure(f"auto stop: dropped {len(recent)} commit(s) noted in {', '.join(worktrees)} that could not be judged: they could "
+                        f"not be put back ({type(exc).__name__}: {exc}{raised_at(exc)})")
 
 
 # ---- what was told before -----------------------------------------------------------------------------------------
@@ -253,8 +274,8 @@ def _read_announced(path: Path) -> dict[str, str]:
 
 def _announced_key(due: Due, refusal: Refusal) -> str:
     """One refusal of one worktree of one repo. The change it was counted on (its round key) says which refusal it is; a refusal with
-    none is told by its message: the rules and the round key itself fail before there is a key, and the daily cap counts reviews, not
-    a change. The message of the daily cap names the moment its window makes room, so it holds still while the cap does and reads
+    none is told by its message: the rules and the round key itself fail before there is a key, and the daily cap counts reservations,
+    not a change. The message of the daily cap names the moment its window makes room, so it holds still while the cap does and reads
     differently once the window has moved on and the cap is reached again."""
     return json.dumps([str(due.root), str(due.worktree), refusal.kind, refusal.round_key or refusal.message])
 

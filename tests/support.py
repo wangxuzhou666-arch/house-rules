@@ -13,7 +13,10 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
+from collections.abc import Iterator
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -23,6 +26,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from ratchet.cli import main  # noqa: E402
 from ratchet.config import DEFAULT_CLAUSE_ID_PATTERN, Config  # noqa: E402
+from ratchet.reservations import BOOK_NAME, Book, Reservation, consume_line, parse_book, reserve_line, utc_now  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -129,6 +133,57 @@ def git(cwd: Path, *args: str, **extra_env: str) -> str:
     if proc.returncode != 0:
         raise AssertionError(f"git {' '.join(args)} failed: {proc.stderr}")
     return proc.stdout.strip()
+
+
+@contextlib.contextmanager
+def local_zone(posix_tz: str) -> Iterator[None]:
+    """The time zone of this process, as the POSIX `TZ` string says, for the length of the block. A fixed offset such as `IST-5:30`
+    (UTC+5:30) keeps a test from depending on where it runs: reading a local time as UTC is then a wrong answer, not a lucky one."""
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = posix_tz
+    time.tzset()
+    try:
+        yield
+    finally:
+        if previous is None:
+            del os.environ["TZ"]
+        else:
+            os.environ["TZ"] = previous
+        time.tzset()
+
+
+def book_lines(*planted: tuple[timedelta, str], now: datetime | None = None, worktree: Path | str = "/work/tree") -> list[str]:
+    """The line of a reservation of the daily cap for each (age, by): it was made that long before `now` (the clock when None), by
+    `by` (a BY_* word), for `worktree`."""
+    moment = now or utc_now()
+    return [reserve_line(str(worktree), "none", by, moment - age) for age, by in planted]
+
+
+def book_of(*planted: tuple[timedelta, str], consumed: tuple[int, ...] = (), now: datetime | None = None,
+            worktree: Path | str = "/work/tree") -> Book:
+    """The book that `book_lines` describes, with a consumption for each of the reservations that `consumed` names (indexes)."""
+    moment = now or utc_now()
+    lines = book_lines(*planted, now=moment, worktree=worktree)
+    reserved = parse_book("\n".join(lines)).reservations
+    return parse_book("\n".join([*lines, *(consume_line(reserved[index], moment) for index in consumed)]))
+
+
+def plant_book(root: Path, *planted: tuple[timedelta, str], now: datetime | None = None,
+               worktree: Path | str | None = None) -> list[Reservation]:
+    """Make the book of the daily cap in `root` hold a reservation for each (age, by) and nothing else (a test moves the clock by
+    planting it again, older); the reservations, in that order. They are for `worktree`, the root itself unless told, so that a
+    reservation of the Stop hook can be used by a `wrapup --auto` run there. `now` is the clock when None."""
+    path = root / BOOK_NAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = "".join(f"{line}\n" for line in book_lines(*planted, now=now, worktree=worktree or root))
+    path.write_text(text, encoding="utf-8")
+    return list(parse_book(text).reservations)
+
+
+def book_entries(root: Path) -> list[dict]:
+    """The lines of the book of the daily cap in `root`, as the file has them; none when there is no book."""
+    path = root / BOOK_NAME
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
 
 
 def report_item(**overrides: object) -> dict:

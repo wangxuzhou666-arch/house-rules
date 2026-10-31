@@ -104,8 +104,8 @@ class PendingCommit:
 
 
 def read_pending(path: Path) -> list[PendingCommit]:
-    """The commits a pending file records, in the order they were made. A line that is not a record is skipped and told in hook.log:
-    one damaged line must not hide the commits around it."""
+    """The commits a pending file records, in the order of its lines, which is not always the order they were made (`append_pending`).
+    A line that is not a record is skipped and told in hook.log: one damaged line must not hide the commits around it."""
     commits = []
     for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         try:

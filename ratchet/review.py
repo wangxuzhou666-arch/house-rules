@@ -7,14 +7,18 @@ import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from .config import Config
 from .errors import DailyCapReached, RatchetError, RoundCapReached, RoundKeyUnavailable
 from .fsutil import read_text, write_text
 from .git import commit_sha, current_branch, merge_base_with_head, origin_head_branch
 from .ledger import REVIEW_SOURCES, Event, FindingState, open_findings
+from .reservations import (
+    BOOK_NAME, DAILY_WINDOW, Book, consume_line, read_book, reservation_lock, reserve_line, reusable, utc_now, window_times, write_book,
+)
 from .rules import load_rules
 
 LEVELS = ("low", "medium", "high", "xhigh", "max")
@@ -31,8 +35,7 @@ SUMMARY_WIDTH = 60
 FORK_POINT_LENGTH = 12  # hex digits of the fork point kept in a round key
 REVIEWER = "claude-code"  # the `reviewer` of a review_run that ratchet ran itself
 NO_COMMIT = "none"  # `head` on a branch with no commit yet: the word a finding's `sha` uses for the same state
-TRIGGER_AUTO = "auto"  # the `trigger` of a review_run that `ratchet wrapup --auto` started: the reviews the daily cap counts
-DAILY_WINDOW = timedelta(hours=24)  # the "day" of the daily cap: any 24 hours, not a calendar day
+TRIGGER_AUTO = "auto"  # the `trigger` of a review_run that `ratchet wrapup --auto` started: a record, since the daily cap counts reservations
 
 # The run id is also the file name of the saved output, so it is checked with fullmatch: `$` alone also holds before a final newline.
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -222,7 +225,7 @@ def require_claude(argv: list[str]) -> None:
 
 # Why a review would not start (the `kind` of a Refusal), in the order they are checked.
 REFUSE_RULES, REFUSE_ROUND_KEY, REFUSE_ROUND_CAP, REFUSE_CLAUDE = "rules", "round_key", "round_cap", "claude"
-REFUSE_DAILY_CAP = "daily_cap"  # checked between the round cap and claude; only an automatic review meets it
+REFUSE_DAILY_CAP = "daily_cap"  # checked last, after claude (a review that cannot run takes no slot); only an automatic review meets it
 
 
 @dataclass(frozen=True)
@@ -244,34 +247,28 @@ def round_cap_message(key: str, used: int, max_rounds: int, open_count: int) -> 
             "still open (ratchet count). Fix blockers, let the rest go to distill, or rerun with --over-cap (recorded).")
 
 
-def automatic_review_times(events: list[Event], now: datetime) -> list[datetime]:
-    """When the automatic reviews of the last 24 hours ran, oldest first. `now` has a time zone.
-
-    A ledger `ts` is local time without a zone (`now_iso`), so it is read as local time. A review exactly 24 hours old is out of
-    the window: the next one may run at that moment. A review a person started carries no `trigger` and is never counted.
-    """
-    started = [datetime.fromisoformat(event["ts"]).astimezone() for event in events
-               if event["kind"] == "review_run" and event.get("trigger") == TRIGGER_AUTO]
-    return sorted(moment for moment in started if now - moment < DAILY_WINDOW)
-
-
 def _local_time(moment: datetime) -> str:
     """`moment` the way the ledger writes a time: local, to the second, without a zone."""
     return moment.astimezone().replace(tzinfo=None).isoformat(timespec="seconds")
 
 
-def daily_cap_refusal(config: Config, events: list[Event], now: datetime) -> Refusal | None:
-    """Why an automatic review would be refused now, else None: `wrapup_auto_max_per_day` of them ran in the last 24 hours.
+def daily_cap_refusal(config: Config, book: Book, now: datetime, *, may_consume: bool = True) -> Refusal | None:
+    """Why an automatic review would be refused now, else None: `wrapup_auto_max_per_day` reservations were made in the last 24 hours.
+
+    `may_consume` is for `wrapup --auto`: the reservation the Stop hook made for this worktree, which no run has used yet, is the
+    slot of this review, so it is not refused whatever the count. The Stop hook asks with it False: every ask takes a slot of its own.
 
     The message names the moment the next one can run, in absolute time: it stays the same for as long as the cap does, and the
     Stop hook announces a refusal once per message, where "in 3 hours" would change every minute and be announced every turn.
     """
-    recent = automatic_review_times(events, now)
+    if may_consume and reusable(book, str(config.worktree), now) is not None:
+        return None
+    recent = window_times(book, now)
     limit = config.wrapup_auto_max_per_day
     if len(recent) < limit:
         return None
-    frees = recent[len(recent) - limit]  # the review whose leaving makes room: the oldest, unless the setting was lowered
-    message = (f"daily cap reached: {len(recent)} automatic review(s) ran in the last 24 hours "
+    frees = recent[len(recent) - limit]  # the reservation whose leaving makes room: the oldest, unless the setting was lowered
+    message = (f"daily cap reached: {len(recent)} automatic review(s) were started or asked for in the last 24 hours "
                f"and wrapup_auto_max_per_day is {limit}. "
                f"The next one can run after {_local_time(frees + DAILY_WINDOW)}, "
                f"when the one from {_local_time(frees)} leaves that window; "
@@ -280,15 +277,48 @@ def daily_cap_refusal(config: Config, events: list[Event], now: datetime) -> Ref
     return Refusal(REFUSE_DAILY_CAP, None, message)
 
 
+def _slot_line(config: Config, book: Book, *, by: str, head: str, may_consume: bool, now: datetime) -> str:
+    """The line that takes a slot: the consumption of the Stop hook's reservation when `may_consume` and there is one, else a
+    reservation of this run's own."""
+    held = reusable(book, str(config.worktree), now) if may_consume else None
+    if held is not None:
+        return consume_line(held, now)
+    return reserve_line(str(config.worktree), head, by, now)
+
+
+def take_automatic_slot(config: Config, *, by: str, head: str, may_consume: bool, note: Callable[[str], None] | None = None,
+                        now: datetime | None = None) -> Refusal | None:
+    """Count one automatic review now, under the lock of the book: None when it may go on (a reservation was made, or the Stop
+    hook's was used), else the refusal. The last check of a review, after every other one has passed: a refused or impossible
+    review never takes a slot. The count is of requests and not of finished reviews, so one that fails, or is still running, counts.
+
+    `by` and `head` go into the reservation; `may_consume` is for `wrapup --auto` (see daily_cap_refusal). `note` is told, once the
+    lock is let go, of each line of the book that was passed over. `now` is for a test: otherwise the clock is read inside the lock,
+    so that the time written is the time the count was made at, however long the lock was waited for.
+    """
+    with reservation_lock(config.root):
+        moment = now or utc_now()
+        book = read_book(config.root)
+        refusal = daily_cap_refusal(config, book, moment, may_consume=may_consume)
+        if refusal is None:
+            write_book(config.root, book, moment, _slot_line(config, book, by=by, head=head, may_consume=may_consume, now=moment))
+    if note is not None:
+        for damage in book.damaged:
+            note(f"{config.root / BOOK_NAME}: {damage}; left out of the count, and dropped when the book is next written")
+    return refusal
+
+
 def review_refusal(config: Config, events: list[Event], *, target: str | None, from_file: bool, over_cap_allowed: bool,
                    replayed: bool, automatic: bool = False) -> Refusal | None:
-    """Why `ratchet review` would refuse to start, else None. Reads the rules files, git and the PATH; writes nothing.
+    """Why `ratchet review` would refuse to start, else None. Reads the rules files, git, the PATH and the book of the daily cap;
+    writes nothing.
 
     The checks `cmd_review` makes before it calls claude, in its order: the rules load, the change gets a round key, the round
-    cap leaves room (a replay and --over-cap are exempt), an `automatic` review is within the daily cap (a --from-file review
-    runs no claude, so it is never refused for it), the claude command exists (a --from-file review runs none). A wrap-up
+    cap leaves room (a replay and --over-cap are exempt), the claude command exists (a --from-file review runs none), and last an
+    `automatic` review is within the daily cap (a --from-file review runs no claude, so it is never refused for it). The cap is
+    last because it is the one that takes a slot (`take_automatic_slot`): a review that cannot run must not use one up. A wrap-up
     asks ahead of time because a refused round records no review_run, so the wrap-up's base never moves and the next one
-    would be refused the same way.
+    would be refused the same way. This asks without the lock and takes nothing: the slot itself is taken when the review starts.
 
     `target` has passed `check_target`. `events` are the ledger's; the change under review is the one in `config.worktree`.
     `automatic` is for a review `wrapup --auto` starts: only that kind is counted by the daily cap and refused by it.
@@ -306,15 +336,12 @@ def review_refusal(config: Config, events: list[Event], *, target: str | None, f
         return Refusal(REFUSE_ROUND_CAP, key, round_cap_message(key, used, config.max_review_rounds, len(open_findings(events))))
     if from_file:
         return None
-    capped = daily_cap_refusal(config, events, datetime.now().astimezone()) if automatic else None
-    if capped is not None:
-        return capped
     argv = claude_command(DEFAULT_LEVEL, target)  # the level is no part of argv[0], which is all `require_claude` looks at
     try:
         require_claude(argv)
     except RatchetError as exc:
         return Refusal(REFUSE_CLAUDE, key, str(exc))
-    return None
+    return daily_cap_refusal(config, read_book(config.root), utc_now()) if automatic else None
 
 
 def _run_command(argv: list[str], cwd: Path, timeout: float, env: dict[str, str] | None = None) -> str:

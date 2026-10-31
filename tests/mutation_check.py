@@ -2514,16 +2514,16 @@ MUTANTS = (
            'if all(step.status in ("ok", "skip") for step in result.steps):', 'if all(step.status in ("ok", "skip") or step.name == "start point" for step in result.steps):'),
     Mutant("auto stop: the start point is never derived", "ratchet/auto_stop.py",
            "    _note_start_point(config, events, notes)\n", ""),
-    Mutant("auto stop: the start is the parent of the last commit noted, not the first", "ratchet/auto_stop.py",
-           '    for note in notes:\n        parent = commit_sha(worktree, f"{note.head}^")\n', '    for note in reversed(notes):\n        parent = commit_sha(worktree, f"{note.head}^")\n'),
+    Mutant("auto stop: the start is the parent of the last commit noted, not of the earliest", "ratchet/auto_stop.py",
+           "    return common_ancestor(worktree, parents) if parents else None\n", "    return parents[-1] if parents else None\n"),
     Mutant("auto stop: only the first commit noted is looked at", "ratchet/auto_stop.py",
            '    for note in notes:\n        parent = commit_sha(worktree, f"{note.head}^")\n', '    for note in notes[:1]:\n        parent = commit_sha(worktree, f"{note.head}^")\n'),
-    Mutant("auto stop: a commit noted that HEAD does not descend from is the start", "ratchet/auto_stop.py",
+    Mutant("auto stop: a commit noted that HEAD does not descend from pulls the start back", "ratchet/auto_stop.py",
            '        if parent is not None and is_ancestor(worktree, note.head, "HEAD"):', "        if parent is not None:"),
-    Mutant("auto stop: a root commit noted first ends the search", "ratchet/auto_stop.py",
-           '        if parent is not None and is_ancestor(worktree, note.head, "HEAD"):', '        if is_ancestor(worktree, note.head, "HEAD"):'),
+    Mutant("auto stop: a root commit noted is its own start", "ratchet/auto_stop.py",
+           '        parent = commit_sha(worktree, f"{note.head}^")\n', '        parent = commit_sha(worktree, f"{note.head}^") or note.head\n'),
     Mutant("auto stop: the start is the commit noted, not its parent", "ratchet/auto_stop.py",
-           "            return parent\n    return None\n", "            return note.head\n    return None\n"),
+           "            parents.append(parent)\n", "            parents.append(note.head)\n"),
     Mutant("auto stop: a review of the branch does not stop a start point being derived", "ratchet/auto_stop.py",
            "    if default is None or last_reviewed(config.worktree, events) is not None:\n", "    if default is None:\n"),
     Mutant("auto stop: a usable start point does not stop one being derived", "ratchet/auto_stop.py",
@@ -2567,7 +2567,7 @@ MUTANTS = (
     Mutant("auto stop: the commits put back are noted afresh", "ratchet/auto_stop.py",
            "        append_pending(session, recent)\n", "        append_pending(session, [PendingCommit(note.worktree, note.head, utc_timestamp()) for note in recent])\n"),
     Mutant("auto stop: a pending file is asked for when no commit is put back", "ratchet/auto_stop.py",
-           "    if recent:\n        append_pending(session, recent)\n", "    append_pending(session, recent)\n"),
+           "    if recent:\n        try:\n", "    if True:\n        try:\n"),
     Mutant("auto stop: a commit that has waited for more than a week is put back", "ratchet/auto_stop.py",
            "    recent = [note for note in failed if _is_recent(note, cutoff)]\n", "    recent = list(failed)\n"),
     Mutant("auto stop: only a commit noted over a week ago is put back", "ratchet/auto_stop.py",
@@ -2605,29 +2605,29 @@ MUTANTS = (
            'return "the start" if base.sha is None else "HEAD"', 'return "the start"'),
 
     # C0: daily cap on automatic reviews (which reviews it counts, the review that frees the next one, the refusal and where it comes among the others, its status and exit code, the setting, the Stop hook and the skill)
-    Mutant("daily cap: a review a person started is counted too", "ratchet/review.py",
-           'if event["kind"] == "review_run" and event.get("trigger") == TRIGGER_AUTO]', 'if event["kind"] == "review_run"]'),
-    Mutant("daily cap: a review with any trigger is counted", "ratchet/review.py",
-           'event.get("trigger") == TRIGGER_AUTO]', 'event.get("trigger") is not None]'),
-    Mutant("daily cap: only the reviews that are not automatic are counted", "ratchet/review.py",
-           'event.get("trigger") == TRIGGER_AUTO]', 'event.get("trigger") != TRIGGER_AUTO]'),
-    Mutant("daily cap: a ledger time is read as UTC", "ratchet/review.py",
-           'datetime.fromisoformat(event["ts"]).astimezone() for event in events', 'datetime.fromisoformat(event["ts"] + "+00:00") for event in events'),
-    Mutant("daily cap: a review exactly 24 hours old is still in the window", "ratchet/review.py",
+    Mutant("daily cap: the consumption of a reservation is counted as a review too", "ratchet/reservations.py",
+           "    started = [item.ts for item in book.reservations]\n", "    started = [moment for _, _, moment, _ in book.kept]\n"),
+    Mutant("daily cap: only the reservations of the Stop hook are counted", "ratchet/reservations.py",
+           "    started = [item.ts for item in book.reservations]\n", "    started = [item.ts for item in book.reservations if item.by == BY_HOOK]\n"),
+    Mutant("daily cap: only the reservations of a wrap-up run are counted", "ratchet/reservations.py",
+           "    started = [item.ts for item in book.reservations]\n", "    started = [item.ts for item in book.reservations if item.by == BY_WRAPUP]\n"),
+    Mutant("daily cap: a time with no zone in the book is read as UTC", "ratchet/reservations.py",
+           '        raise ValueError(f"{value!r} has no time zone")\n', "        moment = moment.replace(tzinfo=timezone.utc)\n"),
+    Mutant("daily cap: a review exactly 24 hours old is still in the window", "ratchet/reservations.py",
            "if now - moment < DAILY_WINDOW)", "if now - moment <= DAILY_WINDOW)"),
-    Mutant("daily cap: the reviews in the window are the ones older than it", "ratchet/review.py",
+    Mutant("daily cap: the reviews in the window are the ones older than it", "ratchet/reservations.py",
            "if now - moment < DAILY_WINDOW)", "if now - moment > DAILY_WINDOW)"),
-    Mutant("daily cap: the window is the calendar date", "ratchet/review.py",
+    Mutant("daily cap: the window is the calendar date", "ratchet/reservations.py",
            "if now - moment < DAILY_WINDOW)", "if moment.date() == now.date())"),
-    Mutant("daily cap: an automatic review is counted for ever", "ratchet/review.py",
+    Mutant("daily cap: an automatic review is counted for ever", "ratchet/reservations.py",
            "if now - moment < DAILY_WINDOW)", "if True)"),
-    Mutant("daily cap: the window is 23 hours", "ratchet/review.py",
+    Mutant("daily cap: the window is 23 hours", "ratchet/reservations.py",
            "DAILY_WINDOW = timedelta(hours=24)", "DAILY_WINDOW = timedelta(hours=23)"),
-    Mutant("daily cap: the window is 25 hours", "ratchet/review.py",
+    Mutant("daily cap: the window is 25 hours", "ratchet/reservations.py",
            "DAILY_WINDOW = timedelta(hours=24)", "DAILY_WINDOW = timedelta(hours=25)"),
-    Mutant("daily cap: the reviews come in the order of the ledger", "ratchet/review.py",
+    Mutant("daily cap: the reviews come in the order of the ledger", "ratchet/reservations.py",
            "return sorted(moment for moment in started if now - moment < DAILY_WINDOW)", "return [moment for moment in started if now - moment < DAILY_WINDOW]"),
-    Mutant("daily cap: the reviews come newest first", "ratchet/review.py",
+    Mutant("daily cap: the reviews come newest first", "ratchet/reservations.py",
            "return sorted(moment for moment in started if now - moment < DAILY_WINDOW)", "return sorted((moment for moment in started if now - moment < DAILY_WINDOW), reverse=True)"),
     Mutant("daily cap: one review fewer than the limit uses it up", "ratchet/review.py",
            "    if len(recent) < limit:\n", "    if len(recent) < limit - 1:\n"),
@@ -2670,44 +2670,47 @@ MUTANTS = (
     Mutant("daily cap: the times in the message are not turned to local time", "ratchet/review.py",
            'moment.astimezone().replace(tzinfo=None).isoformat(timespec="seconds")', 'moment.replace(tzinfo=None).isoformat(timespec="seconds")'),
     Mutant("daily cap: a review a person starts meets it too", "ratchet/review.py",
-           "datetime.now().astimezone()) if automatic else None", "datetime.now().astimezone())"),
+           "read_book(config.root), utc_now()) if automatic else None", "read_book(config.root), utc_now())"),
     Mutant("daily cap: an automatic review never meets it", "ratchet/review.py",
-           "capped = daily_cap_refusal(config, events, datetime.now().astimezone()) if automatic else None", "capped = None"),
+           "return daily_cap_refusal(config, read_book(config.root), utc_now()) if automatic else None", "return None"),
     Mutant("daily cap: only a review a person starts meets it", "ratchet/review.py",
-           "datetime.now().astimezone()) if automatic else None", "datetime.now().astimezone()) if not automatic else None"),
+           "read_book(config.root), utc_now()) if automatic else None", "read_book(config.root), utc_now()) if not automatic else None"),
     Mutant("daily cap: a saved review meets it", "ratchet/review.py",
-           "    if from_file:\n"
-           "        return None\n"
-           "    capped = daily_cap_refusal(config, events, datetime.now().astimezone()) if automatic else None\n"
-           "    if capped is not None:\n"
-           "        return capped\n",
-           "    capped = daily_cap_refusal(config, events, datetime.now().astimezone()) if automatic else None\n"
+           "    if from_file:\n        return None\n    argv = claude_command(DEFAULT_LEVEL, target)",
+           "    capped = daily_cap_refusal(config, read_book(config.root), utc_now()) if automatic else None\n"
            "    if capped is not None:\n"
            "        return capped\n"
            "    if from_file:\n"
-           "        return None\n"),
+           "        return None\n"
+           "    argv = claude_command(DEFAULT_LEVEL, target)"),
     Mutant("daily cap: it comes before the round cap", "ratchet/review.py",
            "    used = review_rounds_used(events, key)\n",
-           "    capped = daily_cap_refusal(config, events, datetime.now().astimezone()) if automatic else None\n"
+           "    capped = daily_cap_refusal(config, read_book(config.root), utc_now()) if automatic else None\n"
            "    if capped is not None:\n"
            "        return capped\n"
            "    used = review_rounds_used(events, key)\n"),
     Mutant("daily cap: it comes before the round key", "ratchet/review.py",
            "    try:\n        key = round_key(config.worktree, target, config.default_branch)\n",
-           "    capped = daily_cap_refusal(config, events, datetime.now().astimezone()) if automatic else None\n"
+           "    capped = daily_cap_refusal(config, read_book(config.root), utc_now()) if automatic else None\n"
            "    if capped is not None:\n"
            "        return capped\n"
            "    try:\n"
            "        key = round_key(config.worktree, target, config.default_branch)\n"),
     Mutant("daily cap: it comes before the rules", "ratchet/review.py",
            "    try:\n        load_rules(config)\n",
-           "    capped = daily_cap_refusal(config, events, datetime.now().astimezone()) if automatic else None\n"
+           "    capped = daily_cap_refusal(config, read_book(config.root), utc_now()) if automatic else None\n"
            "    if capped is not None:\n"
            "        return capped\n"
            "    try:\n"
            "        load_rules(config)\n"),
-    Mutant("daily cap: it comes after the claude check", "ratchet/review.py",
-           "    capped = daily_cap_refusal(config, events, datetime.now().astimezone()) if automatic else None\n"
+    Mutant("daily cap: it comes before the claude check", "ratchet/review.py",
+           "    argv = claude_command(DEFAULT_LEVEL, target)  # the level is no part of argv[0], which is all `require_claude` looks at\n"
+           "    try:\n"
+           "        require_claude(argv)\n"
+           "    except RatchetError as exc:\n"
+           "        return Refusal(REFUSE_CLAUDE, key, str(exc))\n"
+           "    return daily_cap_refusal(config, read_book(config.root), utc_now()) if automatic else None\n",
+           "    capped = daily_cap_refusal(config, read_book(config.root), utc_now()) if automatic else None\n"
            "    if capped is not None:\n"
            "        return capped\n"
            "    argv = claude_command(DEFAULT_LEVEL, target)  # the level is no part of argv[0], which is all `require_claude` looks at\n"
@@ -2715,15 +2718,6 @@ MUTANTS = (
            "        require_claude(argv)\n"
            "    except RatchetError as exc:\n"
            "        return Refusal(REFUSE_CLAUDE, key, str(exc))\n"
-           "    return None\n",
-           "    argv = claude_command(DEFAULT_LEVEL, target)  # the level is no part of argv[0], which is all `require_claude` looks at\n"
-           "    try:\n"
-           "        require_claude(argv)\n"
-           "    except RatchetError as exc:\n"
-           "        return Refusal(REFUSE_CLAUDE, key, str(exc))\n"
-           "    capped = daily_cap_refusal(config, events, datetime.now().astimezone()) if automatic else None\n"
-           "    if capped is not None:\n"
-           "        return capped\n"
            "    return None\n"),
     Mutant("daily cap: a refusal for it is an ordinary error", "ratchet/review.py",
            "        if self.kind == REFUSE_DAILY_CAP:\n            return DailyCapReached(self.message)\n", ""),
@@ -2844,6 +2838,309 @@ MUTANTS = (
            "- `daily_capped` (exit code 4", "- `daily-capped` (exit code 4"),
     Mutant("wrapup skill: a wrap-up someone typed is marked as automatic", "skills/wrapup/SKILL.md",
            "1. Run `ratchet wrapup --json`, adding", "1. Run `ratchet wrapup --json --auto`, adding"),
+
+    # R4: daily cap counted at request time (the reservations book and its lock, who may use a reservation, where in a review the slot is taken, and the Stop hook that takes one)
+    Mutant("daily cap: a time with no zone in the book is read as local time", "ratchet/reservations.py",
+           '    if moment.tzinfo is None:\n        raise ValueError(f"{value!r} has no time zone")\n', ""),
+    Mutant("daily cap: a line that names no one who made it is read", "ratchet/reservations.py",
+           '    if by not in (BY_HOOK, BY_WRAPUP):\n        raise ValueError(f"by {by!r}")\n', ""),
+    Mutant("daily cap: a line of another version is read", "ratchet/reservations.py",
+           'if not isinstance(item, dict) or item.get("v") != _VERSION:', "if not isinstance(item, dict):"),
+    Mutant("daily cap: a line of a kind that is neither is read as a reservation", "ratchet/reservations.py",
+           "    if item.get(\"kind\") != \"reserve\":\n        raise ValueError(f\"kind {item.get('kind')!r}\")\n", ""),
+    Mutant("daily cap: a line with no id is read", "ratchet/reservations.py",
+           '_nonempty(item.get("id"), "id")', 'item.get("id")'),
+    Mutant("daily cap: a reservation with no worktree is read", "ratchet/reservations.py",
+           '_nonempty(item.get("worktree"), "worktree")', 'item.get("worktree")'),
+    Mutant("daily cap: a reservation with no head is read", "ratchet/reservations.py",
+           '_nonempty(item.get("head"), "head")', 'item.get("head")'),
+    Mutant("daily cap: a line of the wrong shape is an error and not damage", "ratchet/reservations.py",
+           "        except (ValueError, OverflowError) as exc:", "        except OverflowError as exc:"),
+    Mutant("daily cap: a time at the edge of the calendar is an error and not damage", "ratchet/reservations.py",
+           "        except (ValueError, OverflowError) as exc:", "        except ValueError as exc:"),
+    Mutant("daily cap: damage empties the book", "ratchet/reservations.py",
+           "    return Book(tuple(reserved), frozenset(consumed), tuple(damaged), tuple(kept))\n",
+           "    if damaged:\n        return Book((), frozenset(), tuple(damaged), ())\n    return Book(tuple(reserved), frozenset(consumed), tuple(damaged), tuple(kept))\n"),
+    Mutant("daily cap: damage is not named", "ratchet/reservations.py",
+           '            damaged.append(f"line {number}: {exc}")\n', "            pass\n"),
+    Mutant("daily cap: the lines are numbered from 0", "ratchet/reservations.py",
+           'enumerate(text.split("\\n"), start=1)', 'enumerate(text.split("\\n"), start=0)'),
+    Mutant("daily cap: a line that holds a line-break character is split", "ratchet/reservations.py",
+           'text.split("\\n")', "text.splitlines()"),
+    Mutant("daily cap: a consumption is not read", "ratchet/reservations.py",
+           "            consumed.add(entry[0])\n", "            pass\n"),
+    Mutant("daily cap: a consumption is taken for a reservation when the book is written", "ratchet/reservations.py",
+           "kept.append((line, entry[0], entry[1], False))", "kept.append((line, entry[0], entry[1], True))"),
+    Mutant("daily cap: the file is decoded strictly", "ratchet/reservations.py",
+           'raw.decode("utf-8", errors="replace")', 'raw.decode("utf-8")'),
+    Mutant("daily cap: a repo without a book is an error", "ratchet/reservations.py",
+           "    except FileNotFoundError:\n        return EMPTY_BOOK\n", "    except ZeroDivisionError:\n        return EMPTY_BOOK\n"),
+    Mutant("daily cap: a book that cannot be read is a plain OS error", "ratchet/reservations.py",
+           '        raise RatchetError(f"cannot read {path}: {exc}") from exc\n', "        raise\n"),
+    Mutant("daily cap: a book may be a symlink", "ratchet/reservations.py",
+           "    path = local_path(root, BOOK_NAME)\n", "    path = root / BOOK_NAME\n"),
+    Mutant("daily cap: the book is not in the state directory", "ratchet/reservations.py",
+           'BOOK_NAME = ".ratchet/auto-reservations.jsonl"', 'BOOK_NAME = "auto-reservations.jsonl"'),
+    Mutant("daily cap: the lock is not in the state directory", "ratchet/reservations.py",
+           'LOCK_NAME = ".ratchet/auto-reservations.lock"', 'LOCK_NAME = "auto-reservations.lock"'),
+    Mutant("daily cap: a reservation dated after now is not counted", "ratchet/reservations.py",
+           "if now - moment < DAILY_WINDOW)", "if timedelta(0) <= now - moment < DAILY_WINDOW)"),
+    Mutant("daily cap: reservations made in the same second are counted once", "ratchet/reservations.py",
+           "return sorted(moment for moment in started if now - moment < DAILY_WINDOW)", "return sorted({moment for moment in started if now - moment < DAILY_WINDOW})"),
+    Mutant("daily cap: the reservation of a run can be used as the one of the Stop hook", "ratchet/reservations.py",
+           "item.by == BY_HOOK and ", ""),
+    Mutant("daily cap: the reservation for another worktree can be used", "ratchet/reservations.py",
+           "item.worktree == worktree and ", ""),
+    Mutant("daily cap: a reservation that was used can be used again", "ratchet/reservations.py",
+           "item.id not in book.consumed and ", ""),
+    Mutant("daily cap: a reservation an hour old can still be used", "ratchet/reservations.py",
+           "now - item.ts < HOLD_TTL]", "now - item.ts <= HOLD_TTL]"),
+    Mutant("daily cap: a reservation is kept for 30 minutes", "ratchet/reservations.py",
+           "HOLD_TTL = timedelta(hours=1)", "HOLD_TTL = timedelta(minutes=30)"),
+    Mutant("daily cap: a reservation is kept for 2 hours", "ratchet/reservations.py",
+           "HOLD_TTL = timedelta(hours=1)", "HOLD_TTL = timedelta(hours=2)"),
+    Mutant("daily cap: the youngest reservation is used first", "ratchet/reservations.py",
+           "min(waiting, key=", "max(waiting, key="),
+    Mutant("daily cap: a reservation dated after now cannot be used", "ratchet/reservations.py",
+           "now - item.ts < HOLD_TTL]", "timedelta(0) <= now - item.ts < HOLD_TTL]"),
+    Mutant("daily cap: the write keeps a reservation that left the window", "ratchet/reservations.py",
+           "if reserved and now - moment < DAILY_WINDOW}", "if reserved}"),
+    Mutant("daily cap: the write drops a reservation of half a day", "ratchet/reservations.py",
+           "if reserved and now - moment < DAILY_WINDOW}", "if reserved and now - moment < DAILY_WINDOW / 2}"),
+    Mutant("daily cap: the write keeps a reservation exactly 24 hours old", "ratchet/reservations.py",
+           "if reserved and now - moment < DAILY_WINDOW}", "if reserved and now - moment <= DAILY_WINDOW}"),
+    Mutant("daily cap: the write drops the consumption of a reservation that stays", "ratchet/reservations.py",
+           "lines = [line for line, ident, _, _ in book.kept if ident in alive]", "lines = [line for line, ident, _, reserved in book.kept if ident in alive and reserved]"),
+    Mutant("daily cap: the write keeps the consumption of a reservation that is gone", "ratchet/reservations.py",
+           "lines = [line for line, ident, _, _ in book.kept if ident in alive]", "lines = [line for line, ident, _, reserved in book.kept if ident in alive or not reserved]"),
+    Mutant("daily cap: the write leaves out the new line", "ratchet/reservations.py",
+           "for line in [*lines, add])", "for line in lines)"),
+    Mutant("daily cap: the write puts the new line first", "ratchet/reservations.py",
+           "for line in [*lines, add])", "for line in [add, *lines])"),
+    Mutant("daily cap: a book that cannot be written is a plain OS error", "ratchet/reservations.py",
+           '        raise RatchetError(f"cannot write {root / BOOK_NAME}: {exc}") from exc\n', "        raise\n"),
+    Mutant("daily cap: a reservation is written with a time that has no zone", "ratchet/reservations.py",
+           'ts=now.isoformat(timespec="seconds"), worktree=worktree', 'ts=now.replace(tzinfo=None).isoformat(timespec="seconds"), worktree=worktree'),
+    Mutant("daily cap: a reservation is written with its time to the minute", "ratchet/reservations.py",
+           'ts=now.isoformat(timespec="seconds"), worktree=worktree', 'ts=now.isoformat(timespec="minutes"), worktree=worktree'),
+    Mutant("daily cap: a reservation is written as made by the Stop hook whoever made it", "ratchet/reservations.py",
+           "head=head, by=by)", "head=head, by=BY_HOOK)"),
+    Mutant("daily cap: a reservation is written for a path with a slash on its end", "ratchet/reservations.py",
+           "worktree=worktree, head=head", 'worktree=worktree + "/", head=head'),
+    Mutant("daily cap: a reservation is written with no head", "ratchet/reservations.py",
+           "worktree=worktree, head=head", 'worktree=worktree, head="none"'),
+    Mutant("daily cap: every reservation has the same id", "ratchet/reservations.py",
+           "id=os.urandom(8).hex(), ts=", 'id="0" * 16, ts='),
+    Mutant("daily cap: a reservation id is 8 hex digits", "ratchet/reservations.py",
+           "id=os.urandom(8).hex(), ts=", "id=os.urandom(4).hex(), ts="),
+    Mutant("daily cap: a consumption names another reservation", "ratchet/reservations.py",
+           "id=reservation.id, ts=", "id=os.urandom(8).hex(), ts="),
+    Mutant("daily cap: the lock is not taken", "ratchet/reservations.py",
+           "                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)\n", "                pass\n"),
+    Mutant("daily cap: the lock is not waited for", "ratchet/reservations.py",
+           "if time.monotonic() >= deadline:", "if True:"),
+    Mutant("daily cap: the lock that stays held is gone on without", "ratchet/reservations.py",
+           '                    raise RatchetError(f"another process is counting automatic reviews ({path} stayed locked for {waited:g}s); "\n'
+           '                                       "run it again") from None\n',
+           "                    break\n"),
+    Mutant("daily cap: the wait asked for is not the one waited", "ratchet/reservations.py",
+           "waited = LOCK_WAIT_SECONDS if wait is None else wait", "waited = LOCK_WAIT_SECONDS"),
+    Mutant("daily cap: the lock may be a symlink", "ratchet/reservations.py",
+           "    path = local_path(root, LOCK_NAME)\n", "    path = root / LOCK_NAME\n"),
+    Mutant("daily cap: a directory that cannot be made for the lock is a plain OS error", "ratchet/reservations.py",
+           '        raise RatchetError(f"cannot create {path.parent}: {exc}") from exc\n', "        raise\n"),
+    Mutant("daily cap: a lock file that cannot be opened is a plain OS error", "ratchet/reservations.py",
+           '        raise RatchetError(f"cannot open {path}: {exc}") from exc\n', "        raise\n"),
+    Mutant("daily cap: the reservation the Stop hook made is not looked for", "ratchet/review.py",
+           "    if may_consume and reusable(book, str(config.worktree), now) is not None:\n        return None\n", ""),
+    Mutant("daily cap: the Stop hook meets the cap with the reservation it made in hand", "ratchet/review.py",
+           "    if may_consume and reusable(book, str(config.worktree), now) is not None:", "    if reusable(book, str(config.worktree), now) is not None:"),
+    Mutant("daily cap: the reservation the Stop hook made is looked for under the main worktree", "ratchet/review.py",
+           "    if may_consume and reusable(book, str(config.worktree), now) is not None:", "    if may_consume and reusable(book, str(config.root), now) is not None:"),
+    Mutant("daily cap: the slot is taken outside the lock", "ratchet/review.py",
+           "    with reservation_lock(config.root):\n", '    with __import__("contextlib").nullcontext():\n'),
+    Mutant("daily cap: the clock is read before the lock", "ratchet/review.py",
+           "    with reservation_lock(config.root):\n        moment = now or utc_now()\n", "    moment = now or utc_now()\n    with reservation_lock(config.root):\n"),
+    Mutant("daily cap: the clock given to the slot is ignored", "ratchet/review.py",
+           "        moment = now or utc_now()\n", "        moment = utc_now()\n"),
+    Mutant("daily cap: the lock is taken in the worktree and not the main one", "ratchet/review.py",
+           "    with reservation_lock(config.root):\n", "    with reservation_lock(config.worktree):\n"),
+    Mutant("daily cap: the slot reads the book of the worktree and not the main one", "ratchet/review.py",
+           "        book = read_book(config.root)\n", "        book = read_book(config.worktree)\n"),
+    Mutant("daily cap: the slot writes the book of the worktree and not the main one", "ratchet/review.py",
+           "            write_book(config.root, book, moment,", "            write_book(config.worktree, book, moment,"),
+    Mutant("daily cap: taking a slot writes nothing", "ratchet/review.py",
+           "            write_book(config.root, book, moment, _slot_line(config, book, by=by, head=head, may_consume=may_consume, now=moment))\n", "            pass\n"),
+    Mutant("daily cap: using the reservation of the Stop hook is not written", "ratchet/review.py",
+           "        return consume_line(held, now)\n", '        return ""\n'),
+    Mutant("daily cap: the reservation of the Stop hook is not used, a new one is made", "ratchet/review.py",
+           "    if held is not None:\n        return consume_line(held, now)\n", ""),
+    Mutant("daily cap: the line of a slot always uses the reservation of the Stop hook", "ratchet/review.py",
+           "held = reusable(book, str(config.worktree), now) if may_consume else None", "held = reusable(book, str(config.worktree), now)"),
+    Mutant("daily cap: the line of a slot never uses the reservation of the Stop hook", "ratchet/review.py",
+           "held = reusable(book, str(config.worktree), now) if may_consume else None", "held = None"),
+    Mutant("daily cap: the line of a slot looks for the reservation under the main worktree", "ratchet/review.py",
+           "held = reusable(book, str(config.worktree), now) if may_consume else None", "held = reusable(book, str(config.root), now) if may_consume else None"),
+    Mutant("daily cap: a reservation is made for the main worktree and not the one that asked", "ratchet/review.py",
+           "    return reserve_line(str(config.worktree), head, by, now)\n", "    return reserve_line(str(config.root), head, by, now)\n"),
+    Mutant("daily cap: the cap is always checked as a run that may use the reservation of the Stop hook", "ratchet/review.py",
+           "refusal = daily_cap_refusal(config, book, moment, may_consume=may_consume)", "refusal = daily_cap_refusal(config, book, moment, may_consume=True)"),
+    Mutant("daily cap: the cap is never checked as a run that may use the reservation of the Stop hook", "ratchet/review.py",
+           "refusal = daily_cap_refusal(config, book, moment, may_consume=may_consume)", "refusal = daily_cap_refusal(config, book, moment, may_consume=False)"),
+    Mutant("daily cap: the line of a slot is always made as a run that may use the reservation of the Stop hook", "ratchet/review.py",
+           "_slot_line(config, book, by=by, head=head, may_consume=may_consume, now=moment)", "_slot_line(config, book, by=by, head=head, may_consume=True, now=moment)"),
+    Mutant("daily cap: the line of a slot is never made as a run that may use the reservation of the Stop hook", "ratchet/review.py",
+           "_slot_line(config, book, by=by, head=head, may_consume=may_consume, now=moment)", "_slot_line(config, book, by=by, head=head, may_consume=False, now=moment)"),
+    Mutant("daily cap: damage in the book is not told", "ratchet/review.py",
+           "    if note is not None:\n", "    if False:\n"),
+    Mutant("daily cap: the cap an automatic wrap-up is foreseen to meet is read from the book of the worktree", "ratchet/review.py",
+           "read_book(config.root), utc_now())", "read_book(config.worktree), utc_now())"),
+    Mutant("daily cap: a review a person starts takes a slot", "ratchet/cli.py",
+           "    if automatic:  # the last refusal", "    if True:  # the last refusal"),
+    Mutant("daily cap: an automatic review takes no slot", "ratchet/cli.py",
+           "    if automatic:  # the last refusal", "    if False:  # the last refusal"),
+    Mutant("daily cap: an automatic review may not use the reservation of the Stop hook", "ratchet/cli.py",
+           "or NO_COMMIT, may_consume=True,", "or NO_COMMIT, may_consume=False,"),
+    Mutant("daily cap: an automatic review takes its slot as the Stop hook", "ratchet/cli.py",
+           "take_automatic_slot(config, by=BY_WRAPUP,", 'take_automatic_slot(config, by="hook",'),
+    Mutant("daily cap: an automatic review takes its slot with no head", "ratchet/cli.py",
+           'head=commit_sha(config.worktree, "HEAD") or NO_COMMIT, may_consume=True,', "head=NO_COMMIT, may_consume=True,"),
+    Mutant("daily cap: damage in the book is not warned about", "ratchet/cli.py",
+           '                                     note=lambda text: print(f"warning: {text}", file=sys.stderr))\n', "                                     note=None)\n"),
+    Mutant("daily cap: a review that is refused for the cap goes on", "ratchet/cli.py",
+           "        if capped is not None:\n            raise capped.error()\n", "        if capped is not None:\n            pass\n"),
+    Mutant("daily cap: the slot is taken before the other refusals are checked", "ratchet/cli.py",
+           "    refusal = review_refusal(config, events, target=args.target, from_file=bool(args.from_file), automatic=automatic,\n"
+           "                             over_cap_allowed=args.over_cap, replayed=replayed)\n",
+           "    if automatic:  # the last refusal, and the one that takes a slot: every check above has passed, and nothing is captured or asked yet\n"
+           '        capped = take_automatic_slot(config, by=BY_WRAPUP, head=commit_sha(config.worktree, "HEAD") or NO_COMMIT, may_consume=True,\n'
+           '                                     note=lambda text: print(f"warning: {text}", file=sys.stderr))\n'
+           "        if capped is not None:\n"
+           "            raise capped.error()\n"
+           "    refusal = review_refusal(config, events, target=args.target, from_file=bool(args.from_file), automatic=automatic,\n"
+           "                             over_cap_allowed=args.over_cap, replayed=replayed)\n"),
+    Mutant("daily cap: the slot is taken after claude has run", "ratchet/cli.py",
+           "    if automatic:  # the last refusal, and the one that takes a slot: every check above has passed, and nothing is captured or asked yet\n"
+           '        capped = take_automatic_slot(config, by=BY_WRAPUP, head=commit_sha(config.worktree, "HEAD") or NO_COMMIT, may_consume=True,\n'
+           '                                     note=lambda text: print(f"warning: {text}", file=sys.stderr))\n'
+           "        if capped is not None:\n"
+           "            raise capped.error()\n"
+           "    tree = config.worktree  # the code under review; the ledger, saved reviews and config stay under config.root\n"
+           "    key = round_key(tree, args.target, config.default_branch)\n"
+           "    used = review_rounds_used(events, key)\n"
+           "    round_number = used + 1\n"
+           "    over_cap = round_number > config.max_review_rounds\n"
+           "    if replayed:\n"
+           '        print(f"review: replay of run {run_id} (already recorded; not another round)")\n'
+           "    else:\n"
+           '        print(f"review round {round_number}/{config.max_review_rounds} for {key}" + (" (over the cap)" if over_cap else ""))\n'
+           "    if refusal is not None:  # only a dry run is still here\n"
+           "        print(_dry_run_refusal_line(refusal))\n"
+           "    evidence_snapshot = None\n"
+           "    level, reviewer_version = None, None  # a --from-file review does not know either\n"
+           "    if args.from_file:\n"
+           "        text = _read_input(args.from_file)\n"
+           '        head = commit_sha(tree, "HEAD") or NO_COMMIT\n'
+           "        state_tree_id = None if args.dry_run or replayed else _record_state_tree(tree)  # a tree is objects in the repo: a dry run and a replay (no review_run) write none\n"
+           "        locate = worktree_snippets(tree)\n"
+           "    else:\n"
+           "        level = args.level or DEFAULT_LEVEL\n"
+           "        committed_range = None if args.target is not None else _review_range(config, events, base)  # --target names the scope already\n"
+           "        argv = claude_command(level, args.target or committed_range)\n"
+           "        if args.dry_run:\n"
+           '            print(f"[dry-run] review: would run `{shlex.join(argv)}` in {tree} (run {run_id}); nothing run or written")\n'
+           "            return 0\n"
+           "        evidence_snapshot = capture_review_evidence(config, tree, args.target, committed_range)\n"
+           '        head = evidence_snapshot["head"] or NO_COMMIT  # HEAD as the reviewer starts, not as it is when the review ends\n'
+           "        state_tree_id = _review_tree(tree, head, args.target, committed_range)  # taken as the reviewer starts, for the same reason\n"
+           "        reviewer_version = _read_critic_version(tree)\n"
+           "        text = run_claude(argv, tree)\n",
+           "    tree = config.worktree  # the code under review; the ledger, saved reviews and config stay under config.root\n"
+           "    key = round_key(tree, args.target, config.default_branch)\n"
+           "    used = review_rounds_used(events, key)\n"
+           "    round_number = used + 1\n"
+           "    over_cap = round_number > config.max_review_rounds\n"
+           "    if replayed:\n"
+           '        print(f"review: replay of run {run_id} (already recorded; not another round)")\n'
+           "    else:\n"
+           '        print(f"review round {round_number}/{config.max_review_rounds} for {key}" + (" (over the cap)" if over_cap else ""))\n'
+           "    if refusal is not None:  # only a dry run is still here\n"
+           "        print(_dry_run_refusal_line(refusal))\n"
+           "    evidence_snapshot = None\n"
+           "    level, reviewer_version = None, None  # a --from-file review does not know either\n"
+           "    if args.from_file:\n"
+           "        text = _read_input(args.from_file)\n"
+           '        head = commit_sha(tree, "HEAD") or NO_COMMIT\n'
+           "        state_tree_id = None if args.dry_run or replayed else _record_state_tree(tree)  # a tree is objects in the repo: a dry run and a replay (no review_run) write none\n"
+           "        locate = worktree_snippets(tree)\n"
+           "    else:\n"
+           "        level = args.level or DEFAULT_LEVEL\n"
+           "        committed_range = None if args.target is not None else _review_range(config, events, base)  # --target names the scope already\n"
+           "        argv = claude_command(level, args.target or committed_range)\n"
+           "        if args.dry_run:\n"
+           '            print(f"[dry-run] review: would run `{shlex.join(argv)}` in {tree} (run {run_id}); nothing run or written")\n'
+           "            return 0\n"
+           "        evidence_snapshot = capture_review_evidence(config, tree, args.target, committed_range)\n"
+           '        head = evidence_snapshot["head"] or NO_COMMIT  # HEAD as the reviewer starts, not as it is when the review ends\n'
+           "        state_tree_id = _review_tree(tree, head, args.target, committed_range)  # taken as the reviewer starts, for the same reason\n"
+           "        reviewer_version = _read_critic_version(tree)\n"
+           "        text = run_claude(argv, tree)\n"
+           "        if automatic:  # the last refusal, and the one that takes a slot: every check above has passed, and nothing is captured or asked yet\n"
+           '            capped = take_automatic_slot(config, by=BY_WRAPUP, head=commit_sha(config.worktree, "HEAD") or NO_COMMIT, may_consume=True,\n'
+           '                                         note=lambda text: print(f"warning: {text}", file=sys.stderr))\n'
+           "            if capped is not None:\n"
+           "                raise capped.error()\n"),
+    Mutant("daily cap: the Stop hook asks without taking a slot", "ratchet/auto_stop.py",
+           "    if plan.due and plan.would_refuse is None:", "    if False:"),
+    Mutant("daily cap: the Stop hook takes a slot for work that a refusal has stopped", "ratchet/auto_stop.py",
+           "    if plan.due and plan.would_refuse is None:", "    if plan.due:"),
+    Mutant("daily cap: the Stop hook takes a slot for work that is not due", "ratchet/auto_stop.py",
+           "    if plan.due and plan.would_refuse is None:", "    if plan.would_refuse is None:"),
+    Mutant("daily cap: the Stop hook takes its slot as a run that may use the reservation of the Stop hook", "ratchet/auto_stop.py",
+           "or NO_COMMIT, may_consume=False,", "or NO_COMMIT, may_consume=True,"),
+    Mutant("daily cap: the Stop hook takes its slot as a wrap-up run", "ratchet/auto_stop.py",
+           "take_automatic_slot(config, by=BY_HOOK,", 'take_automatic_slot(config, by="wrapup",'),
+    Mutant("daily cap: the Stop hook takes its slot with no head", "ratchet/auto_stop.py",
+           'head=commit_sha(worktree, "HEAD") or NO_COMMIT, may_consume=False', "head=NO_COMMIT, may_consume=False"),
+    Mutant("daily cap: the refusal of the cap is not kept in the plan", "ratchet/auto_stop.py",
+           "        plan = replace(plan, would_refuse=capped)\n", "        pass\n"),
+    Mutant("daily cap: damage in the book is not logged by the Stop hook", "ratchet/auto_stop.py",
+           '                                     note=lambda damage: log_failure(f"auto stop: {worktree}: {damage}"))\n', "                                     note=None)\n"),
+
+    # R4: requeue isolation + start point by ancestry
+    Mutant("auto stop: a put-back that fails ends the Stop", "ratchet/auto_stop.py",
+           "        except OSError as exc:\n            worktrees = sorted({str(note.worktree) for note in recent})\n",
+           "        except ZeroDivisionError as exc:\n            worktrees = sorted({str(note.worktree) for note in recent})\n"),
+    Mutant("auto stop: only a put-back that fails for a missing file is caught", "ratchet/auto_stop.py",
+           "        except OSError as exc:\n            worktrees = sorted({str(note.worktree) for note in recent})\n",
+           "        except FileNotFoundError as exc:\n            worktrees = sorted({str(note.worktree) for note in recent})\n"),
+    Mutant("auto stop: a put-back that fails for any reason is told as lost commits", "ratchet/auto_stop.py",
+           "        except OSError as exc:\n            worktrees = sorted({str(note.worktree) for note in recent})\n",
+           "        except Exception as exc:\n            worktrees = sorted({str(note.worktree) for note in recent})\n"),
+    Mutant("auto stop: the commits a put-back loses are not told", "ratchet/auto_stop.py",
+           "            log_failure(f\"auto stop: dropped {len(recent)} commit(s) noted in {', '.join(worktrees)} that could not be judged: they could \"\n"
+           '                        f"not be put back ({type(exc).__name__}: {exc}{raised_at(exc)})")\n',
+           "            pass\n"),
+    Mutant("auto stop: the commits a put-back loses are counted with those too old to go back", "ratchet/auto_stop.py",
+           "dropped {len(recent)} commit(s)", "dropped {len(failed)} commit(s)"),
+    Mutant("auto stop: the worktrees of the commits a put-back loses include those of the commits too old to go back", "ratchet/auto_stop.py",
+           "            worktrees = sorted({str(note.worktree) for note in recent})\n", "            worktrees = sorted({str(note.worktree) for note in failed})\n"),
+    Mutant("auto stop: the worktrees of the commits a put-back loses are told in the order of the notes", "ratchet/auto_stop.py",
+           "            worktrees = sorted({str(note.worktree) for note in recent})\n", "            worktrees = list(dict.fromkeys(str(note.worktree) for note in recent))\n"),
+    Mutant("auto stop: the start is the parent of the first commit noted, whatever the order of the notes", "ratchet/auto_stop.py",
+           "    return common_ancestor(worktree, parents) if parents else None\n", "    return parents[0] if parents else None\n"),
+    Mutant("auto stop: the start is looked for when no commit noted counts", "ratchet/auto_stop.py",
+           "    return common_ancestor(worktree, parents) if parents else None\n", "    return common_ancestor(worktree, parents)\n"),
+    Mutant("git: which of two best common ancestors is given depends on the order of the commits", "ratchet/git.py",
+           "*sorted(commits)]", "*commits]"),
+    Mutant("git: histories that share nothing are an error", "ratchet/git.py",
+           '["merge-base", "--octopus", *sorted(commits)], root, allowed_returncodes=(0, 1))', '["merge-base", "--octopus", *sorted(commits)], root)'),
+    Mutant("git: an error of git is taken for histories that share nothing", "ratchet/git.py",
+           '["merge-base", "--octopus", *sorted(commits)], root, allowed_returncodes=(0, 1))', '["merge-base", "--octopus", *sorted(commits)], root, allowed_returncodes=(0, 1, 128))'),
+    Mutant("git: the common ancestor of several commits is asked for without the octopus mode", "ratchet/git.py",
+           '["merge-base", "--octopus", *sorted(commits)]', '["merge-base", *sorted(commits)]'),
+    Mutant("git: no commit at all is taken for histories that share nothing", "ratchet/git.py",
+           '    assert commits, "no commit: git answers that with rc=1 too, which would read as histories that share nothing"\n', ""),
 
     # ---- distribution metadata ----
     Mutant("plugin: the license changes", ".claude-plugin/plugin.json", '"license": "MIT"', '"license": "Apache-2.0"'),

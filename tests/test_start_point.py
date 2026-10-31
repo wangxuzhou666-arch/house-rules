@@ -1,4 +1,5 @@
 """The start point: where ratchet began watching the default branch, kept in `.ratchet/start-points.json`, and the git helpers it uses."""
+import itertools
 import json
 import subprocess
 import unittest
@@ -8,7 +9,7 @@ import support  # noqa: F401  (puts the repo root on sys.path)
 from support import _GIT_ENV, RepoCase, git, make_config
 
 from ratchet.errors import RatchetError
-from ratchet.git import commit_tree, is_ancestor
+from ratchet.git import commit_tree, common_ancestor, is_ancestor
 from ratchet.start_point import START_POINTS_NAME, read_start_points, record_start_point, usable_start_point
 
 
@@ -169,6 +170,58 @@ class IsAncestorTest(RepoCase):
 
     def test_a_commit_the_clone_does_not_have_is_no_ancestor_and_is_no_error(self) -> None:
         self.assertFalse(is_ancestor(self.repo, "a" * 40, "HEAD"))
+
+
+class CommonAncestorTest(RepoCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.first = self.commit("first")
+        self.second = self.commit("second")
+        self.third = self.commit("third")
+        git(self.repo, "checkout", "-q", "-b", "side", self.first)
+        self.side = self.commit("side")
+
+    def test_on_one_line_of_history_it_is_the_earliest_commit_whatever_the_order(self) -> None:
+        for commits in itertools.permutations((self.first, self.second, self.third)):
+            with self.subTest(order=[commit[:8] for commit in commits]):
+                self.assertEqual(common_ancestor(self.repo, list(commits)), self.first)
+
+    def test_a_commit_given_alone_or_twice_is_its_own_common_ancestor(self) -> None:
+        self.assertEqual(common_ancestor(self.repo, [self.second]), self.second)
+        self.assertEqual(common_ancestor(self.repo, [self.second, self.second]), self.second)
+
+    def test_commits_of_two_branches_have_the_commit_where_the_branches_forked(self) -> None:
+        self.assertEqual(common_ancestor(self.repo, [self.third, self.side]), self.first)
+        self.assertEqual(common_ancestor(self.repo, [self.second, self.third, self.side]), self.first)
+
+    def test_histories_that_share_nothing_have_none_and_that_is_no_error(self) -> None:
+        git(self.repo, "checkout", "-q", "--orphan", "unrelated")
+        self.assertIsNone(common_ancestor(self.repo, [self.third, self.commit("unrelated root")]))
+
+    def test_a_commit_the_clone_does_not_have_is_an_error_and_not_none(self) -> None:
+        with self.assertRaisesRegex(RatchetError, "merge-base"):
+            common_ancestor(self.repo, [self.first, "a" * 40])
+
+    def test_no_commit_at_all_is_refused_and_not_taken_for_histories_that_share_nothing(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "no commit"):
+            common_ancestor(self.repo, [])
+
+    def test_which_of_two_equally_good_ancestors_is_given_does_not_depend_on_the_order(self) -> None:
+        """After a criss-cross merge `left` and `right` have two best common ancestors, and git gives the one its arguments' order favors
+        when the commits are of one second."""
+        date = "2026-01-01T00:00:00Z"
+        git(self.repo, "checkout", "-q", "-b", "x", self.first)
+        x_commit = self.commit("x", date=date)
+        git(self.repo, "checkout", "-q", "-b", "y", self.first)
+        y_commit = self.commit("y", date=date)
+        git(self.repo, "checkout", "-q", "-b", "left", x_commit)
+        git(self.repo, "merge", "-q", "--no-ff", "-m", "left", y_commit, GIT_COMMITTER_DATE=date, GIT_AUTHOR_DATE=date)
+        left = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "checkout", "-q", "-b", "right", y_commit)
+        git(self.repo, "merge", "-q", "--no-ff", "-m", "right", x_commit, GIT_COMMITTER_DATE=date, GIT_AUTHOR_DATE=date)
+        right = git(self.repo, "rev-parse", "HEAD")
+        self.assertEqual(sorted(git(self.repo, "merge-base", "--all", left, right).split()), sorted([x_commit, y_commit]))
+        self.assertEqual(common_ancestor(self.repo, [left, right]), common_ancestor(self.repo, [right, left]))
 
 
 class CommitTreeTest(RepoCase):

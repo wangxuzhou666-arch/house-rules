@@ -37,10 +37,11 @@ from .outcomes import (
     new_batch_id, read_skips, skipped_finding_ids, trailer_commits, validate_labels,
 )
 from .onboard import STATUS_WORDS, InitOptions, Step, closing_lines, command_name, run_init
+from .reservations import BY_WRAPUP
 from .review import (
     DEFAULT_LEVEL, LEVELS, NO_COMMIT, REFUSE_CLAUDE, REFUSE_ROUND_CAP, TRIGGER_AUTO, Refusal, check_run_id, check_target, claude_command,
     critic_version, critic_version_counts, default_run_id, findings_table, replaced_critic_version, review_path,
-    review_refusal, review_rounds_used, review_run_event, review_run_ids, round_key, run_claude, save_review,
+    review_refusal, review_rounds_used, review_run_event, review_run_ids, round_key, run_claude, save_review, take_automatic_slot,
 )
 from .rules import Rules, load_rules
 from .proposal_commands import add_parsers as add_proposal_parsers
@@ -188,7 +189,8 @@ def _dry_run_refusal_line(refusal: Refusal) -> str:
 def cmd_review(args: argparse.Namespace, config: Config, *, base: Base | None = None, automatic: bool = False) -> int:
     """`base` is what the wrap-up that asked for this review measured the work from; None for a review run on its own.
 
-    `automatic` is a review `wrapup --auto` asked for: it is refused past the daily cap, and its review_run records the trigger."""
+    `automatic` is a review `wrapup --auto` asked for: it takes a slot of the daily cap when it starts, or is refused past the cap, and
+    its review_run records the trigger."""
     if args.from_file and (args.level or args.target):
         raise RatchetError("--level and --target choose what to review; they do nothing with --from-file")
     events = read_events(config.ledger_path)
@@ -203,6 +205,11 @@ def cmd_review(args: argparse.Namespace, config: Config, *, base: Base | None = 
     if refusal is not None and not (args.dry_run and refusal.kind in _DRY_RUN_PREVIEWED):  # before claude runs: a refused round costs nothing
         raise refusal.error()
     rules = load_rules(config)  # the check above only looked at them; the ingest below needs them loaded
+    if automatic:  # the last refusal, and the one that takes a slot: every check above has passed, and nothing is captured or asked yet
+        capped = take_automatic_slot(config, by=BY_WRAPUP, head=commit_sha(config.worktree, "HEAD") or NO_COMMIT, may_consume=True,
+                                     note=lambda text: print(f"warning: {text}", file=sys.stderr))
+        if capped is not None:
+            raise capped.error()
     tree = config.worktree  # the code under review; the ledger, saved reviews and config stay under config.root
     key = round_key(tree, args.target, config.default_branch)
     used = review_rounds_used(events, key)
@@ -731,8 +738,9 @@ def build_parser() -> argparse.ArgumentParser:
     wrapup.add_argument("--from-file", help="ingest a saved review instead of running claude (the thresholds still apply)")
     wrapup.add_argument("--json", action="store_true", help="print one JSON object on stdout; the human report goes to stderr")
     wrapup.add_argument("--auto", action="store_true",
-                        help="mark this wrap-up as an automatic one: its review is recorded as such and counts against "
-                             "wrapup_auto_max_per_day, and is refused (exit 4) once that many ran in the last 24 hours")
+                        help="mark this wrap-up as an automatic one: its review is recorded as such, and takes a slot of "
+                             "wrapup_auto_max_per_day when it starts (or uses the one the Stop hook took for it), so a review that "
+                             "fails still counts; refused (exit 4) once that many were started or asked for in the last 24 hours")
     wrapup.add_argument("--report-only", action="store_true",
                         help="measure and review nothing; report the open unmapped findings of the latest review run")
     wrapup.set_defaults(func=cmd_wrapup)

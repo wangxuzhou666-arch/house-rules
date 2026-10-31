@@ -103,6 +103,15 @@ def merge_base_with_head(root: Path, commit: str) -> str | None:
     return proc.stdout.strip() if proc.returncode == 0 else None
 
 
+def common_ancestor(root: Path, commits: list[str]) -> str | None:
+    """Full sha of the best common ancestor of all `commits` (one or more; a single commit is its own), or None when their histories
+    share nothing (rc=1). When two are equally good (after a criss-cross merge) git gives the one the order of its arguments favors,
+    so the commits go in sorted."""
+    assert commits, "no commit: git answers that with rc=1 too, which would read as histories that share nothing"
+    proc = run_git(["merge-base", "--octopus", *sorted(commits)], root, allowed_returncodes=(0, 1))
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
 def is_ancestor(root: Path, commit: str, tip: str) -> bool:
     """Whether `tip` descends from `commit` (a commit is its own ancestor). A commit this clone no longer has (pruned after a
     rebase) is not an ancestor of anything."""
