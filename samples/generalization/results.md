@@ -10,9 +10,11 @@ Level `high`, 3 runs per condition. PASS is decided in `with_rule` alone: a find
 | rel-2 | REL.2 | exempt | without_rule | 3/3 | 0/3 | 3/3 | 0/3 | 3/3 | - |
 | rel-3 | REL.3 | compliant | with_rule | 3/3 | 3/3 | 3/3 | 3/3 | 3/3 | FAIL |
 | rel-3 | REL.3 | compliant | without_rule | 3/3 | 0/3 | 3/3 | 0/3 | 3/3 | - |
+| rel-3b | REL.3 | compliant | with_rule | 3/3 | 2/3 | 3/3 | 0/3 | 3/3 | PASS |
+| rel-3b | REL.3 | compliant | without_rule | 3/3 | 0/3 | 3/3 | 0/3 | 3/3 | - |
 | rel-4 | REL.4 | compliant | with_rule | 3/3 | 1/3 | 3/3 | 0/3 | 3/3 | FAIL |
 | rel-4 | REL.4 | compliant | without_rule | 3/3 | 0/3 | 3/3 | 0/3 | 3/3 | - |
 
-PASS 0, FAIL 4, INCOMPLETE 0.
+PASS 1, FAIL 4, INCOMPLETE 0.
 
 Run slots that needed a repeat after a failed first attempt (both attempts are kept): 0.

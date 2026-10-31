@@ -1,0 +1,84 @@
+```json
+[
+  {
+    "file": "code/access_tail.py",
+    "line": 12,
+    "summary": "load_position only guards JSON syntax. Valid JSON with the wrong shape (a list, null, missing keys, a string or negative offset) is returned as-is and crashes read_new_lines.",
+    "failure_scenario": "The position file contains `[]`, `null`, `{}` or `{\"inode\":1,\"offset\":\"x\"}`. `position[\"offset\"]` raises KeyError or TypeError. `handle.seek(-5)` raises ValueError. The same bad file crashes every run, because nothing rewrites it before the crash. batch_log_reader.load_checkpoint already validates the shape, so the two modules are inconsistent.",
+    "category": "rel-3",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 13,
+    "summary": "A position file with invalid UTF-8 raises UnicodeDecodeError from read_text. Only FileNotFoundError and JSONDecodeError are handled, so there is no fallback to reading from the start.",
+    "failure_scenario": "A partial write or disk corruption leaves non-UTF-8 bytes in the position file. read_text raises UnicodeDecodeError, which is not a JSONDecodeError, so every later run crashes. batch_log_reader handles this case explicitly.",
+    "category": "rel-3",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 29,
+    "summary": "Rotation is detected only by an inode change or by size dropping below the saved offset. A copytruncate rotation keeps the inode, so if the new file has grown past the old offset by the next run, the reader seeks into the middle of new data.",
+    "failure_scenario": "The saved offset is 1000 and logrotate does copytruncate. By the next poll the file is 5000 bytes with the same inode. start stays 1000, so the first 1000 bytes of new data are lost and the read starts in the middle of a line. A reused inode after delete and recreate fails the same way.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 28,
+    "summary": "Inode mismatch and offset beyond file size both reset to 0 silently. No log line says that a rotation or truncation fallback happened.",
+    "failure_scenario": "The log is rotated or truncated and the reader quietly re-reads from the start. Downstream consumers see re-delivered or reordered lines, and no log line tells an operator why. The sibling load_position logs its own fallback.",
+    "category": "p0f-2",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 38,
+    "summary": "The checkpoint is a bare line count with no file identity. If the log is rotated and the new file is already longer than the old count, the first `done` lines are skipped silently. The `done > len(rows)` reset to 0 is also silent.",
+    "failure_scenario": "Yesterday's checkpoint says 500 lines. The log is rotated and the new file has 800 lines by the next run. Lines 1 to 500 of the new file are never returned. In the opposite case the checkpoint is reset to 0 and everything is re-read with no warning.",
+    "category": "p0f-2",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 33,
+    "summary": "read_new_lines reads the whole log with readlines() on every call, even when only a few new lines were appended. The line-number checkpoint forces this full read.",
+    "failure_scenario": "A multi-GB access log is polled every minute. Each call loads the entire file into memory and walks it again, giving O(file size) memory and I/O per poll. A byte-offset checkpoint, as in access_tail, would read only the new data.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 33,
+    "summary": "Text mode with universal newlines turns a lone '\\r' into '\\n'. A carriage return inside a line is therefore counted as a line break, and a partial last line ending in '\\r' looks complete.",
+    "failure_scenario": "A log line contains an embedded '\\r', or the writer has flushed 'abc\\r' of a CRLF line but not the '\\n' yet. The reader splits or accepts the partial line. The checkpoint counts these lines and later runs are misaligned with the file's real lines.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 42,
+    "summary": "The checkpoint is saved before the lines are returned to the caller, so delivery is at-most-once. If the caller fails while processing the batch, those lines are lost.",
+    "failure_scenario": "read_new_lines saves the checkpoint at len(rows) and returns 100 lines. The consumer crashes midway. On restart the checkpoint is already past those lines and they are never reprocessed. access_tail.read_new_lines has the same ordering.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 45,
+    "summary": "save_checkpoint and save_position derive the temp file with path.with_suffix('.part'). Two state files in one directory that share a stem collide on the same temp file, and with_suffix raises ValueError for a name with no stem.",
+    "failure_scenario": "State files `x.json` and `x.txt` both use `x.part`. Concurrent writers clobber each other's temp file, and os.replace can move the wrong content into place. The same pattern is copied in both modules.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 1,
+    "summary": "The new module duplicates access_tail.py almost line for line: the same atomic save helper, the same load-with-fallback structure, and the same read_new_lines name with a different state format. There are two parallel implementations of tail-with-checkpoint. Generic names such as `data`, `chunk` and `rows` are also left unqualified.",
+    "failure_scenario": "A fix to one module, such as shape validation or the fallback logging, has to be repeated in the other, and the two have already drifted. Callers importing both `read_new_lines` functions get different semantics under the same name.",
+    "category": "p2-4",
+    "severity": "should-fix"
+  }
+]
+```

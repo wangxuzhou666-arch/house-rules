@@ -1,0 +1,68 @@
+```json
+[
+  {
+    "file": "code/access_tail.py",
+    "line": 12,
+    "summary": "load_position only guards JSON syntax. Valid JSON with the wrong shape or type passes through and breaks `read_new_lines`.",
+    "failure_scenario": "The position file holds `[]`, `null`, `{}`, `{\"inode\": 5}` or `{\"offset\": \"12\"}`. `json.loads` succeeds, then `position[\"offset\"]` or `position[\"inode\"]` raises KeyError or TypeError. A negative offset such as `-5` makes `handle.seek` raise ValueError, and `start > info.st_size` does not catch it. A non-UTF-8 position file raises an uncaught UnicodeDecodeError. Every run fails until someone deletes the file by hand. `batch_log_reader.load_checkpoint` in the same change handles all of these cases.",
+    "category": "rel-3",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 28,
+    "summary": "`log_path.stat()` and `log_path.open()` are separate calls, so the inode saved can belong to a different file than the one read.",
+    "failure_scenario": "The log rotates between `stat()` and `open()`. The new file is read from the old file's offset (or from 0), and the position is saved with the old inode. The next run sees an inode mismatch, resets to 0, and re-emits every line of the new file as duplicates. Fix: open the file first and use `os.fstat(handle.fileno())`.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 36,
+    "summary": "The position is saved before the caller has processed the returned lines (at-most-once delivery). The rotation, truncation and inode-mismatch resets are silent.",
+    "failure_scenario": "The caller crashes or raises while handling the returned lines. The offset is already advanced, so those lines are lost permanently with no log. Separately, the `start > info.st_size` reset and the inode-mismatch fallback to 0 re-read the whole file without any log line. P0F.2 requires degrading with a log and a named fallback. A truncate-then-regrow past the old offset on the same inode is also not detected, which silently skips data. A cleaner design returns the new position and lets the caller commit it after processing.",
+    "category": "p0f-2",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 39,
+    "summary": "Checkpoint is a bare line count with no file identity. A rotated or replaced log is not detected unless it is shorter than the count.",
+    "failure_scenario": "The checkpoint says 100 lines done. The log is rotated and the new file already has 150 lines. `done > len(rows)` is false, so lines 0 to 99 of the new file are skipped and never processed, with no warning. The `done > len(rows)` reset to 0 is also silent, which violates P0F.2.",
+    "category": "p0f-2",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 42,
+    "summary": "The checkpoint is advanced to `len(rows)` before the lines are returned and processed, and the whole file is re-read into memory on every call.",
+    "failure_scenario": "The caller fails after `read_new_lines` returns. The checkpoint already covers those rows, so they are never retried and are lost. Separately, `readlines()` loads the entire log on every run even when only a few new lines were added, which is O(file size) memory and I/O per run. Seek or iterate with `itertools.islice` instead.",
+    "category": "rel-1",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 18,
+    "summary": "`except (ValueError, RecursionError)` is broad. `ValueError` also covers UnicodeDecodeError and other value errors, and the fallback is not named per type.",
+    "failure_scenario": "P0E.2 requires catching a specific exception type with its own action. `json.JSONDecodeError` is the intended type, but `ValueError` hides unrelated bugs that are also ValueErrors. The same fallback of 0 is repeated three times across handlers and branches.",
+    "category": "p0e-2",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 37,
+    "summary": "`splitlines()` splits on more than `\\n`: `\\r`, `\\x0b`, `\\x0c`, `\\x1c` to `\\x1e`, `\\x85`, `\\u2028` and `\\u2029`. The offset and line accounting counts only `\\n`.",
+    "failure_scenario": "An access-log line carries an attacker-controlled User-Agent or URL containing `\\u2028` or `\\x0b`. The one logical record is returned as two or more entries, which corrupts downstream parsing. Use `decode().split(\"\\n\")` after trimming the trailing empty element.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 28,
+    "summary": "`save_checkpoint` and `read_new_lines` copy `save_position` and `read_new_lines` from access_tail.py. The `.part` temp file name is derived by `with_suffix`.",
+    "failure_scenario": "The atomic write-then-replace code is duplicated across the two modules, so fixes must be applied twice. A missing `fsync` before `os.replace` is also duplicated. `with_suffix(\".part\")` collides when two state files differ only in extension (`a.json` and `a.txt` share `a.part`). If the state file is itself named `*.part`, the temp file and target are the same path. Share one helper that uses a unique temp name.",
+    "category": "unmapped",
+    "severity": "nice"
+  }
+]
+```

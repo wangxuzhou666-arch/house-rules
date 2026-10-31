@@ -1,0 +1,64 @@
+```json
+[
+  {
+    "file": "code/access_tail.py",
+    "line": 36,
+    "summary": "The position is saved before the caller has processed the returned lines, so delivery is at-most-once.",
+    "failure_scenario": "read_new_lines advances and persists the offset, then returns the lines. If the caller crashes, is killed, or raises while handling them, the next run starts after those lines and they are never processed. The same ordering is in batch_log_reader.py line 43. The save should happen after the caller acknowledges the lines, for example by returning the new position, or by committing in a separate step. Otherwise the at-most-once behaviour should be documented (REL.4-adjacent: the cap is counted before use succeeds)."
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 28,
+    "summary": "The inode comes from a stat() on the path, but the data is read from a separate open() of the path. Rotation between the two calls pairs the old inode with the new file's offset.",
+    "failure_scenario": "logrotate swaps the file between `log_path.stat()` and `log_path.open()`. The code reads the new file from the old file's saved offset, so it either skips the start of the new file or returns the wrong content. It then saves the old inode with the new file's length. On the next run the inode no longer matches the file, so start becomes 0 and every line is re-read and duplicated. Open the file first and use os.fstat(handle.fileno()) so the inode, size and data come from the same file."
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 12,
+    "summary": "load_position handles only FileNotFoundError and JSONDecodeError. A position file that is not valid UTF-8 raises an uncaught UnicodeDecodeError. Valid JSON with the wrong shape fails later with KeyError, TypeError or ValueError.",
+    "failure_scenario": "A half-written or corrupt position file containing invalid UTF-8 crashes read_new_lines instead of falling back to `fresh`. A file containing `[]`, `{}`, `{\"offset\": -5}` or `{\"offset\": \"x\"}` passes load_position. Then `position[\"offset\"]` raises KeyError, or `handle.seek(-5)` raises ValueError, or `start > info.st_size` raises TypeError, and the reader never recovers. The sibling load_checkpoint validates all of these cases, but load_position does not (P0F.2: degrade explicitly, P0E.2). Validate the shape and the int types, and log the fallback."
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 40,
+    "summary": "A line-count checkpoint cannot detect rotation or truncation unless the new file is shorter than the old count.",
+    "failure_scenario": "The checkpoint says 1000 lines done. The log rotates and the new file already has 1500 lines, which is common for a batch log. `done > len(rows)` is false, so the first 1000 lines of the new file are silently skipped. Replaced content with the same or a larger line count is mishandled in the same way. Track the inode, or a hash of the first line, together with the count so that replacement is detected."
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 37,
+    "summary": "`bytes.decode(...).splitlines()` splits on characters other than \\n, but the offset accounting and the line framing are \\n-only.",
+    "failure_scenario": "An access-log line contains a user-agent or path with \\x0b, \\x0c, \\x1c-\\x1e, U+2028/U+2029, or a \\x85 byte that errors=\"replace\" turns into U+FFFD. A lone \\r also splits. One record becomes several, or an attacker can inject fake log lines through attacker-controlled fields. Use `.decode(...).split(\"\\n\")` after dropping the trailing empty piece, and strip a trailing \"\\r\" if CRLF is expected."
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 37,
+    "summary": "The whole log file is loaded into memory with readlines() on every call, even though only the lines after the checkpoint are needed.",
+    "failure_scenario": "A multi-GB batch log is fully read and held as a list of strings just to skip `done` lines and return the tail. This causes memory spikes or an OOM, and the cost grows with file size on every run. Iterate the file, skip `done` lines with itertools.islice, and keep only the new rows. Better still, store a byte offset as access_tail.py does."
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 36,
+    "summary": "The file is opened in text mode with universal newlines, so lone \\r and \\r\\n are translated to \\n. Line counting and the trailing-partial-line check then run on translated data.",
+    "failure_scenario": "A log line ending in \"\\r\\n\" is counted correctly, but a record containing a stray \\r is counted as two rows. A chunk ending in \"\\r\" that is flushed before its \"\\n\" is treated as a complete row. The row count in the checkpoint then drifts from the writer's idea of a record. Open with newline=\"\\n\" (or newline=\"\") so that only \\n delimits records."
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 18,
+    "summary": "Generic names make the code harder to read and review: `data` in batch_log_reader.py, and `info` and `chunk` in access_tail.py.",
+    "failure_scenario": "`data`, `info` and `chunk` do not say what they hold: the parsed checkpoint JSON, the stat result of the log, or the unread bytes. This violates P2.4 (qualify generic names). Suggested names are `checkpoint_json`, `log_stat` and `unread_bytes`."
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 20,
+    "summary": "The atomic-write helper and the read-new-lines flow are duplicated across the two modules, which also validate input differently.",
+    "failure_scenario": "save_position and save_checkpoint are the same write-.part-then-os.replace logic, and the two read_new_lines functions share a name and a contract. A fix to one copy (fsync before replace, cleanup of a stale .part file, input validation) will not reach the other. The load_* functions have already diverged: batch validates shape and UTF-8, access_tail does not. Extract a shared atomic JSON write helper and a shared validated loader."
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 21,
+    "summary": "The atomic save omits fsync and does not clean up the .part file on failure. `with_suffix` also replaces any existing suffix on the position path.",
+    "failure_scenario": "After a power loss, os.replace can leave a zero-length or partial position file on some filesystems because the data was never fsynced. That file then hits the unhandled-corruption paths in load_position. If write_text fails (disk full), a stale .part file is left behind. A position path named `pos.part`, or two paths that differ only in their suffix, would collide on the same .part temp file. The same applies to save_checkpoint at batch_log_reader.py line 30."
+  }
+]
+```
