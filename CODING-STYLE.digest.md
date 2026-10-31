@@ -40,9 +40,9 @@ R.7 | Prove gates with fail/pass, reversal and per-rule mutation checks; isolate
 ## Labeling
 
 When you report findings as a JSON array, every finding object MUST carry two keys besides `file`, `line`, `summary` and `failure_scenario`:
-- `"category"`: the ID of the violated clause in kebab-case (`P0E.6` -> `p0e-6`), or `"unmapped"` if no clause truly matches. Prefer `unmapped` over stretching a clause to fit.
+- `"category"`: the ID of the violated clause in kebab-case (`P0E.1` -> `p0e-1`), or `"unmapped"` if no clause truly matches. Prefer `unmapped` over stretching a clause to fit.
 - `"severity"`: `blocker`, `should-fix` or `nice`, the one listed for that clause under Violations.
 
-Example: `{"file": "src/a.py", "line": 12, "summary": "...", "failure_scenario": "...", "category": "p0e-2", "severity": "blocker"}`
+Example: `{"file": "src/a.py", "line": 12, "summary": "...", "failure_scenario": "...", "category": "p0e-1", "severity": "blocker"}`
 
 File one finding per defect. Mention other matching IDs in the summary instead of filing duplicates.

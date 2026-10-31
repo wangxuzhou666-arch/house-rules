@@ -244,10 +244,10 @@ class DigestContentTest(CompileCase):
             "R.2 | Never rubber-stamp a clean diff",
         ])
 
-    def test_labeling_section_is_the_static_instruction(self) -> None:
+    def test_labeling_section_carries_the_fixed_instruction(self) -> None:
         self.cli_ok("compile")
         labeling = self.digest().split("## Labeling\n", 1)[1]
-        for phrase in ("kebab-case", "`P0E.6` -> `p0e-6`", "`unmapped`", "Prefer `unmapped` over stretching a clause",
+        for phrase in ("kebab-case", "`unmapped`", "Prefer `unmapped` over stretching a clause",
                        "one finding per defect", "instead of filing duplicates"):
             self.assertIn(phrase.lower(), labeling.lower())
 
@@ -269,7 +269,7 @@ class DigestContentTest(CompileCase):
         self.assertEqual(set(example), {"file", "line", "summary", "failure_scenario", "category", "severity"})
         self.cli_ok("ingest-code-review", "--source", "l1", "--run", "R1", stdin=json.dumps([example]))
         (event,) = self.events()
-        self.assertEqual((event["rule_id"], event["rule_id_source"], event["severity"]), ("P0E.2", "model", "blocker"))
+        self.assertEqual((event["rule_id"], event["rule_id_source"], event["severity"]), ("P0E.1", "model", "blocker"))
 
     def test_a_clause_tag_overrides_the_family_and_a_tagged_clause_is_a_violation(self) -> None:
         self.write_rules("1. **[P3.1]** Style nit (blocker)\n2. **[R.1]** Guidance\n3. **[R.2]** Tagged guidance (nice)\n")
@@ -344,6 +344,90 @@ class DigestContentTest(CompileCase):
         size = len((self.repo / DIGEST_NAME).read_bytes())
         self.assertGreater(size, len(self.digest()))  # multi-byte characters
         self.assertIn(f"digest {DIGEST_NAME}: {size} bytes", out)
+
+
+class LabelingExampleTest(CompileCase):
+    """The Labeling section teaches the kebab form and the finding shape with one live clause of the rules being compiled:
+    the first one listed under Violations, so an ID the rules do not have (or no longer have) is never taught."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.configure()
+
+    def labeling(self) -> str:
+        return self.digest().split("## Labeling\n", 1)[1]
+
+    def example(self) -> dict:
+        (line,) = [line for line in self.labeling().splitlines() if line.startswith("Example: ")]
+        return json.loads(line.removeprefix("Example: ").strip("`"))
+
+    def test_the_kebab_form_and_the_example_come_from_the_first_violation(self) -> None:
+        self.write_rules("1. **[ABC.7]** Name the thing. (should-fix)\n2. **[ABC.8]** Keep it flat. (blocker)\n")
+        self.cli_ok("compile")
+        self.assertEqual(self.digest_lines("Violations")[0], "ABC.7 | should-fix | Name the thing")
+        self.assertIn("kebab-case (`ABC.7` -> `abc-7`), or", self.labeling())
+        self.assertIn('"category": "abc-7", "severity": "should-fix"}`', self.labeling())
+        self.assertNotIn("abc-8", self.labeling())
+        self.assertNotIn("p0e", self.digest().lower())
+
+    def test_the_severity_is_the_one_listed_for_the_clause_even_when_it_comes_from_the_family_table(self) -> None:
+        self.write_rules("1. **[NIT.1]** Name the thing.\n2. **[BUG.1]** Keep it flat.\n\n"
+                         "| family | severity |\n|---|---|\n| NIT | nice |\n| BUG | blocker |\n")
+        self.cli_ok("compile")
+        self.assertEqual(self.digest_lines("Violations")[0], "NIT.1 | nice | Name the thing")
+        self.assertIn('"category": "nit-1", "severity": "nice"}`', self.labeling())
+
+    def test_the_example_is_a_finding_that_ingest_labels_with_the_clause_it_names(self) -> None:
+        self.write_rules("1. **[ABC.7]** Name the thing. (should-fix)\n2. **[ABC.8]** Keep it flat. (blocker)\n")
+        self.cli_ok("compile")
+        self.cli_ok("ingest-code-review", "--source", "l1", "--run", "R1", stdin=json.dumps([self.example()]))
+        (event,) = self.events()
+        self.assertEqual((event["rule_id"], event["rule_id_source"], event["severity"]), ("ABC.7", "model", "should-fix"))
+
+    def test_a_retired_clause_and_a_reviewer_rule_listed_first_are_never_the_example(self) -> None:
+        self.write_rules("<!-- house-rules-retired: P0E.6 -->\n1. **[R.1]** Read the code around the change first.\n"
+                         "<!-- house-rules-retired: P0E.2 -->\n2. **[ABC.7]** Name the thing. (should-fix)\n3. **[ABC.8]** Keep it flat. (blocker)\n")
+        self.cli_ok("compile")
+        self.assertEqual(self.digest_lines("Reviewer rules"), ["R.1 | Read the code around the change first"])
+        self.assertIn("kebab-case (`ABC.7` -> `abc-7`), or", self.labeling())
+        self.assertEqual(self.example()["category"], "abc-7")
+        self.assertNotIn("r-1", self.labeling())
+        self.assertNotIn("p0e", self.digest().lower())
+
+    def test_the_example_follows_the_rules_file_order_across_layers_not_the_alphabet(self) -> None:
+        self.write_rules("1. **[XYZ.1]** Keep it flat. (blocker)\n", name="shared.md")
+        self.write_rules("1. **[ABC.7]** Name the thing. (should-fix)\n")
+        self.write_config(rules_files=["shared.md", "rules.md"])
+        self.cli_ok("compile")
+        self.assertEqual(self.digest_lines("Violations")[0], "XYZ.1 | blocker | Keep it flat")
+        self.assertEqual(self.example()["category"], "xyz-1")
+        self.assertEqual(self.example()["severity"], "blocker")
+
+    def test_without_any_violation_no_clause_is_taught_and_the_example_is_an_unmapped_finding(self) -> None:
+        self.write_rules("1. **[P1.1]** One\n2. **[R.1]** Two\n")
+        code, _, err = self.cli("compile")
+        self.assertEqual(code, 0)
+        self.assertIn("no clause has a severity", err)
+        self.assertEqual(self.digest_lines("Violations"), ["(none)"])
+        labeling = self.labeling()
+        self.assertIn('in kebab-case, or `"unmapped"` if no clause truly matches', labeling)
+        self.assertNotIn("->", labeling)
+        self.assertIn('"category": "unmapped", "severity": "should-fix"}`', labeling)
+        for clause_text in ("p1-1", "r-1", "P1.1", "R.1", "p0e"):
+            self.assertNotIn(clause_text, labeling)
+        self.cli_ok("ingest-code-review", "--source", "l1", "--run", "R1", stdin=json.dumps([self.example()]))
+        (event,) = self.events()
+        self.assertEqual((event["rule_id"], event["severity"]), ("unmapped", "should-fix"))
+
+    def test_an_inject_target_that_asks_for_the_labeling_section_gets_the_same_example(self) -> None:
+        self.write_rules("1. **[ABC.7]** Name the thing. (should-fix)\n")
+        self.configure(inject_targets=[{"path": "CLAUDE.md", "sections": ["labeling"]}])
+        self.write_target()
+        self.cli_ok("compile")
+        block = (self.repo / "CLAUDE.md").read_text(encoding="utf-8")
+        self.assertIn("kebab-case (`ABC.7` -> `abc-7`), or", block)
+        self.assertIn('"category": "abc-7", "severity": "should-fix"}`', block)
+        self.assertNotIn("p0e", block.lower())
 
 
 class HeaderTest(CompileCase):

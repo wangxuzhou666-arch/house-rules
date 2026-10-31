@@ -12,7 +12,8 @@ from pathlib import Path
 
 from .config import INJECT_SECTIONS, Config, rules_name
 from .errors import HouseRulesError
-from .rules import Clause, Rules
+from .ledger import UNMAPPED
+from .rules import Clause, Rules, kebab_key
 from .sources import DiskReader, FileReader
 
 BEGIN_MARKER = "<!-- style-digest:begin -->"
@@ -29,14 +30,15 @@ _BRACKET_CLOSERS = ")]\uff09\u3011\u300d"
 _TRAILING_JUNK_RE = re.compile(r"[\s:\uff1a]+$")
 _BACKTICK_RUN_RE = re.compile(r"`+")
 
-LABELING = """\
+# `{kebab_note}`, `{category}` and `{severity}` come from one clause of the rules being compiled (see `render_labeling`).
+LABELING_TEMPLATE = """\
 ## Labeling
 
 When you report findings as a JSON array, every finding object MUST carry two keys besides `file`, `line`, `summary` and `failure_scenario`:
-- `"category"`: the ID of the violated clause in kebab-case (`P0E.6` -> `p0e-6`), or `"unmapped"` if no clause truly matches. Prefer `unmapped` over stretching a clause to fit.
+- `"category"`: the ID of the violated clause in kebab-case{kebab_note}, or `"unmapped"` if no clause truly matches. Prefer `unmapped` over stretching a clause to fit.
 - `"severity"`: `blocker`, `should-fix` or `nice`, the one listed for that clause under Violations.
 
-Example: `{"file": "src/a.py", "line": 12, "summary": "...", "failure_scenario": "...", "category": "p0e-2", "severity": "blocker"}`
+Example: `{{"file": "src/a.py", "line": 12, "summary": "...", "failure_scenario": "...", "category": "{category}", "severity": "{severity}"}}`
 
 File one finding per defect. Mention other matching IDs in the summary instead of filing duplicates.
 """
@@ -90,10 +92,23 @@ def short_rule(clause: Clause, max_chars: int) -> str:
     return text if len(text) <= max_chars else _cap(text, max_chars)
 
 
+def render_labeling(first_violation: tuple[str, str] | None) -> str:
+    """The Labeling section, its examples taken from `first_violation`: the id and severity of the first clause listed under
+    Violations. A retired clause (the rules file keeps only a marker comment) and a Reviewer rule are not listed there,
+    so neither is ever the one taught. With no such clause the example is an `unmapped` finding with the severity
+    `ingest-code-review` gives one."""
+    if first_violation is None:
+        return LABELING_TEMPLATE.format(kebab_note="", category=UNMAPPED, severity="should-fix")
+    clause_id, severity = first_violation
+    kebab = kebab_key(clause_id)
+    return LABELING_TEMPLATE.format(kebab_note=f" (`{clause_id}` -> `{kebab}`)", category=kebab, severity=severity)
+
+
 def render_sections(rules: Rules, max_chars: int) -> dict[str, str]:
     """The digest's three sections by name (keys of config.INJECT_SECTIONS), each ending in a newline, in rules-file order."""
     violations: list[str] = []
     reviewer: list[str] = []
+    first_violation: tuple[str, str] | None = None
     for clause in rules.clauses.values():
         rule = short_rule(clause, max_chars)
         if not rule:
@@ -103,10 +118,11 @@ def render_sections(rules: Rules, max_chars: int) -> dict[str, str]:
             reviewer.append(f"{clause.id} | {rule}")
         else:
             violations.append(f"{clause.id} | {severity} | {rule}")
+            first_violation = first_violation or (clause.id, severity)
     return {
         "violations": "\n".join(["## Violations", *(violations or ["(none)"])]) + "\n",
         "reviewer": "\n".join(["## Reviewer rules", *(reviewer or ["(none)"])]) + "\n",
-        "labeling": LABELING,
+        "labeling": render_labeling(first_violation),
     }
 
 

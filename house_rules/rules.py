@@ -190,7 +190,7 @@ def parse_severity_table(text: str, name: str) -> dict[str, tuple[str, str]]:
 
 # ---- registry -------------------------------------------------------------------------------------------------
 
-def _kebab_key(text: str) -> str:
+def kebab_key(text: str) -> str:
     return re.sub(r"[.\s_]+", "-", text.strip().lower())
 
 
@@ -225,7 +225,7 @@ class Rules:
 
     def from_kebab(self, text: str) -> str | None:
         """`p0e-6` -> `P0E.6`; None when it names no known clause."""
-        return self.id_by_kebab.get(_kebab_key(text))
+        return self.id_by_kebab.get(kebab_key(text))
 
     @cached_property
     def _has_severity_data(self) -> bool:
@@ -253,7 +253,7 @@ class Rules:
         match = self._mention_re.search(text)
         if match is None:
             return None
-        return self.id_by_kebab[_kebab_key(match.group())], match.group()
+        return self.id_by_kebab[kebab_key(match.group())], match.group()
 
     def resolve_reported(self, raw: str) -> tuple[str, str | None]:
         """(rule_id, rule_id_source) for an id supplied in a report. Unknown clause ids are rejected, never coerced."""
@@ -331,7 +331,7 @@ def load_rules(config: Config, reader: FileReader = DiskReader(), *, skip_missin
 
     id_by_kebab: dict[str, str] = {}
     for clause_id in clauses:
-        key = _kebab_key(clause_id)
+        key = kebab_key(clause_id)
         if key in id_by_kebab:
             raise HouseRulesError(f"clauses {id_by_kebab[key]} and {clause_id} collide when normalized to {key!r}")
         id_by_kebab[key] = clause_id
