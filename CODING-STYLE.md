@@ -94,7 +94,7 @@ These clauses are judgment rules for review-ratchet's review execution and findi
 
 ## REL · Preserve usable state and persistent identity
 
-These judgment rules are adopted in this repository only. They may generalize, but this adoption does not synchronize them into cross-project rules. Both have explicit `should-fix` severity; neither adds a mechanical gate.
+These judgment rules are adopted in this repository only. They may generalize, but this adoption does not synchronize them into cross-project rules. All three have explicit `should-fix` severity; none adds a mechanical gate.
 
 1. **[REL.1]** When replacing a usable artifact, preserve its only usable copy until the replacement is prepared and validated; a failed replacement must leave or restore a usable state. (should-fix) <!-- digest: Keep usable state until replacement is ready and validated; retain or restore it on failure; disposable rebuildable temporary artifacts are exempt -->
    This applies to installed tools, configuration and deployment artifacts with existing usable state. Disposable temporary artifacts that can be discarded and rebuilt are exempt. Choose a replacement and recovery strategy appropriate to the artifact; this rule does not assume a single rename makes a multi-file operation atomic.
@@ -107,6 +107,10 @@ These judgment rules are adopted in this repository only. They may generalize, b
    **Why added (proposal D, accepted 2026-10-28):** An ID-format change can create duplicate records and break existing links even when both formats look valid. This is a persistence contract, distinct from naming style and from PRJ.1's distinction between replay and new execution.
    **Finding source:** `review-ratchet:l1:r1:r1-5`.
    **Examples:** Violates: replacing stored `r1-001` with `r1-1` so replay inserts a second record. Complies: compatible lookup or a migration that preserves the object's identity and references, or changing only its displayed label.
+
+3. **[REL.3]** Don't guard only the syntax of a state file you read back: a wrong shape must take the same fallback, or the same named error, as a parse failure. (should-fix) <!-- digest: Don't guard only a state file's syntax: a wrong shape takes the same fallback or named error as a parse failure, else one bad file fails every run -->
+   Scope: a file a program wrote on an earlier run and reads on a later one (state, cache, saved records), which a person, an older version or a crash may have left in another shape. Input from the host or the caller is outside this rule.
+   Violates: `except ValueError` around `json.loads`, then `.items()` on a list. Complies: an `isinstance` check that takes the parse-failure path, so the next save repairs the file.
 
 ## R · Reviewer conduct
 
@@ -121,7 +125,7 @@ These judgment rules are adopted in this repository only. They may generalize, b
    | P1, P2 | should-fix |
    | P3 | nice |
 
-5. **[R.5]** Tells of generated code, reported under the matching P clause: one try around everything, null checks on values that cannot be null, one-implementation base classes, docstrings that repeat the name, "just in case" defaults, boilerplate foreign to this repo. <!-- digest: Generated-code tells, report under the P clause: one big try, needless null checks, single-implementation base class, echo docstring, "just in case" default -->
+<!-- ratchet-retired: R.5 -->
 6. **[R.6]** Read the surrounding code before judging a change. Something wrong in isolation can be right given the system's invariants.
 7. **[R.7]** A new gate or rule needs a failing example that proves it fires. <!-- digest: Prove gates with fail/pass, reversal and per-rule mutation checks; isolate unrelated probe effects; explicitly authorize real integration effects --> <!-- ADJUST: drop this clause if you do not write your own lint gates. -->
    A gate that runs green proves nothing, because a gate that always returns green also runs green. The proof is to build what it should catch and watch it turn red. Give every rule at least one positive example (must fail) and one negative (must pass), starting with the exceptions the rule states explicitly, since those are what a later tightening breaks first. Reverting to the old behavior must turn it green again, so the red is caused by the new part. Pin each positive to the specific rule that fired. With several rules, disable them one at a time and confirm only that rule's example goes green. Commit the tests; a one-off manual run proves nothing later.

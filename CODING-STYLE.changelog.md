@@ -86,3 +86,56 @@ These five changes were accepted on 2026-10-28 and recorded by hand in `CODING-S
 - Why: Effective validation needs both evidence that the check works and a boundary around its side effects. This extends the existing testing guidance without adding a code-violation severity or a separate rule.
 - Evidence: `review-ratchet:l1:r1:r1-8` — `ratchet/hooks.py:295` — `probe_hook` runs the user's real hook script during `ratchet init`, and the sandbox only covers the git index.
 - Decision: accept (proposal E, 2026-10-28). Backfilled on 2026-10-29 from the clause text; no decision receipt exists.
+
+## Revision 1 — 2026-10-30 (batch 16036bf116d3700c8b95050ff3fa7224e90da84e0bc11d5faaa3c04df2ab31ad)
+
+### add REL.3
+
+- Before: (new clause)
+- After:
+  ```markdown
+  3. **[REL.3]** Don't guard only the syntax of a state file you read back: a wrong shape must take the same fallback, or the same named error, as a parse failure. (should-fix) <!-- digest: Don't guard only a state file's syntax: a wrong shape takes the same fallback or named error as a parse failure, else one bad file fails every run -->
+     Scope: a file a program wrote on an earlier run and reads on a later one (state, cache, saved records), which a person, an older version or a crash may have left in another shape. Input from the host or the caller is outside this rule.
+     Violates: `except ValueError` around `json.loads`, then `.items()` on a list. Complies: an `isinstance` check that takes the parse-failure path, so the next save repairs the file.
+  ```
+- Why: No clause says that a syntax-only guard on a file read back is incomplete: P0F.1 and P0F.2 name the boundary and the explicit fallback, and the reviewer left this finding unmapped. Two sibling readers already check shape (PendingCommit.from_line, read_start_points); this one missed it, and unlike a bad input a bad state file fails every later run.
+- Evidence: `review-ratchet:l1:r3:r3-2` — `ratchet/auto_stop.py:198` — A damaged `announced.json` that is valid JSON but the wrong shape makes `_read_announced` raise on every refusal, and nothing ever rewrites the file to fix it.
+  ```
+          log_failure(f"auto stop: {path} is damaged, so its refusals count as new: {exc}")
+          return {}
+      cutoff = datetime.now(timezone.utc) - ANNOUNCED_KEEP
+      return {key: when for key, when in told.items() if datetime.fromisoformat(when) >= cutoff}
+
+
+  def _announced_key(due: Due, refusal: Refusal) -> str:
+  ```
+- Decision: accept by Colar — "接受 (Recommended)"
+
+### retire R.5
+
+- Before:
+  ```markdown
+  5. **[R.5]** Tells of generated code, reported under the matching P clause: one try around everything, null checks on values that cannot be null, one-implementation base classes, docstrings that repeat the name, "just in case" defaults, boilerplate foreign to this repo. <!-- digest: Generated-code tells, report under the P clause: one big try, needless null checks, single-implementation base class, echo docstring, "just in case" default -->
+  ```
+- After: (retired)
+- Why: Pays for REL.3 (a1), which cannot fit alone: the digest has 9 bytes left and REL.3 needs 168. Each of the five tells in R.5's digest line maps onto a digest line of its own (P0E.1, P0F.3, P0F.4, P2.1, P3.1), so retiring it frees 163 bytes in one decision, where five drafted shortening rewrites (PRJ.1, PRJ.2, REL.1, REL.2, R.7) free only 106 bytes in total. Lost: the generated-code framing, the 'boilerplate foreign to this repo' tell (full text only, never in the digest) and the 'report under the P clause' routing, which the Labeling section already gives. r3-7 and r3-8 get no clause now; they stay open and are cited only because every change must cite a finding.
+- Evidence: `review-ratchet:l1:r3:r3-7` — `ratchet/auto.py:128` — `hook.log` is append-only with no size cap or rotation, while `prune()` cleans only `pending/` and `claimed/`.
+  ```
+      state.mkdir(mode=0o700, exist_ok=True)
+      if subdir is None:
+          return state
+      directory = state / subdir
+      directory.mkdir(mode=0o700, exist_ok=True)
+      return directory
+  ```
+- Evidence: `review-ratchet:l1:r3:r3-8` — `ratchet/auto_stop.py:218` — The read-modify-write of `announced.json` has no lock. The scratch name is per-process, but two concurrent Stops can both read the old file and overwrite each other.
+  ```
+      if fresh:
+          now = utc_timestamp()
+          told.update({_announced_key(due, refusal): now for due, refusal in fresh})
+          scratch = path.with_name(f"{path.name}.{os.getpid()}")
+          scratch.write_text(json.dumps(told, indent=2) + "\n", encoding="utf-8")
+          scratch.replace(path)  # a reader never sees half a file
+      return fresh
+  ```
+- Decision: accept by Colar — "接受退役 (Recommended)"
