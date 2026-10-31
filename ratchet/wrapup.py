@@ -33,8 +33,10 @@ READ_CHUNK_BYTES = 1 << 20
 SUMMARY_WIDTH = 72
 CODE_SNIPPET_SOURCES = ("review", "worktree")  # the snippet_sources whose snippet `snippet_around` cut; `add` records any text at all
 
-# Statuses a wrap-up ends in. "dry-run" and "reported" are the two that review nothing.
+# Statuses a wrap-up ends in. "dry-run" and "reported" are the two that review nothing, "capped" a full round cap and
+# "daily_capped" the daily cap on automatic reviews: both refuse before claude runs.
 SKIPPED, REVIEWED, CAPPED, DRY_RUN, REPORTED = "skipped", "reviewed", "capped", "dry-run", "reported"
+DAILY_CAPPED = "daily_capped"
 
 
 @dataclass(frozen=True)
@@ -301,10 +303,11 @@ def wrapup_cap_message(message: str) -> str:
     return f"{message} ratchet wrapup has no --over-cap: `ratchet review --over-cap` runs one more round, recorded"
 
 
-def foreseen_refusal(config: Config, events: list[Event], *, from_file: bool) -> Refusal | None:
+def foreseen_refusal(config: Config, events: list[Event], *, from_file: bool, automatic: bool) -> Refusal | None:
     """Why the review this wrap-up would run is refused, worded as the real run words it. A wrap-up reviews the current diff
-    (no --target), is never a replay (it passes no --run) and has no --over-cap."""
-    refusal = review_refusal(config, events, target=None, from_file=from_file, over_cap_allowed=False, replayed=False)
+    (no --target), is never a replay (it passes no --run) and has no --over-cap. `automatic` is `--auto`: that review is counted
+    by the daily cap."""
+    refusal = review_refusal(config, events, target=None, from_file=from_file, automatic=automatic, over_cap_allowed=False, replayed=False)
     if refusal is not None and refusal.kind == REFUSE_ROUND_CAP:
         return replace(refusal, message=wrapup_cap_message(refusal.message))
     return refusal
@@ -324,11 +327,12 @@ class WrapupPlan:
 
 
 def plan_wrapup(config: Config, events: list[Event], *, explicit_base: str | None = None, from_file: bool = False,
-                foresee_refusal: bool = False) -> WrapupPlan:
+                automatic: bool = False, foresee_refusal: bool = False) -> WrapupPlan:
     """Measure the work in `config.worktree` and decide whether a wrap-up would review it. Reads git and the ledger's `events` (and
     with `foresee_refusal` the rules files and the PATH); writes nothing and runs no review.
 
-    `explicit_base` is `--base`. `foresee_refusal` is for a caller that does not run the review at once (`--dry-run`, the Stop
+    `explicit_base` is `--base`. `automatic` is `--auto`: the review would count against the daily cap, which `foresee_refusal`
+    then looks at too. `foresee_refusal` is for a caller that does not run the review at once (`--dry-run`, the Stop
     hook): a real run meets the refusal in the review itself, so it does not look twice.
     """
     thresholds = config_thresholds(config)
@@ -339,7 +343,7 @@ def plan_wrapup(config: Config, events: list[Event], *, explicit_base: str | Non
     hits = thresholds_reached(changes, thresholds)
     if not hits:
         return WrapupPlan(thresholds, base, changes, open_unmapped, due=False, reason=skip_reason(changes, thresholds), would_refuse=None)
-    refusal = foreseen_refusal(config, events, from_file=from_file) if foresee_refusal else None
+    refusal = foreseen_refusal(config, events, from_file=from_file, automatic=automatic) if foresee_refusal else None
     return WrapupPlan(thresholds, base, changes, open_unmapped, due=True, reason="; ".join(hits), would_refuse=refusal)
 
 

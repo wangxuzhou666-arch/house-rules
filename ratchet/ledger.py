@@ -2,8 +2,8 @@
 
 Four event kinds share one JSON-lines file: `finding` (something was flagged), `outcome` (what became of it),
 `gate_pass` (an automated gate passed over these files) and `review_run` (one review round of a change happened; it
-feeds the round cap, records which critic ran and on what HEAD and working tree, and never touches a finding). Current state = fold of
-the events in file order.
+feeds the round cap and the daily cap on automatic reviews, records which critic ran and on what HEAD and working tree, and
+never touches a finding). Current state = fold of the events in file order.
 Validation mirrors schemas/finding.v1.schema.json; tests/test_schema.py keeps the two in step.
 """
 from __future__ import annotations
@@ -155,8 +155,11 @@ _REVIEW_RUN_FIELDS: dict[str, Check] = {
     # The id of a git tree holding the worktree as the review found it, uncommitted and untracked files included. Absent
     # when the review ran before trees were recorded, or when taking one failed.
     "tree": _matches(_TREE_RE),
+    # What started the review, when it was not a person: "auto" is `ratchet wrapup --auto`, the reviews the daily cap counts. Absent on
+    # a review a person started. Structural only, like `level`, so a later trigger never makes a ledger unreadable.
+    "trigger": _nonempty_str,
 }
-_REVIEW_RUN_OPTIONAL = frozenset({"reviewer", "reviewer_version", "level", "head", "version_changed", "tree"})
+_REVIEW_RUN_OPTIONAL = frozenset({"reviewer", "reviewer_version", "level", "head", "version_changed", "tree", "trigger"})
 _FIELDS_BY_KIND: dict[str, tuple[dict[str, Check], frozenset[str]]] = {
     "finding": (_FINDING_FIELDS, _FINDING_OPTIONAL),
     "outcome": (_OUTCOME_FIELDS, frozenset()),

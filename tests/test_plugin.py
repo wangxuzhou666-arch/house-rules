@@ -183,7 +183,7 @@ class SkillTest(unittest.TestCase):
     def test_wrapup_measures_first_and_asks_at_most_one_two_part_question(self) -> None:
         text = self.skills()["wrapup"]
         self.assertIn("ratchet wrapup --json", text)
-        for status in ("skipped", "capped", "reviewed"):
+        for status in ("skipped", "capped", "daily_capped", "reviewed"):
             self.assertIn(f"`{status}`", text)
         self.assertEqual(text.count("AskUserQuestion call"), 1)
         self.assertIn("ONE AskUserQuestion call with two questions", text)
@@ -196,10 +196,23 @@ class SkillTest(unittest.TestCase):
         text = self.skills()["wrapup"]
         self.assertIn("auto <worktree>", frontmatter(text)["argument-hint"])
         self.assertIn("auto <worktree>", frontmatter(text)["description"])
-        self.assertIn("ratchet wrapup --repo <worktree> --json", text)
+        self.assertIn("ratchet wrapup --repo <worktree> --json --auto", text)  # the review is marked automatic: the daily cap counts it
         self.assertIn("`run_in_background`", text)
         self.assertIn("completion notice", text)
         self.assertIn("one sentence and no question", text)
+
+    def test_wrapup_says_a_daily_cap_in_one_sentence_and_asks_nothing(self) -> None:
+        text = self.skills()["wrapup"]
+        [bullet] = [line for line in text.splitlines() if line.lstrip().startswith("- `daily_capped`")]
+        self.assertIn("exit code 4", bullet)
+        self.assertIn("One sentence", bullet)
+        self.assertIn("No question", bullet)
+        self.assertIn("`/review-ratchet:wrapup` without `auto`", bullet)  # the way to review the work now, which the cap does not touch
+        automatic = next(line for line in text.splitlines() if line.startswith("**Automatic mode**"))
+        self.assertIn("`skipped`, `capped`, `daily_capped` and an error get one sentence and no question", automatic)
+        typed = next(line for line in text.splitlines() if line.startswith("1. "))  # step 1: what a wrap-up someone typed runs
+        self.assertIn("ratchet wrapup --json", typed)
+        self.assertNotIn("--auto", typed)  # it is no automatic one: the cap neither counts it nor refuses it
 
     def test_wrapup_records_only_false_positive_with_one_direct_label_command(self) -> None:
         text = self.skills()["wrapup"]

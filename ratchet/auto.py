@@ -3,7 +3,7 @@
 The git post-commit hook runs `ratchet auto note` after a commit. When the commit was made inside a Claude Code session (the
 session id is in the environment) and the repo asked for the automatic wrap-up (`wrapup_auto` in its config), `note_commit`
 appends one line to `pending/<session id>.jsonl`. When the turn ends, the plugin's Stop hook (`ratchet auto stop`) takes that file
-and judges the work.
+and judges the work; the commits of a worktree it could not judge it puts back (`append_pending`).
 
 The files live in a per-machine state directory, never in a repo: a line names a worktree path, a commit and a session, which are
 private to this machine and must not reach a file a repo tracks. The note runs after every commit in a session, so it checks the
@@ -138,6 +138,15 @@ def _append(path: Path, text: str) -> None:
         os.write(descriptor, text.encode("utf-8"))
     finally:
         os.close(descriptor)
+
+
+def append_pending(session: str, commits: list[PendingCommit]) -> None:
+    """Add `commits` to the end of the session's pending file in one write, as a note is, so a note made at the same moment stays whole.
+    The Stop hook puts back the commits of a worktree it could not judge this way. A note made since it claimed the file is in the new
+    one already and these follow it, so the file is then not in the order the commits were made. `commits` is never empty: the write
+    would still make the file, and a pending file with nothing in it starts the Stop hook for nothing."""
+    assert commits, "nothing to add: the write would still make the pending file"
+    _append(pending_path(session), "".join(commit.to_line() for commit in commits))
 
 
 def log_failure(message: str) -> None:

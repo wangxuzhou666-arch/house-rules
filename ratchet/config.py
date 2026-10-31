@@ -25,6 +25,8 @@ DEFAULT_WRAPUP_MIN_FILES = 5
 # The automatic wrap-up review after commits made in a Claude Code session costs a /code-review each time, so a config
 # that does not say yes (an older one, say) leaves it off. `ratchet init` asks, and offers yes.
 DEFAULT_WRAPUP_AUTO = False
+# At most this many automatic reviews in any 24 hours, in one repo (all its worktrees together). A manual wrap-up is not counted.
+DEFAULT_WRAPUP_AUTO_MAX_PER_DAY = 2
 # The sections of the digest an inject target can ask for, in the order they are written.
 INJECT_SECTIONS = ("violations", "reviewer", "labeling")
 
@@ -33,7 +35,7 @@ _KNOWN_KEYS = frozenset({
     "repo_slug", "ledger", "rules_files", "tool_rule_map", "scenarios", "skips_file",
     "label_page_threshold", "clause_id_pattern", "legacy_unmapped_alias",
     "digest", "digest_max_chars", "digest_max_bytes", "inject_targets", "bin", "max_review_rounds", "default_branch",
-    "wrapup_auto",
+    "wrapup_auto", "wrapup_auto_max_per_day",
     "wrapup_min_changed_lines", "wrapup_min_files",
 })
 
@@ -69,6 +71,7 @@ class Config:
     wrapup_min_changed_lines: int = DEFAULT_WRAPUP_MIN_CHANGED_LINES
     wrapup_min_files: int = DEFAULT_WRAPUP_MIN_FILES
     wrapup_auto: bool = DEFAULT_WRAPUP_AUTO
+    wrapup_auto_max_per_day: int = DEFAULT_WRAPUP_AUTO_MAX_PER_DAY
     rules_names: tuple[str, ...] = ()  # the entries of rules_files as the config spells them; empty in a Config made by hand
 
 
@@ -281,4 +284,5 @@ def load_config(repo: Path | None, ledger: Path | None, config_file: Path | None
         wrapup_min_changed_lines=_positive_int(raw, "wrapup_min_changed_lines", DEFAULT_WRAPUP_MIN_CHANGED_LINES),
         wrapup_min_files=_positive_int(raw, "wrapup_min_files", DEFAULT_WRAPUP_MIN_FILES),
         wrapup_auto=_boolean(raw, "wrapup_auto", DEFAULT_WRAPUP_AUTO),
+        wrapup_auto_max_per_day=_positive_int(raw, "wrapup_auto_max_per_day", DEFAULT_WRAPUP_AUTO_MAX_PER_DAY),
     )

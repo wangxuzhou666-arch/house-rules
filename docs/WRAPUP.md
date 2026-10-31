@@ -9,9 +9,10 @@ ratchet wrapup --base main          # measure from a commit you name
 ratchet wrapup --from-file r.txt    # a saved review instead of calling claude (the thresholds still apply)
 ratchet wrapup --json               # one JSON object on stdout; the human report goes to stderr
 ratchet wrapup --report-only        # review nothing; report the open blind spots of the latest review run
+ratchet wrapup --auto               # what the plugin runs by itself: the review is recorded as automatic and counted by the daily cap
 ```
 
-It also takes `--level` (the review effort, default `high`) and `--repo`, `--ledger`, `--config`. In the plugin, `/review-ratchet:wrapup` (or "wrap up", "收口") runs it and asks the question. With `wrapup_auto` on, the plugin also starts it by itself after commits, and the only thing left for you is the question: see [Automatic wrap-up](#automatic-wrap-up).
+It also takes `--level` (the review effort, default `high`) and `--repo`, `--ledger`, `--config`. In the plugin, `/review-ratchet:wrapup` (or "wrap up", "收口") runs it and asks the question. With `wrapup_auto` on, the plugin also starts it by itself after commits, and the only thing left for you is the question: see [Automatic wrap-up](#automatic-wrap-up). Only a wrap-up started with `--auto` is limited to `wrapup_auto_max_per_day` reviews in 24 hours ([The daily cap](#the-daily-cap)); one you run yourself is not.
 
 ## The base
 
@@ -95,7 +96,7 @@ Either one is enough, and "reached" includes the number itself (200 lines review
 
 ## The review
 
-Above a threshold wrapup runs `ratchet review` itself with the same defaults (level `high`, the same round cap, the same ingest), so the run is an ordinary `review_run` whose `head` is the next wrap-up's base. On the default branch the review is told which commits to read ([On the default branch](#on-the-default-branch)). A refused round (the cap is reached) ends the wrap-up with exit code 3. wrapup has no `--over-cap`: that stays an explicit decision, `ratchet review --over-cap`. `--dry-run` says beforehand whether the review would be refused ([Dry run](#dry-run)).
+Above a threshold wrapup runs `ratchet review` itself with the same defaults (level `high`, the same round cap, the same ingest), so the run is an ordinary `review_run` whose `head` is the next wrap-up's base. On the default branch the review is told which commits to read ([On the default branch](#on-the-default-branch)). A refused round (the round cap is reached) ends the wrap-up with exit code 3. wrapup has no `--over-cap`: that stays an explicit decision, `ratchet review --over-cap`. With `--auto` the daily cap can refuse the review too, with exit code 4 ([The daily cap](#the-daily-cap)). `--dry-run` says beforehand whether the review would be refused ([Dry run](#dry-run)).
 
 Afterwards it reads the ledger: the run's own open findings that no rule covers (`unmapped`, as `count --by-rule` counts them, legacy aliases applied) are the blind spots of this review; the count of every open `unmapped` finding follows. A finding that was merged into another on the same file and line (`also_matches`) is not listed.
 
@@ -158,7 +159,7 @@ Stdout is exactly one JSON object; everything else, the review's own output incl
 
 | field | meaning |
 |---|---|
-| `status` | `skipped` (below both thresholds), `reviewed`, `capped` (the round cap refused the review; exit code 3), `dry-run` (`--dry-run`, and a review is due; `would_refuse` says whether it would start), or `reported` (`--report-only`) |
+| `status` | `skipped` (below both thresholds), `reviewed`, `capped` (the round cap refused the review; exit code 3), `daily_capped` (`--auto`, and the daily cap refused the review; exit code 4), `dry-run` (`--dry-run`, and a review is due; `would_refuse` says whether it would start), or `reported` (`--report-only`) |
 | `base`, `base_reason` | the base and which rule chose it; both null for `reported`. `base` is a commit for every `base_reason` except `last-review-tree`, where it is a git tree id (the working tree, or HEAD, as the last review found it), not a commit; null for a branch with no commit |
 | `changed_lines`, `changed_files` | the counts; null for `reported` |
 | `thresholds` | `{"min_changed_lines": 200, "min_files": 5}` as configured |
@@ -168,7 +169,7 @@ Stdout is exactly one JSON object; everything else, the review's own output incl
 | `repeat_of` | `{full id of a repeat: full id of the earlier finding it repeats}`, one entry per id in `repeated_unmapped`; the earliest known finding in ledger order when several match. `{}` when nothing repeats. The human report lists each pair (`r2-1 ... is a repeat of r1-1`) |
 | `open_unmapped` | every open `unmapped` finding in the ledger |
 | `reason` | the threshold that was reached, or the numbers that fell short, or the refusal. In a dry run it is still the threshold that was reached; the refusal is in `would_refuse` |
-| `would_refuse` | `null`, or `{kind, round_key, message}`: why a real run would be refused. Only a dry run whose `status` is `dry-run` can fill it. It is `null` for every other status, for a real run, and when the review would start. `kind` is the first check that fails, `rules`, `round_key`, `round_cap` or `claude`, in that order; `round_key` is `null` for the first two (there is no key to name) and the round key for the other two; `message` is the text a real run stops with ([Dry run](#dry-run)) |
+| `would_refuse` | `null`, or `{kind, round_key, message}`: why a real run would be refused. Only a dry run whose `status` is `dry-run` can fill it. It is `null` for every other status, for a real run, and when the review would start. `kind` is the first check that fails, `rules`, `round_key`, `round_cap`, `daily_cap` (with `--auto` only) or `claude`, in that order; `round_key` is `null` for `rules`, `round_key` and `daily_cap` (there is no key to name) and the round key for the other two; `message` is the text a real run stops with ([Dry run](#dry-run)) |
 
 ## Dry run
 
@@ -195,13 +196,14 @@ The checks run in the order a real review makes them, and the first that fails g
 | `rules` | the rules do not load: a rules file is missing or invalid, or a rules layer outside this repository is not on this machine ([Outer layers](COMPILE.md#outer-layers)) | `null` |
 | `round_key` | the change has no round to count on: HEAD is detached, `default_branch` is not a branch, or the branch shares no history with it | `null` |
 | `round_cap` | the change's review rounds are used up. The message ends with "ratchet wrapup has no --over-cap: `ratchet review --over-cap` runs one more round, recorded" | the round key |
+| `daily_cap` | `--auto` is given and `wrapup_auto_max_per_day` automatic reviews ran in the last 24 hours ([The daily cap](#the-daily-cap)). Without `--auto`, and with `--from-file`, a wrap-up never gets this kind. The message names the moment the next automatic review can run | `null` |
 | `claude` | the review command is not found on the PATH. A `--from-file` wrap-up runs none, so it never gets this kind | the round key |
 
-A refused round records no `review_run`, so the base does not move: the next wrap-up is refused the same way until the cause is gone. That is why the dry run looks ahead.
+`ratchet wrapup --dry-run --auto` is the decision the Stop hook makes. A refused round records no `review_run`, so the base does not move: the next wrap-up is refused the same way until the cause is gone (the daily cap's goes by itself, when the oldest automatic review in the window is 24 hours old). That is why the dry run looks ahead.
 
 ## Exit codes
 
-`0` skipped, reviewed, dry run (a foreseen refusal included), or reported. `1` an error: not a git repo, a `--base` that is not a commit, an unreadable file, `claude` failing (the review's own errors), `--report-only` with no review run recorded. `3` the round cap refused the review.
+`0` skipped, reviewed, dry run (a foreseen refusal included), or reported. `1` an error: not a git repo, a `--base` that is not a commit, an unreadable file, `claude` failing (the review's own errors), `--report-only` with no review run recorded. `3` the round cap refused the review. `4` the daily cap refused an automatic (`--auto`) review.
 
 ## The question
 
@@ -216,7 +218,7 @@ The question is about `new_unmapped` only. The repeats (`repeated_unmapped`) are
 
 ## Automatic wrap-up
 
-With the plugin the wrap-up starts by itself. You commit as usual. When a turn ends and the work has reached a threshold, Claude runs the wrap-up review, and asks [the question](#the-question) only if the review found a blind spot that is new. Below the thresholds nothing runs and nothing is shown. How this fits into a working day: [INTEGRATION.md](INTEGRATION.md).
+With the plugin the wrap-up starts by itself. You commit as usual. When a turn ends and the work has reached a threshold, Claude runs the wrap-up review, and asks [the question](#the-question) only if the review found a blind spot that is new. Below the thresholds nothing runs and nothing is shown. At most `wrapup_auto_max_per_day` (default 2) of these reviews run in any 24 hours ([The daily cap](#the-daily-cap)). How this fits into a working day: [INTEGRATION.md](INTEGRATION.md).
 
 ### How it runs
 
@@ -224,15 +226,15 @@ Three parts work together. The git post-commit hook notes commits, the plugin's 
 
 1. **Commit.** The post-commit hook that `ratchet init` installs ends with `ratchet auto note`. In a Claude Code session whose repo has `wrapup_auto` on, it appends the commit to a local file for that session ([The commit note](ONBOARDING.md#the-commit-note)). It records and decides nothing, and it cannot fail a commit.
 2. **The turn ends.** The plugin registers one Stop hook ([`hooks/hooks.json`](../hooks/hooks.json); it runs `hooks/run.sh auto stop`, with a 30 second timeout). `run.sh` first looks, with shell builtins alone, for this session's file in the [state directory](#the-state-directory). A turn in which nothing was committed has none and ends there, in about 10 ms, without starting Python.
-3. **The decision.** Otherwise `run.sh` finds a Python 3.10 or newer and runs `ratchet auto stop`, which reads the hook's JSON from stdin. For each worktree a commit was noted in (once, however many commits) it makes the decision `ratchet wrapup --dry-run` makes ([Dry run](#dry-run)): measure the work since the last review (on the default branch, while no review exists, since the start point, which the hook records first if there is none: [below](#the-first-wrap-up-on-the-default-branch)), compare it with the thresholds, and, when a review is due, foresee whether it would be refused. A worktree below both thresholds ends here, and the hook says nothing.
+3. **The decision.** Otherwise `run.sh` finds a Python 3.10 or newer and runs `ratchet auto stop`, which reads the hook's JSON from stdin. For each worktree a commit was noted in (once, however many commits) it makes the decision `ratchet wrapup --dry-run --auto` makes ([Dry run](#dry-run)): measure the work since the last review (on the default branch, while no review exists, since the start point, which the hook records first if there is none: [below](#the-first-wrap-up-on-the-default-branch)), compare it with the thresholds, and, when a review is due, foresee whether it would be refused. A worktree below both thresholds ends here, and the hook says nothing.
 4. **Claude goes on with the turn.** For a worktree whose review is due and would start, the hook answers with one line of `additionalContext`, shell-quoting a path that holds spaces:
 
    ```
-   review-ratchet: /work/app has 270 changed line(s) in 3 file(s) since its last review, past the wrap-up threshold (200 lines or 5 files). Run the automatic wrap-up now: /review-ratchet:wrapup auto /work/app (Skill tool: review-ratchet:wrapup, args: auto /work/app; equivalent: ratchet wrapup --repo /work/app).
+   review-ratchet: /work/app has 270 changed line(s) in 3 file(s) since where this branch forked from main, past the wrap-up threshold (200 lines or 5 files). Run the automatic wrap-up now: /review-ratchet:wrapup auto /work/app (Skill tool: review-ratchet:wrapup, args: auto /work/app; equivalent: ratchet wrapup --repo /work/app --auto).
    ```
 
-   The hook runs no review itself. The line goes to Claude, who takes it up in the same turn instead of ending it. Claude Code shows it as Stop hook feedback, not as a hook error.
-5. **The review.** The [`wrapup` skill](../skills/wrapup/SKILL.md) in automatic mode runs `ratchet wrapup --repo <worktree> --json` as a background command, as a review can take minutes and a foreground call is cut off at its timeout. It waits for the completion notice, without polling, and reads the JSON object at the end of the output file. `skipped`, `capped` and an error get one sentence and no question, and `/review-ratchet:setup` is not offered.
+   What follows `since` is where the count started, in the words of the measure line of `ratchet wrapup` for the base [the table](#the-base) picked: `the working tree as review r1 found it`, `HEAD when review r1 started`, `the start point recorded for main`, `where this branch forked from main`, or `HEAD` for a count from HEAD (`the start`, on a branch with no commit). The hook runs no review itself. The line goes to Claude, who takes it up in the same turn instead of ending it. Claude Code shows it as Stop hook feedback, not as a hook error.
+5. **The review.** The [`wrapup` skill](../skills/wrapup/SKILL.md) in automatic mode runs `ratchet wrapup --repo <worktree> --json --auto` as a background command, as a review can take minutes and a foreground call is cut off at its timeout; `--auto` is what makes the daily cap count the review. It waits for the completion notice, without polling, and reads the JSON object at the end of the output file. `skipped`, `capped`, `daily_capped` and an error get one sentence and no question, and `/review-ratchet:setup` is not offered.
 6. **The question.** On `reviewed` the skill goes on as in [The question](#the-question): one popup, about the new blind spots only. No new blind spot means one sentence and no popup. `Now` starts [maintain](../skills/maintain/SKILL.md) on them: at most 3 proposals, each still decided by the user.
 
 ### The first wrap-up on the default branch
@@ -250,6 +252,26 @@ The start point comes from one of two places:
 - **Off.** Set `"wrapup_auto": false`, or delete the key. The post-commit line stays but notes nothing, and records noted before are dropped at the next Stop. Disabling or uninstalling the plugin removes the Stop hook. `/review-ratchet:wrapup` and `ratchet wrapup` work either way.
 - **One setting per repository.** The main worktree's `.ratchet.json` decides for its linked worktrees too. The Stop hook runs at the end of every turn of every session while the plugin is enabled, in repositories that never heard of ratchet as well; there the session has no file and the hook ends at once.
 
+### The daily cap
+
+An automatic review is a `/code-review` nobody asked for, so their number is limited: at most `wrapup_auto_max_per_day` of them run in any 24 hours. `.ratchet.json`:
+
+| key | default | meaning |
+|---|---|---|
+| `wrapup_auto_max_per_day` | `2` | the most automatic reviews that may run in any 24 hours in this repo. A positive integer: `0`, a negative number, a decimal, a string and `true` are an error that names the key |
+
+- **What counts.** A review is automatic when it ran as `ratchet wrapup --auto`. The plugin's skill passes `--auto`, and the review's `review_run` then carries `"trigger": "auto"` ([`review_run`](LEDGER.md#review_run)). The cap counts those events of the ledger recorded in the 24 hours before now; a review is recorded when it ends. The ledger belongs to the repo, so every branch and every worktree counts toward the one number. A review you start yourself is never counted and never refused: `ratchet review`, `ratchet wrapup` without `--auto`, `/review-ratchet:wrapup` typed by hand. Nor is `--from-file`, which bills nothing (`--auto` with `--from-file` is an error). A script or a CI job that calls `ratchet wrapup --auto` shares the budget with the plugin.
+- **Any 24 hours** is a sliding window, not a calendar day. A review counts until it is exactly 24 hours old; at the limit, the next automatic review can run the moment the oldest one in the window turns 24 hours old. The times in the message are local, as the ledger writes them.
+- **At the cap** the review is refused before `claude` runs, so nothing is billed and nothing is recorded. The kind is `daily_cap`, checked after the round cap and before a missing `claude` ([Dry run](#dry-run)). `ratchet wrapup --auto` ends with exit code 4 and, with `--json`, the status `daily_capped` ([`--json`](#--json)); `ratchet wrapup --dry-run --auto` reports it as `would_refuse`. The message says when the next one can run:
+
+  ```
+  daily cap reached: 2 automatic review(s) ran in the last 24 hours and wrapup_auto_max_per_day is 2. The next one can run after 2026-10-31T09:40:12, when the one from 2026-10-30T09:40:12 leaves that window; the work stays counted until then, and the first automatic wrap-up after that reviews it. /review-ratchet:wrapup (`ratchet wrapup` without --auto) reviews it now.
+  ```
+
+- **The Stop hook** makes the same decision. Under the cap it asks Claude as usual. At the cap it does not ask: it tells the person once, in a `systemMessage` ([Refusals are announced once](#refusals-are-announced-once)), and says nothing more until the cap has ended and been reached again. If the cap is reached after Claude was asked, the skill reports `daily_capped` in one sentence and asks no question.
+- **The work is not lost.** A refused review records nothing, so the base stays where it was and the changes stay counted against the thresholds. The first Stop after a commit, once the window has made room, asks for the review as usual, and that review covers everything since the last one. Until then `/review-ratchet:wrapup` reviews the work now.
+- **Lowering the limit** takes effect at once. With more automatic reviews in the window than the new limit, the next one waits until fewer than the limit are left.
+
 ### When it stays quiet
 
 Nothing is said and nothing runs in these cases:
@@ -257,26 +279,28 @@ Nothing is said and nothing runs in these cases:
 | situation | what happens to the records |
 |---|---|
 | The work is below both thresholds | They are used up. The next commit notes the worktree again, and the measurement counts everything since the last review |
+| The work is past a threshold but the [daily cap](#the-daily-cap) is reached, and the person was told already | They are used up. The work stays counted, and the first Stop after a commit that finds the cap lifted asks for the review |
 | The commit was made outside a Claude Code session (`CLAUDE_CODE_SESSION_ID` is not set), for example from a terminal of your own | It is never noted: the git hook skips `ratchet auto note` in the shell. The next wrap-up counts that work all the same |
 | Inside ratchet's own review (`RATCHET_REVIEW_CHILD=1`) | Neither the note nor the Stop hook acts. ratchet sets the variable in the `claude` process of its reviews, so a review cannot start another |
 | Another Stop hook has continued the turn (`stop_hook_active` in the input) | This Stop is skipped and the records stay for a later one |
 | A headless session, which Claude Code marks with `CLAUDE_CODE_SESSION_ATTENDED=0` (as under `claude -p`; see the limits below), unless `RATCHET_AUTO_HEADLESS=1` | They stay |
 | A subagent, a workflow or a teammate is still running, or a background shell that runs `ratchet wrapup` or `ratchet review` | The judgement is deferred: they stay for the Stop after the task. Such a task may still commit, or review beside this one |
 | The worktree is gone, or its repo no longer has `wrapup_auto` on | They are dropped |
+| Judging the worktree failed (a damaged config or start-points file, a git lock or timeout, a deleted branch) | The failure is logged, and its records go back into the session's pending file for the next Stop. A record noted more than 7 days ago is dropped instead, and that is logged too. The other worktrees of the session are judged as usual |
 
 A task counts as over when its status is one of `completed`, `complete`, `done`, `finished`, `succeeded`, `failed`, `error`, `killed`, `stopped`, `cancelled`, `canceled`, `aborted`, `exited` or `terminated`, in any case. A task with no status, or one the hook does not know, counts as running. Other background tasks (a dev server, a monitor, a cloud session, an MCP task) may never end and never defer.
 
-A failure is silent too, because a Stop hook that failed at the end of every turn would be switched off. There is no Python 3.10 or newer, or no `bin/ratchet` in the plugin: `run.sh` exits 0 without a word. An exception becomes one line in `hook.log`, and so does input that is neither empty nor a JSON object. A worktree that cannot be judged (a damaged config or start-points file, a deleted branch) is logged and skipped, and does not hide the others. `run.sh` also turns the exit code 2 of `ratchet` into 1, since a Stop hook that exits 2 makes Claude go on with the turn.
+A failure is silent too, because a Stop hook that failed at the end of every turn would be switched off. There is no Python 3.10 or newer, or no `bin/ratchet` in the plugin: `run.sh` exits 0 without a word. An exception becomes one line in `hook.log`, and so does input that is neither empty nor a JSON object. A worktree that cannot be judged (a damaged config or start-points file, a deleted branch) is logged and skipped for this Stop, and does not hide the others; its records are kept for the next one (last row of the table). `run.sh` also turns the exit code 2 of `ratchet` into 1, since a Stop hook that exits 2 makes Claude go on with the turn.
 
 ### Refusals are announced once
 
-A review can be due and still be refused: the rules do not load, the change has no round key, the round cap is used up, or `claude` is not on the PATH ([Dry run](#dry-run)). Claude is not asked to run it. The hook tells the person instead, in a `systemMessage` that only they see, one line per worktree and with the whitespace of the message folded to single spaces:
+A review can be due and still be refused: the rules do not load, the change has no round key, the round cap is used up, the [daily cap](#the-daily-cap) is used up, or `claude` is not on the PATH ([Dry run](#dry-run)). Claude is not asked to run it. The hook tells the person instead, in a `systemMessage` that only they see, one line per worktree and with the whitespace of the message folded to single spaces:
 
 ```
 review-ratchet: the wrap-up review of /work/app is due but would be refused: <message>
 ```
 
-Claude does not go on with the turn because of it. A refusal is told once for each repo, worktree, kind and change. The change is named by its round key; the two kinds that have none, `rules` and `round_key`, are told apart by their message. So the round cap is one message and not one per turn. `announced.json` remembers it. The file is written before the message is shown: a hook killed in between misses one message and never repeats one. An entry older than 30 days no longer counts, so a refusal that lasts that long is told again. Once the cause is gone, the Stop after the next commit asks for the review as usual. One answer can hold both fields, when one worktree is due and another is refused.
+Claude does not go on with the turn because of it. A refusal is told once for each repo, worktree, kind and change. The change is named by its round key; the three kinds that have none, `rules`, `round_key` and `daily_cap`, are told apart by their message. So the round cap is one message and not one per turn. The daily cap's message holds the moment its window next makes room, so it is the same for as long as the cap lasts and another one when the cap is reached again after the window moved on; each worktree is told its own. `announced.json` remembers it. The file is written before the message is shown: a hook killed in between misses one message and never repeats one. An entry older than 30 days no longer counts, so a refusal that lasts that long is told again. A damaged `announced.json` (not JSON, or not an object of timestamps that carry a time zone) counts as empty and is logged: its refusals are told once more, and the write that follows puts a good file in its place. Once the cause is gone, the Stop after the next commit asks for the review as usual. One answer can hold both fields, when one worktree is due and another is refused.
 
 ### The state directory
 
@@ -291,8 +315,8 @@ Everything the automatic wrap-up keeps lives in one directory on this machine, o
 ```
 
 - **Where.** The first of `$RATCHET_STATE_DIR`, `$XDG_STATE_HOME/review-ratchet` and `~/.local/state/review-ratchet` that is set and not empty. The directories are created with mode `0700`.
-- **Claiming.** Before it judges, the Stop hook moves the session's pending file into `claimed/` with one atomic rename, and deletes it when done. Of two Stops that meet (two windows of one session) one judges and the other finds nothing. A hook killed in the middle (at its 30 second timeout, say) leaves the file behind. That costs at most one trigger: the next commit notes the worktree again, and the measurement counts everything since the last review.
-- **Pruning.** Each time a commit is noted, the files in `pending/` and `claimed/` that nothing has written to for 7 days are deleted. An entry of `announced.json` older than 30 days no longer counts and is dropped the next time the file is written. `hook.log` is never trimmed. It holds one line per failure, `<UTC time> <what failed>`, and for an exception the line ends with `(at <file>:<line>)`, where it was raised.
+- **Claiming.** Before it judges, the Stop hook moves the session's pending file into `claimed/` with one atomic rename. When done it puts back the records of any worktree it could not judge, and deletes the claimed file. They are appended to the session's pending file in one write, with mode `0600` like any note, so a commit noted meanwhile is kept and they follow it. Of two Stops that meet (two windows of one session) one judges and the other finds nothing. A hook killed in the middle (at its 30 second timeout, say) leaves the file behind. That costs at most one trigger: the next commit notes the worktree again, and the measurement counts everything since the last review.
+- **Pruning.** Each time a commit is noted, the files in `pending/` and `claimed/` that nothing has written to for 7 days are deleted. A record put back after a failure is bounded by its own age instead, since putting it back writes the file afresh: one noted more than 7 days ago is dropped when it comes back, so a worktree that fails at every Stop does not keep its records for as long as the session lives. An entry of `announced.json` older than 30 days no longer counts and is dropped the next time the file is written. `hook.log` is never trimmed. It holds one line per failure, `<UTC time> <what failed>`, and for an exception the line ends with `(at <file>:<line>)`, where it was raised.
 
 ### Privacy
 
@@ -302,7 +326,8 @@ Everything the automatic wrap-up keeps lives in one directory on this machine, o
 
 ### Cost, limits and versions
 
-- **Cost.** Each automatic run is one `/code-review` at level `high`, billed as any review is, plus the short extra turn that runs the skill. It counts as one round of the change against `max_review_rounds` (default 3, [Review rounds](LEDGER.md#review-rounds)). At the cap the person is told once, as above, and no further review of that change starts by itself: raising `max_review_rounds` lifts it, and `ratchet review --over-cap` runs one more round by hand. Below the thresholds nothing is billed, as measuring is local git work.
+- **Cost.** Each automatic run is one `/code-review` at level `high`, billed as any review is, plus the short extra turn that runs the skill. It counts as one round of the change against `max_review_rounds` (default 3, [Review rounds](LEDGER.md#review-rounds)), and as one of the day's `wrapup_auto_max_per_day` (default 2, [The daily cap](#the-daily-cap)), so the automatic reviews of a repo are limited to that many in any 24 hours (the next bullet names the one way past it). At the round cap the person is told once, as above, and no further review of that change starts by itself: raising `max_review_rounds` lifts it, and `ratchet review --over-cap` runs one more round by hand. At the daily cap the person is told once too, and the next automatic review waits for the window; raising `wrapup_auto_max_per_day` lifts it at once, and `/review-ratchet:wrapup` reviews the work now. Below the thresholds nothing is billed, as measuring is local git work.
+- **The cap is checked when a review starts and counts it when it ends.** Two automatic reviews that start within the minutes a review takes, in two sessions, can both pass the check, and the 24 hours then hold one more than the limit; the next check sees both.
 - **`/clear`** gives the session a new id. Records noted under the old id are never seen by the new session's Stop (they are deleted after 7 days). The next commit notes the worktree again, and the measurement counts all the work since the last review, so a `/clear` delays a review to the next commit and loses no change.
 - **Continuations.** The line of `additionalContext` makes Claude go on with the turn, which counts toward Claude Code's limit of 8 continuations in a row, as a blocking Stop hook does.
 - **Headless detection** rests on `CLAUDE_CODE_SESSION_ATTENDED`, which Claude Code does not document. A smoke test on Claude Code 2.1.312 found it `0` under `claude -p`; in an attended VS Code session it was `1`. A session without the variable counts as attended. A headless session is skipped unless `RATCHET_AUTO_HEADLESS=1`; with that set, the automatic wrap-up works headless. In that smoke test the Stop hook continued the turn, Claude ran `/review-ratchet:wrapup auto <worktree>`, and one review was recorded.
@@ -323,7 +348,7 @@ Everything the automatic wrap-up keeps lives in one directory on this machine, o
 
 - `wrapup_auto` must be `true` in the main worktree's `.ratchet.json`.
 - The commit must have been made in a Claude Code session, with the post-commit hook installed (`ratchet init` proves it runs). After it, `<state dir>/pending/<session id>.jsonl` has a new line.
-- The work must have reached a threshold. `ratchet wrapup --dry-run` in that worktree prints what the Stop hook decides.
+- The work must have reached a threshold. `ratchet wrapup --dry-run --auto` in that worktree prints what the Stop hook decides, the daily cap included: at the cap the hook says it once and then nothing.
 - The plugin must be enabled in a Claude Code that meets the versions above, in a session that is not headless (a headless one needs `RATCHET_AUTO_HEADLESS=1`).
 - Any failure of the note or the hook is a line in `hook.log`.
 

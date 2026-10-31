@@ -10,6 +10,15 @@ class RoundCapReached(RatchetError):
     exit_code = 3
 
 
+class DailyCapReached(RatchetError):
+    """`ratchet wrapup --auto` refused to start another automatic review: `wrapup_auto_max_per_day` of them ran in the last 24 hours.
+
+    Not a RoundCapReached: a wrap-up re-words that one to say how to get past a full round cap, which is no way past this limit.
+    """
+
+    exit_code = 4  # 3 is the round cap and 2 is argparse's own usage error
+
+
 class RoundKeyUnavailable(RatchetError):
     """No name for the change under review: detached HEAD, no default branch to measure from, or no shared history with it."""
 

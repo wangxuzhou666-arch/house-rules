@@ -157,6 +157,23 @@ class SnippetAndCriticFieldsTest(unittest.TestCase):
         self.assert_invalid(review_finding(tree="a" * 40))
         self.assert_invalid(gate_pass(["a.py"]) | {"tree": "a" * 40})
 
+    def test_a_review_run_may_carry_a_trigger_and_any_non_empty_one_is_valid(self) -> None:
+        self.assert_valid(review_round(trigger="auto"))
+        self.assert_valid(review_round(trigger="a-trigger-a-later-version-adds"))  # structural only, as `level` is: never an unreadable ledger
+        self.assertIn("trigger", ledger.validation_problems(review_round(trigger=""))[0])  # the problem names the field
+
+    def test_a_malformed_trigger_is_invalid(self) -> None:
+        for bad in (None, "", 1, True, ["auto"], {"trigger": "auto"}):
+            with self.subTest(trigger=bad):
+                self.assert_invalid(review_round(trigger=bad))
+
+    def test_a_review_run_from_before_the_trigger_is_still_valid_and_the_trigger_is_a_review_run_field_only(self) -> None:
+        self.assertNotIn("trigger", review_round())
+        self.assert_valid(review_round())
+        self.assertEqual(ledger.fold([review_round(trigger="auto")]), {})  # a review_run takes no part in the fold, with or without a trigger
+        self.assert_invalid(review_finding(trigger="auto"))
+        self.assert_invalid(gate_pass(["a.py"]) | {"trigger": "auto"})
+
 
 class FileIoTest(unittest.TestCase):
     def setUp(self) -> None:

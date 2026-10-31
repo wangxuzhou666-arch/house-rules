@@ -782,7 +782,7 @@ class ReportOnlyTest(WrapupCase):
         self.assertIn("no review run is recorded yet", err)
 
     def test_it_takes_no_measuring_or_review_options(self) -> None:
-        for option in (["--base", "HEAD"], ["--level", "low"], ["--from-file", "x"], ["--dry-run"]):
+        for option in (["--base", "HEAD"], ["--level", "low"], ["--from-file", "x"], ["--dry-run"], ["--auto"]):
             with self.subTest(option=option):
                 code, _, err = self.cli("wrapup", "--report-only", *option)
                 self.assertEqual(code, 1)

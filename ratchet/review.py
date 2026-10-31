@@ -7,10 +7,11 @@ import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from .config import Config
-from .errors import RatchetError, RoundCapReached, RoundKeyUnavailable
+from .errors import DailyCapReached, RatchetError, RoundCapReached, RoundKeyUnavailable
 from .fsutil import read_text, write_text
 from .git import commit_sha, current_branch, merge_base_with_head, origin_head_branch
 from .ledger import REVIEW_SOURCES, Event, FindingState, open_findings
@@ -30,6 +31,8 @@ SUMMARY_WIDTH = 60
 FORK_POINT_LENGTH = 12  # hex digits of the fork point kept in a round key
 REVIEWER = "claude-code"  # the `reviewer` of a review_run that ratchet ran itself
 NO_COMMIT = "none"  # `head` on a branch with no commit yet: the word a finding's `sha` uses for the same state
+TRIGGER_AUTO = "auto"  # the `trigger` of a review_run that `ratchet wrapup --auto` started: the reviews the daily cap counts
+DAILY_WINDOW = timedelta(hours=24)  # the "day" of the daily cap: any 24 hours, not a calendar day
 
 # The run id is also the file name of the saved output, so it is checked with fullmatch: `$` alone also holds before a final newline.
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -127,11 +130,12 @@ def review_rounds_used(events: list[Event], key: str) -> int:
 
 def review_run_event(repo: str, ts: str, *, run_id: str, key: str, round_number: int, max_rounds: int, over_cap: bool,
                      finding_count: int, level: str | None, head: str, reviewer_version: str | None,
-                     version_changed: bool, from_file: bool, tree: str | None = None) -> Event:
+                     version_changed: bool, from_file: bool, tree: str | None = None, trigger: str | None = None) -> Event:
     """One review round. A --from-file review does not know its reviewer, version or level: those are recorded as null.
 
     `head` is the commit HEAD pointed at before the reviewer started (for --from-file, when the file was read).
     `tree` is the id of the working tree as it was then, uncommitted work included; it is left out when there is none.
+    `trigger` is TRIGGER_AUTO for a review `wrapup --auto` started; it is left out for a review a person started.
     `version_changed` is written only when true.
     """
     event: Event = {"v": 1, "kind": "review_run", "repo": repo, "ts": ts, "run": run_id, "round_key": key,
@@ -141,6 +145,8 @@ def review_run_event(repo: str, ts: str, *, run_id: str, key: str, round_number:
                     "head": head}
     if tree is not None:
         event["tree"] = tree
+    if trigger is not None:
+        event["trigger"] = trigger
     if version_changed:
         event["version_changed"] = True
     return event
@@ -216,17 +222,20 @@ def require_claude(argv: list[str]) -> None:
 
 # Why a review would not start (the `kind` of a Refusal), in the order they are checked.
 REFUSE_RULES, REFUSE_ROUND_KEY, REFUSE_ROUND_CAP, REFUSE_CLAUDE = "rules", "round_key", "round_cap", "claude"
+REFUSE_DAILY_CAP = "daily_cap"  # checked between the round cap and claude; only an automatic review meets it
 
 
 @dataclass(frozen=True)
 class Refusal:
     """A review that would not start, found before anything is captured, asked or billed."""
     kind: str  # a REFUSE_* word
-    round_key: str | None  # the change the round would be counted on; None when the rules or the key itself failed first
+    round_key: str | None  # the change the round would be counted on; None when the rules or the key failed first, or for the daily cap
     message: str
 
     def error(self) -> RatchetError:
-        """What `ratchet review` raises for it: exit code 3 for a full round cap, 1 for the rest."""
+        """What `ratchet review` raises for it: exit code 3 for a full round cap, 4 for the daily cap, 1 for the rest."""
+        if self.kind == REFUSE_DAILY_CAP:
+            return DailyCapReached(self.message)
         return (RoundCapReached if self.kind == REFUSE_ROUND_CAP else RatchetError)(self.message)
 
 
@@ -235,16 +244,54 @@ def round_cap_message(key: str, used: int, max_rounds: int, open_count: int) -> 
             "still open (ratchet count). Fix blockers, let the rest go to distill, or rerun with --over-cap (recorded).")
 
 
+def automatic_review_times(events: list[Event], now: datetime) -> list[datetime]:
+    """When the automatic reviews of the last 24 hours ran, oldest first. `now` has a time zone.
+
+    A ledger `ts` is local time without a zone (`now_iso`), so it is read as local time. A review exactly 24 hours old is out of
+    the window: the next one may run at that moment. A review a person started carries no `trigger` and is never counted.
+    """
+    started = [datetime.fromisoformat(event["ts"]).astimezone() for event in events
+               if event["kind"] == "review_run" and event.get("trigger") == TRIGGER_AUTO]
+    return sorted(moment for moment in started if now - moment < DAILY_WINDOW)
+
+
+def _local_time(moment: datetime) -> str:
+    """`moment` the way the ledger writes a time: local, to the second, without a zone."""
+    return moment.astimezone().replace(tzinfo=None).isoformat(timespec="seconds")
+
+
+def daily_cap_refusal(config: Config, events: list[Event], now: datetime) -> Refusal | None:
+    """Why an automatic review would be refused now, else None: `wrapup_auto_max_per_day` of them ran in the last 24 hours.
+
+    The message names the moment the next one can run, in absolute time: it stays the same for as long as the cap does, and the
+    Stop hook announces a refusal once per message, where "in 3 hours" would change every minute and be announced every turn.
+    """
+    recent = automatic_review_times(events, now)
+    limit = config.wrapup_auto_max_per_day
+    if len(recent) < limit:
+        return None
+    frees = recent[len(recent) - limit]  # the review whose leaving makes room: the oldest, unless the setting was lowered
+    message = (f"daily cap reached: {len(recent)} automatic review(s) ran in the last 24 hours "
+               f"and wrapup_auto_max_per_day is {limit}. "
+               f"The next one can run after {_local_time(frees + DAILY_WINDOW)}, "
+               f"when the one from {_local_time(frees)} leaves that window; "
+               "the work stays counted until then, and the first automatic wrap-up after that reviews it. "
+               "/review-ratchet:wrapup (`ratchet wrapup` without --auto) reviews it now.")
+    return Refusal(REFUSE_DAILY_CAP, None, message)
+
+
 def review_refusal(config: Config, events: list[Event], *, target: str | None, from_file: bool, over_cap_allowed: bool,
-                   replayed: bool) -> Refusal | None:
+                   replayed: bool, automatic: bool = False) -> Refusal | None:
     """Why `ratchet review` would refuse to start, else None. Reads the rules files, git and the PATH; writes nothing.
 
     The checks `cmd_review` makes before it calls claude, in its order: the rules load, the change gets a round key, the round
-    cap leaves room (a replay and --over-cap are exempt), the claude command exists (a --from-file review runs none). A wrap-up
+    cap leaves room (a replay and --over-cap are exempt), an `automatic` review is within the daily cap (a --from-file review
+    runs no claude, so it is never refused for it), the claude command exists (a --from-file review runs none). A wrap-up
     asks ahead of time because a refused round records no review_run, so the wrap-up's base never moves and the next one
     would be refused the same way.
 
     `target` has passed `check_target`. `events` are the ledger's; the change under review is the one in `config.worktree`.
+    `automatic` is for a review `wrapup --auto` starts: only that kind is counted by the daily cap and refused by it.
     """
     try:
         load_rules(config)
@@ -259,6 +306,9 @@ def review_refusal(config: Config, events: list[Event], *, target: str | None, f
         return Refusal(REFUSE_ROUND_CAP, key, round_cap_message(key, used, config.max_review_rounds, len(open_findings(events))))
     if from_file:
         return None
+    capped = daily_cap_refusal(config, events, datetime.now().astimezone()) if automatic else None
+    if capped is not None:
+        return capped
     argv = claude_command(DEFAULT_LEVEL, target)  # the level is no part of argv[0], which is all `require_claude` looks at
     try:
         require_claude(argv)

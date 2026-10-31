@@ -19,10 +19,11 @@ from support import RepoCase, git, review_finding, review_round
 from test_wrapup import numbered, review_text
 
 from ratchet.config import load_config
-from ratchet.errors import RatchetError, RoundCapReached, RoundKeyUnavailable
+from ratchet.errors import DailyCapReached, RatchetError, RoundCapReached, RoundKeyUnavailable
 from ratchet.ledger import read_events
 from ratchet.review import (
-    REFUSE_CLAUDE, REFUSE_ROUND_CAP, REFUSE_ROUND_KEY, REFUSE_RULES, REVIEW_CHILD_ENV, Refusal, review_refusal, round_key, run_claude,
+    REFUSE_CLAUDE, REFUSE_DAILY_CAP, REFUSE_ROUND_CAP, REFUSE_ROUND_KEY, REFUSE_RULES, REVIEW_CHILD_ENV, Refusal, review_refusal,
+    round_key, run_claude,
 )
 from ratchet.rules import load_rules
 
@@ -82,7 +83,7 @@ class RefusalCase(test_wrapup.WrapupCase):
 
     def refusal(self, **overrides: object) -> Refusal | None:
         config = load_config(self.repo, None, None, self.repo)
-        arguments = {"target": None, "from_file": False, "over_cap_allowed": False, "replayed": False, **overrides}
+        arguments = {"target": None, "from_file": False, "over_cap_allowed": False, "replayed": False, "automatic": False, **overrides}
         return review_refusal(config, read_events(config.ledger_path), **arguments)
 
     def detach(self) -> None:
@@ -245,11 +246,18 @@ class RefusalErrorTest(unittest.TestCase):
         for kind in (REFUSE_RULES, REFUSE_ROUND_KEY, REFUSE_CLAUDE):
             with self.subTest(kind=kind):
                 error = Refusal(kind, None, "the words").error()
-                self.assertNotIsInstance(error, RoundCapReached)
+                self.assertNotIsInstance(error, (RoundCapReached, DailyCapReached))
                 self.assertEqual((str(error), error.exit_code), ("the words", 1))
 
-    def test_the_kinds_are_these_four_words(self) -> None:
-        self.assertEqual((REFUSE_RULES, REFUSE_ROUND_KEY, REFUSE_ROUND_CAP, REFUSE_CLAUDE), ("rules", "round_key", "round_cap", "claude"))
+    def test_the_daily_cap_is_the_exit_code_4_error_and_not_a_round_cap(self) -> None:
+        error = Refusal(REFUSE_DAILY_CAP, None, "the words").error()
+        self.assertIsInstance(error, DailyCapReached)
+        self.assertNotIsInstance(error, RoundCapReached)  # a wrap-up re-words a RoundCapReached with "no --over-cap", which is no way past this one
+        self.assertEqual((str(error), error.exit_code), ("the words", 4))
+
+    def test_the_kinds_are_these_five_words(self) -> None:
+        self.assertEqual((REFUSE_RULES, REFUSE_ROUND_KEY, REFUSE_ROUND_CAP, REFUSE_DAILY_CAP, REFUSE_CLAUDE),
+                         ("rules", "round_key", "round_cap", "daily_cap", "claude"))
 
 
 class ReviewUsesItTest(RefusalCase):

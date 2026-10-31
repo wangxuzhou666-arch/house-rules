@@ -63,7 +63,8 @@ class SchemaAgreementTest(unittest.TestCase):
         unmapped = review_finding("R2-002", run="R2", rule_id="unmapped", category="unmapped")
         tool = gate_finding("src/x.py", rule_id="eslint:no-unused-vars", rule_code="no-unused-vars")
         rounds = [review_round(), review_round("target:42", run="R7", round=4, over_cap=True, finding_count=3, source="file"),
-                  review_round("main@unborn", max_rounds=1)]
+                  review_round("main@unborn", max_rounds=1), review_round(trigger="auto"),
+                  review_round(trigger="a-trigger-a-later-version-adds")]  # structural only: any non-empty string
         return [full, outcome, unmapped, tool, gate_pass(["a.py"]), *rounds]
 
     def bad_events(self) -> list[dict]:
@@ -92,6 +93,8 @@ class SchemaAgreementTest(unittest.TestCase):
                   review_round(over_cap="yes"), review_round(over_cap=1), review_round(finding_count=-1),
                   review_round(finding_count=True), review_round(source="human"), review_round(round_key=""),
                   review_round(run="has space"), review_round(repo="Has Caps"), review_round(ts="today"),
+                  review_round(trigger=""), review_round(trigger=1), review_round(trigger=None), review_round(trigger=True),
+                  review_round(trigger=["auto"]),
                   review_round(extra_field=1), {k: v for k, v in review_round().items() if k != "round_key"},
                   {k: v for k, v in review_round().items() if k != "over_cap"}, {**review_round(), "v": 2}]
         return cases

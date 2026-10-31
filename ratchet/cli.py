@@ -21,7 +21,7 @@ from .review_evidence import (
 )
 from .digest import Output, display_path, plan_outputs
 from .direct_label import DEFAULT_EVIDENCE, direct_label_events
-from .errors import RatchetError, RoundCapReached, RoundKeyUnavailable
+from .errors import DailyCapReached, RatchetError, RoundCapReached, RoundKeyUnavailable
 from .fsutil import diff_lines, write_text
 from .gate import gate_pass_event, plan_gate_findings
 from .git import commit_sha, commit_tree, head_sha
@@ -38,7 +38,7 @@ from .outcomes import (
 )
 from .onboard import STATUS_WORDS, InitOptions, Step, closing_lines, command_name, run_init
 from .review import (
-    DEFAULT_LEVEL, LEVELS, NO_COMMIT, REFUSE_CLAUDE, REFUSE_ROUND_CAP, Refusal, check_run_id, check_target, claude_command,
+    DEFAULT_LEVEL, LEVELS, NO_COMMIT, REFUSE_CLAUDE, REFUSE_ROUND_CAP, TRIGGER_AUTO, Refusal, check_run_id, check_target, claude_command,
     critic_version, critic_version_counts, default_run_id, findings_table, replaced_critic_version, review_path,
     review_refusal, review_rounds_used, review_run_event, review_run_ids, round_key, run_claude, save_review,
 )
@@ -48,8 +48,9 @@ from .sources import DiskReader, FileReader, IndexReader
 from .state_tree import state_tree
 from .vendor import MARKER_NAME, SOURCE_ROOT, check_vendored, plan_vendor, vendor_into
 from .wrapup import (
-    CAPPED, DRY_RUN, REPORTED, REVIEWED, SKIPPED, Base, Thresholds, blind_spot_lines, choose_base, config_thresholds, measure_lines,
-    open_unmapped_line, plan_wrapup, report, review_range, review_run_events, run_blind_spots, unmapped_findings, wrapup_cap_message,
+    CAPPED, DAILY_CAPPED, DRY_RUN, REPORTED, REVIEWED, SKIPPED, Base, Thresholds, blind_spot_lines, choose_base, config_thresholds,
+    measure_lines, open_unmapped_line, plan_wrapup, report, review_range, review_run_events, run_blind_spots, unmapped_findings,
+    wrapup_cap_message,
 )
 
 
@@ -184,8 +185,10 @@ def _dry_run_refusal_line(refusal: Refusal) -> str:
     return f"[dry-run] a real run would be refused: {refusal.message}"
 
 
-def cmd_review(args: argparse.Namespace, config: Config, *, base: Base | None = None) -> int:
-    """`base` is what the wrap-up that asked for this review measured the work from; None for a review run on its own."""
+def cmd_review(args: argparse.Namespace, config: Config, *, base: Base | None = None, automatic: bool = False) -> int:
+    """`base` is what the wrap-up that asked for this review measured the work from; None for a review run on its own.
+
+    `automatic` is a review `wrapup --auto` asked for: it is refused past the daily cap, and its review_run records the trigger."""
     if args.from_file and (args.level or args.target):
         raise RatchetError("--level and --target choose what to review; they do nothing with --from-file")
     events = read_events(config.ledger_path)
@@ -195,7 +198,7 @@ def cmd_review(args: argparse.Namespace, config: Config, *, base: Base | None = 
         raise RatchetError(f"run {run_id} is already recorded; omit --run for a new round, "
                            "or pass --from-file to re-ingest a saved review under that run id")
     check_target(args.target)
-    refusal = review_refusal(config, events, target=args.target, from_file=bool(args.from_file),
+    refusal = review_refusal(config, events, target=args.target, from_file=bool(args.from_file), automatic=automatic,
                              over_cap_allowed=args.over_cap, replayed=replayed)
     if refusal is not None and not (args.dry_run and refusal.kind in _DRY_RUN_PREVIEWED):  # before claude runs: a refused round costs nothing
         raise refusal.error()
@@ -246,6 +249,7 @@ def cmd_review(args: argparse.Namespace, config: Config, *, base: Base | None = 
                                  max_rounds=config.max_review_rounds, over_cap=over_cap, finding_count=finding_count,
                                  level=level, head=head, reviewer_version=reviewer_version,
                                  version_changed=replaced_version is not None, from_file=bool(args.from_file),
+                                 trigger=TRIGGER_AUTO if automatic else None,
                                  tree=state_tree_id)
     _append_or_preview(args, config, fresh if replayed else [*fresh, run_event], summary)
     open_after = len(open_findings(events + fresh))
@@ -563,7 +567,7 @@ def _review_args(args: argparse.Namespace) -> argparse.Namespace:
 def _run_wrapup_review(args: argparse.Namespace, config: Config, events: list[Event], base: Base) -> str:
     """Run `ratchet review` as it would run on its own, over the work measured from `base`, and return the run id it recorded."""
     try:
-        cmd_review(_review_args(args), config, base=base)
+        cmd_review(_review_args(args), config, base=base, automatic=args.auto)
     except RoundCapReached as exc:
         raise RoundCapReached(wrapup_cap_message(str(exc))) from exc
     runs = review_run_events(read_events(config.ledger_path))
@@ -594,7 +598,8 @@ def _wrapup(args: argparse.Namespace, config: Config, events: list[Event]) -> tu
     """Measure the work, review once if it is enough, and print what was found. Returns (exit code, the `--json` object)."""
     if args.report_only:
         return 0, _wrapup_report_only(events, config, config_thresholds(config))
-    plan = plan_wrapup(config, events, explicit_base=args.base, from_file=bool(args.from_file), foresee_refusal=args.dry_run)
+    plan = plan_wrapup(config, events, explicit_base=args.base, automatic=args.auto,
+                       from_file=bool(args.from_file), foresee_refusal=args.dry_run)
     print("\n".join(measure_lines(plan.base, plan.changes)))
     summary = functools.partial(report, base=plan.base, changes=plan.changes, thresholds=plan.thresholds)
     if not plan.due:
@@ -609,10 +614,12 @@ def _wrapup(args: argparse.Namespace, config: Config, events: list[Event]) -> tu
     print(f"wrapup: {plan.reason}; running a review")
     try:
         run = _run_wrapup_review(args, config, events, plan.base)
-    except RoundCapReached as exc:
+    except (RoundCapReached, DailyCapReached) as exc:
         if not args.json:
             raise
         print(f"wrapup: {exc}")
+        if isinstance(exc, DailyCapReached):
+            return exc.exit_code, summary(DAILY_CAPPED, open_unmapped=plan.open_unmapped, reason=str(exc))
         return exc.exit_code, summary(CAPPED, open_unmapped=plan.open_unmapped, reason=str(exc))
     after = read_events(config.ledger_path)
     blind_spots = run_blind_spots(after, config.legacy_unmapped_alias, run)
@@ -624,8 +631,10 @@ def _wrapup(args: argparse.Namespace, config: Config, events: list[Event]) -> tu
 def cmd_wrapup(args: argparse.Namespace, config: Config) -> int:
     if args.from_file and args.level:
         raise RatchetError("--level chooses what to review; it does nothing with --from-file")
-    if args.report_only and (args.base or args.level or args.from_file or args.dry_run):
-        raise RatchetError("--report-only measures and reviews nothing; it takes none of --base, --level, --from-file or --dry-run")
+    if args.auto and args.from_file:  # a saved review bills nothing, so it must not use up one of the day's automatic reviews
+        raise RatchetError("--auto marks a review that runs claude; it does nothing with --from-file")
+    if args.report_only and (args.base or args.level or args.from_file or args.dry_run or args.auto):
+        raise RatchetError("--report-only measures and reviews nothing; it takes none of --base, --level, --from-file, --dry-run or --auto")
     events = read_events(config.ledger_path)  # as `review` reads it: a --ledger that does not exist yet is a ledger to start
     human_output = contextlib.redirect_stdout(sys.stderr) if args.json else contextlib.nullcontext()  # stdout is the one JSON object
     with human_output:
@@ -721,6 +730,9 @@ def build_parser() -> argparse.ArgumentParser:
     wrapup.add_argument("--base", metavar="REF", help="measure from this commit instead of the last review's working tree or the fork point")
     wrapup.add_argument("--from-file", help="ingest a saved review instead of running claude (the thresholds still apply)")
     wrapup.add_argument("--json", action="store_true", help="print one JSON object on stdout; the human report goes to stderr")
+    wrapup.add_argument("--auto", action="store_true",
+                        help="mark this wrap-up as an automatic one: its review is recorded as such and counts against "
+                             "wrapup_auto_max_per_day, and is refused (exit 4) once that many ran in the last 24 hours")
     wrapup.add_argument("--report-only", action="store_true",
                         help="measure and review nothing; report the open unmapped findings of the latest review run")
     wrapup.set_defaults(func=cmd_wrapup)
