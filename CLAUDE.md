@@ -1,4 +1,4 @@
-<!-- ratchet:begin -->
-## Code style digest (review-ratchet)
+<!-- house-rules:begin -->
+## Code style digest (house-rules)
 @CODING-STYLE.digest.md
-<!-- ratchet:end -->
+<!-- house-rules:end -->

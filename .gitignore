@@ -3,10 +3,6 @@ __pycache__/
 
 # Runtime files the tool writes into the repo it is pointed at (listed here for repos that vendor it)
 .style-findings.jsonl
-.ratchet-label-page.html
-.ratchet-label-batch.json
-.ratchet/
-
-# ratchet:begin
-.ratchet/reviews/
-# ratchet:end
+.house-rules-label-page.html
+.house-rules-label-batch.json
+.house-rules/
