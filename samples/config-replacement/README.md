@@ -14,6 +14,8 @@ The files are intended for an isolated scratch repository, not production storag
 | `check_examples.py` | Deterministic failure/control checks, including mode 0600 preservation |
 | `reviewer-prompt.md` | Request a usable native-review output |
 | `maintenance-prompt.md` | Compare findings with rules and request a human decision |
+| `recorded-review.txt`, `recorded-review-provenance.json` | The raw output of one real native review, and the fingerprints of it and of the files it reviewed |
+| `reviewed/` | The exact files that review saw: `config_store.py`, `heldout_safe.py` (before the permission fix) and `heldout_unsafe.py` |
 
 ## Design the experiment before reviewing
 
@@ -31,6 +33,27 @@ sample mentions it. You decide on the final wording.
 To exercise **existing coverage**, retain the supplied REL.1. The expected rule
 decision is covered/no change when its wording already captures the finding.
 Repeated findings are not additional reasons to duplicate the clause.
+
+## Replay the recorded review
+
+`recorded-review.txt` is the raw output of the last allowed round (run `live-r3`) of the
+original acceptance. The files it names are in `reviewed/`, not the published ones: after
+that review the safe examples gained permission-bit preservation, and `config_store.py` is
+the earlier form of `safe_config.py`. To replay it without a model:
+
+1. In a new scratch git repository, copy `CODING-STYLE.md`, run
+   `house-rules init --rules-file CODING-STYLE.md` and commit.
+2. Copy the three files in `reviewed/` to the repository root, so the paths the review
+   names exist. Do not use the published `safe_config.py` or `heldout_safe.py` for this.
+3. Run `house-rules review --from-file samples/config-replacement/recorded-review.txt --run live-r3`.
+
+No reviewer is called. It records two findings: REL.1 on `heldout_unsafe.py` line 7, and an
+`unmapped` one on `config_store.py` line 18 (permission bits not preserved).
+`house-rules decision-context` then lists each source as available, with the fingerprint
+that `recorded-review-provenance.json` gives, and importing again records nothing new.
+The second finding also mentions the original repository's baseline, a `.pending`-file flow
+that is not part of this sample. `tests/test_samples.py` runs these steps and checks the
+fingerprints, so the record cannot drift from the files again.
 
 ## Run it
 

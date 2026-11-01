@@ -33,9 +33,10 @@ a fourth model review there.
 
 Inspect the [recorded review](../samples/config-replacement/recorded-review.txt)
 and [reviewed-source fingerprints](../samples/config-replacement/recorded-review-provenance.json).
-The source fingerprints describe the pre-permission-fix versions. Published examples
-include the later correction, so do not describe their exact current bytes as the
-ones reviewed in that run. Once published, the transfer pair is a regression sample,
+The source fingerprints describe the pre-permission-fix versions, and those exact files
+are kept in `samples/config-replacement/reviewed/` (a test checks each against its
+fingerprint). Published examples include the later correction, so do not describe their
+exact current bytes as the ones reviewed in that run. Once published, the transfer pair is a regression sample,
 not a hidden test set. No accuracy percentage follows from these few observations.
 
 ## Clean installation
