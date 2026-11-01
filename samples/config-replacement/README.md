@@ -16,6 +16,7 @@ The files are intended for an isolated scratch repository, not production storag
 | `maintenance-prompt.md` | Compare findings with rules and request a human decision |
 | `recorded-review.txt`, `recorded-review-provenance.json` | The raw output of one real native review, and the fingerprints of it and of the files it reviewed |
 | `reviewed/` | The exact files that review saw: `config_store.py`, `heldout_safe.py` (before the permission fix) and `heldout_unsafe.py` |
+| `make_answers.py` | Offline stand-in for the model and the person in the decision step: writes the assessment and the answers for the recorded review (`--help`; [workshop](../../WORKSHOP.md), section 3) |
 
 ## Design the experiment before reviewing
 
@@ -54,6 +55,12 @@ that `recorded-review-provenance.json` gives, and importing again records nothin
 The second finding also mentions the original repository's baseline, a `.pending`-file flow
 that is not part of this sample. `tests/test_samples.py` runs these steps and checks the
 fingerprints, so the record cannot drift from the files again.
+
+To go on from the replay to a rule decision without a model, start from the rules without
+REL.1 (so that the first finding is `unmapped`) and let `make_answers.py` write the assessment
+and the answers that `prepare-decisions` and `apply-decisions` take. The
+[workshop](../../WORKSHOP.md) (section 3) walks through it,
+and `tests/test_samples.py` runs the same path.
 
 ## Run it
 

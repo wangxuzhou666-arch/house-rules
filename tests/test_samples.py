@@ -167,3 +167,194 @@ class RecordedReviewReplayTest(RepoCase):
         before = self.ledger_bytes()
         self.cli_ok("review", "--from-file", str(recording), "--run", run)
         self.assertEqual(self.ledger_bytes(), before)
+
+
+HELPER = SAMPLE / "make_answers.py"
+RECORDING_PATH = SAMPLE / RECORDING
+
+
+def run_helper(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, "-B", str(HELPER), *args], capture_output=True, text=True)
+
+
+def sample_rules_without_rel1() -> str:
+    """The starting corpus of the workshop (`sed '6,9d'`): the sample rules minus REL.1 and the three lines that explain it."""
+    lines = (SAMPLE / "CODING-STYLE.md").read_text(encoding="utf-8").splitlines(keepends=True)
+    return "".join(lines[:5] + lines[9:])
+
+
+class WorkshopHelperTest(RepoCase):
+    """`make_answers.py` stands in for the model and the person in the workshop's decision step; what it writes must be accepted
+    by the real commands, and what is not the workshop's input must be refused."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.files = self.tmp / "files"
+        self.files.mkdir()
+
+    def adopt(self, rules: str) -> None:
+        """A repo with `rules`, committed, and the recorded review imported over the files it saw."""
+        (self.repo / "CODING-STYLE.md").write_text(rules, encoding="utf-8")
+        self.write_config(rules_files=["CODING-STYLE.md"])
+        self.cli_ok("compile")
+        self.commit("baseline")
+        for source in (SAMPLE / "reviewed").glob("*.py"):
+            shutil.copy2(source, self.repo / source.name)
+        self.cli_ok("review", "--from-file", str(RECORDING_PATH), "--run", "live-r3")
+
+    def saved(self, name: str, text: str) -> Path:
+        path = self.files / name
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def helper_ok(self, *args: str) -> dict:
+        proc = run_helper(*args)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stderr, "")
+        return json.loads(proc.stdout)
+
+    def refused(self, *args: str) -> str:
+        """The message of a refusal; a refusal prints nothing on stdout, so a redirect cannot leave a half-made file behind."""
+        proc = run_helper(*args)
+        self.assertEqual(proc.returncode, 2, proc.stdout)
+        self.assertEqual(proc.stdout, "")
+        self.assertTrue(proc.stderr.startswith("make_answers.py: error: "), proc.stderr)
+        return proc.stderr
+
+    def context_file(self, **change: object) -> Path:
+        context = json.loads(self.cli_ok("decision-context"))
+        context.update(change)
+        return self.saved("context.json", json.dumps(context))
+
+    def test_the_workshop_corpus_is_the_sample_without_rel1_and_its_notes(self) -> None:
+        rules = sample_rules_without_rel1()
+        self.assertIn("[ERR.1]", rules)
+        self.assertIn("[R.1]", rules)
+        self.assertNotIn("REL.1", rules)
+        self.assertNotIn("Scope:", rules)
+        self.assertNotIn("Prepared means", rules)
+        self.assertNotIn("power-loss", rules)
+
+    def test_the_clause_it_proposes_is_the_one_the_sample_ships(self) -> None:
+        lines = (SAMPLE / "CODING-STYLE.md").read_text(encoding="utf-8").splitlines()
+        self.adopt(sample_rules_without_rel1())
+        change = self.helper_ok("assessment", str(self.context_file()))["assessments"][0]["changes"][0]
+        self.assertEqual(change["after"].splitlines(), lines[5:7])
+
+    def test_help_names_both_commands(self) -> None:
+        proc = run_helper("--help")
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn("assessment", proc.stdout)
+        self.assertIn("answers", proc.stdout)
+        self.assertIn("--confirmed-by", run_helper("answers", "--help").stdout)
+
+    def test_the_files_it_writes_are_accepted_and_the_rule_is_added(self) -> None:
+        self.adopt(sample_rules_without_rel1())
+        self.assertEqual([(f["file"], f["rule_id"]) for f in self.events() if f["kind"] == "finding"],
+                         [("heldout_unsafe.py", "unmapped"), ("config_store.py", "unmapped")])
+        digest_before = (self.repo / "CODING-STYLE.digest.md").read_text(encoding="utf-8")
+
+        made = self.helper_ok("assessment", str(self.context_file()))
+        self.assertEqual([item["action"] for item in made["assessments"]], ["add", "keep"])
+        assessment = self.saved("assessment.json", json.dumps(made))
+        self.cli_ok("decision-context", "--assessment", str(assessment))
+        prepared = json.loads(self.cli_ok("prepare-decisions", "--assessment", str(assessment)))
+        self.assertEqual((prepared["status"], [group["id"] for group in prepared["groups"]]), ("prepared", ["a1", "a2"]))
+
+        answers_path = self.saved("answers.json", json.dumps(
+            self.helper_ok("answers", str(self.saved("prepared.json", json.dumps(prepared))), "--confirmed-by", "Ada")))
+        before = (self.repo / "CODING-STYLE.md").read_text(encoding="utf-8")
+        preview = json.loads(self.cli_ok("apply-decisions", "--dry-run", "--input", str(answers_path)))
+        self.assertEqual(preview["status"], "preview")
+        self.assertEqual((self.repo / "CODING-STYLE.md").read_text(encoding="utf-8"), before)
+        applied = json.loads(self.cli_ok("apply-decisions", "--input", str(answers_path)))
+        self.assertEqual((applied["status"], applied["accepted"], applied["answer_counts"]),
+                         ("applied", 1, {"accept": 1, "defer": 1}))
+
+        rules = (self.repo / "CODING-STYLE.md").read_text(encoding="utf-8")
+        self.assertIn("- **[REL.1]** Preserve the existing usable configuration", rules)
+        self.assertGreater(len((self.repo / "CODING-STYLE.digest.md").read_bytes()), len(digest_before.encode("utf-8")))
+        self.assertIn("REL.1 | should-fix | Preserve usable configuration", (self.repo / "CODING-STYLE.digest.md").read_text(encoding="utf-8"))
+        self.cli_ok("compile", "--check", "--strict")
+        changelog = (self.repo / "CODING-STYLE.changelog.md").read_text(encoding="utf-8")
+        self.assertIn("### add REL.1", changelog)
+        self.assertIn('Decision: accept by Ada — "Yes, add REL.1 as written."', changelog)
+        summary = json.loads(self.cli_ok("decision-summary"))["groups"]["initial"]
+        self.assertEqual((summary["change"], summary["no_change"]), ({"accept": 1}, {"defer": 1}))
+        # accepting a rule does not close the finding it came from
+        self.assertEqual([event for event in self.events() if event["kind"] == "outcome"], [])
+
+    def test_the_person_is_named_workshop_learner_unless_told_otherwise(self) -> None:
+        self.adopt(sample_rules_without_rel1())
+        assessment = self.saved("assessment.json", json.dumps(self.helper_ok("assessment", str(self.context_file()))))
+        prepared = self.saved("prepared.json", self.cli_ok("prepare-decisions", "--assessment", str(assessment)))
+        self.assertEqual(self.helper_ok("answers", str(prepared))["confirmed_by"], "workshop learner")
+
+    def test_a_missing_file_is_refused(self) -> None:
+        self.assertIn("cannot read", self.refused("assessment", str(self.files / "nope.json")))
+        self.assertIn("cannot read", self.refused("answers", str(self.files / "nope.json")))
+
+    def test_text_that_is_not_json_is_refused(self) -> None:
+        path = self.saved("context.json", "error: not a git repository\n")
+        self.assertIn("is not valid JSON", self.refused("assessment", str(path)))
+        self.assertIn("is not valid JSON", self.refused("answers", str(path)))
+
+    def test_json_that_is_not_an_object_is_refused(self) -> None:
+        self.assertIn("is not a JSON object", self.refused("assessment", str(self.saved("list.json", "[]"))))
+
+    def test_a_context_without_an_id_or_findings_is_refused(self) -> None:
+        self.adopt(sample_rules_without_rel1())
+        self.assertIn("no usable `context_id`", self.refused("assessment", str(self.context_file(context_id=""))))
+        self.assertIn("no usable `findings`", self.refused("assessment", str(self.context_file(findings=[]))))
+
+    def test_a_finding_without_an_id_is_refused(self) -> None:
+        self.adopt(sample_rules_without_rel1())
+        context = json.loads(self.cli_ok("decision-context"))
+        del context["findings"][0]["finding"]["id"]
+        self.assertIn("lacks `id` or `file`", self.refused("assessment", str(self.saved("context.json", json.dumps(context)))))
+
+    def test_a_context_that_is_not_the_recorded_review_is_refused(self) -> None:
+        self.adopt(sample_rules_without_rel1())
+        context = json.loads(self.cli_ok("decision-context"))
+        one = dict(context, findings=context["findings"][:1])
+        message = self.refused("assessment", str(self.saved("one.json", json.dumps(one))))
+        self.assertIn("knows only the two findings of recorded-review.txt", message)
+        self.assertIn("heldout_unsafe.py:7", message)
+        other = json.loads(json.dumps(context))
+        other["findings"][1]["finding"]["file"] = "other.py"
+        self.assertIn("other.py", self.refused("assessment", str(self.saved("other.json", json.dumps(other)))))
+        twice = dict(context, findings=context["findings"] + context["findings"][:1])
+        self.assertIn("knows only the two findings", self.refused("assessment", str(self.saved("twice.json", json.dumps(twice)))))
+
+    def test_a_finding_the_rules_already_cover_is_refused(self) -> None:
+        self.adopt((SAMPLE / "CODING-STYLE.md").read_text(encoding="utf-8"))
+        message = self.refused("assessment", str(self.context_file()))
+        self.assertIn("already labeled REL.1", message)
+        self.assertIn("without REL.1", message)
+
+    def test_a_batch_that_is_not_prepared_is_refused(self) -> None:
+        group = {"id": "a1", "assessment": {"action": "add"}}
+        good = {"status": "prepared", "batch_id": "b" * 64, "groups": [group]}
+        self.assertEqual(self.helper_ok("answers", str(self.saved("good.json", json.dumps(good))))["answers"][0]["decision"], "accept")
+        for name, change, expected in (
+                ("status", {"status": "preview"}, "not 'prepared'"),
+                ("no-status", {"status": None}, "not 'prepared'"),
+                ("batch", {"batch_id": ""}, "no usable `batch_id`"),
+                ("groups", {"groups": []}, "no usable `groups`"),
+                ("action", {"groups": [{"id": "a1", "assessment": {"action": "rewrite"}}]}, "no answer to give"),
+                ("no-assessment", {"groups": [{"id": "a1"}]}, "no answer to give"),
+                ("no-id", {"groups": [{"assessment": {"action": "add"}}]}, "no answer to give"),
+                ("not-a-group", {"groups": ["a1"]}, "no answer to give")):
+            with self.subTest(name):
+                self.assertIn(expected, self.refused("answers", str(self.saved(f"{name}.json", json.dumps({**good, **change})))))
+
+    def test_a_group_the_model_would_keep_is_deferred_not_accepted(self) -> None:
+        batch = {"status": "prepared", "batch_id": "b" * 64, "groups": [
+            {"id": "a1", "assessment": {"action": "add"}}, {"id": "a2", "assessment": {"action": "keep"}}]}
+        answers = self.helper_ok("answers", str(self.saved("batch.json", json.dumps(batch))))
+        self.assertEqual([(a["id"], a["decision"]) for a in answers["answers"]], [("a1", "accept"), ("a2", "defer")])
+        self.assertTrue(all(a["response"] for a in answers["answers"]))
+        self.assertEqual((answers["v"], answers["batch_id"]), (1, "b" * 64))
+
+    def test_no_command_is_an_error(self) -> None:
+        self.assertEqual(run_helper().returncode, 2)
