@@ -60,7 +60,10 @@ directory. The installed copy was byte-identical to the pushed tree, and a headl
 session listed the plugin and its four skills. That configuration had no login, so
 the session ended before a model turn and the Stop hook was not exercised on the
 downloaded copy; it was exercised on the same files locally (above). Claude Code
-cloned over SSH; installing from the public repository over HTTPS is not checked here.
+cloned over SSH. After the repository was made public, a clone over HTTPS with no
+credentials reached the same commit, and the install was repeated in another new
+configuration with SSH disabled and no git credentials: Claude Code fell back to
+HTTPS and installed the plugin.
 
 **Workshop.** An agent given only [WORKSHOP.md](../WORKSHOP.md) cloned the GitHub
 repository into an empty directory and followed the free path of every section,
