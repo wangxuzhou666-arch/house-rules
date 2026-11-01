@@ -1,0 +1,15 @@
+{
+  "v": 1,
+  "id": "rel-1b",
+  "clause": "REL.1",
+  "learned_from": [
+    "review-ratchet:l1:r1:r1-4"
+  ],
+  "violation": "code/mail_routes.py",
+  "control": "code/sender_index.py",
+  "control_kind": "exempt",
+  "held_out": true,
+  "purpose": "held-out exemption check: written after round 1, not used to tune the wording",
+  "mechanism": "apply_routes() truncates the live routes file and only then validates and writes the routes one at a time, so an invalid route part-way leaves the file with the routes before it and no copy of the previous ones.",
+  "why_unseen": "The finding was an installed tool replaced by a directory delete and file copy; this is a mail-routing configuration file truncated in place while its replacement is still being validated, and the exempt control is a derived sender lookup file (also rewritten in place) that holds nothing its routes source does not hold and is rebuilt on demand when it is missing or incomplete."
+}

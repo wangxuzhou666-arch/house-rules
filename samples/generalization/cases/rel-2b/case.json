@@ -1,0 +1,15 @@
+{
+  "v": 1,
+  "id": "rel-2b",
+  "clause": "REL.2",
+  "learned_from": [
+    "review-ratchet:l1:r1:r1-5"
+  ],
+  "violation": "code/payment_events.py",
+  "control": "code/invoice_register.py",
+  "control_kind": "exempt",
+  "held_out": true,
+  "purpose": "held-out exemption check: written after round 1, not used to tune the wording",
+  "mechanism": "The change adds an account prefix to the event key of the payment ledger (provider:event_id becomes account/provider/event_id) and reads only the new key, so a redelivered charge already stored under the old key is recorded again and a refund of an earlier charge finds no row.",
+  "why_unseen": "The finding changed the zero-padding of a review-ledger display id inside a replayed ledger; this is a namespaced idempotency key in a SQLite payment-event table (the violation of rel-2 was a host-based feed-item key with a stored key_version), and the exempt control changes only how an invoice's label is displayed (both files modify earlier versions held in base/) while deduplication and closing use an unchanged stored uid."
+}
