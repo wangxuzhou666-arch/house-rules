@@ -868,8 +868,8 @@ class TableTest(unittest.TestCase):
         self.assertEqual(lines[2][lines[0].index("summary"):], "two words split")
 
 
-class CriticVersionTest(ReviewCase):
-    """`reviewer`, `reviewer_version`, `level` and `head` on every review_run, and the line announcing a new critic version."""
+class ReviewerVersionTest(ReviewCase):
+    """`reviewer`, `reviewer_version`, `level` and `head` on every review_run, and the line announcing a new reviewer version."""
 
     OLD, NEW = "2.1.0 (Claude Code)", "2.2.0 (Claude Code)"
 
@@ -899,7 +899,7 @@ class CriticVersionTest(ReviewCase):
         self.assertEqual(run["head"], head)
         self.assertRegex(run["head"], r"^[0-9a-f]{40}$")  # the whole sha: it will be handed to git later
         self.assertNotIn("version_changed", run)
-        self.assertNotIn("critic version", out)
+        self.assertNotIn("reviewer version", out)
 
     def test_the_level_is_the_one_the_review_ran_at(self) -> None:
         self.review_with(self.OLD)
@@ -937,7 +937,7 @@ class CriticVersionTest(ReviewCase):
             self.assertNotIn("version_changed", run)
         self.assertEqual((first["head"], second["head"]), ("none", head))
         self.assertEqual(self.version_asks(), [])
-        self.assertNotIn("critic version", out)
+        self.assertNotIn("reviewer version", out)
 
     def test_the_version_is_asked_once_per_review_of_the_command_that_runs_it(self) -> None:
         self.review(self.fake_claude(review_text()), "--run", "R1")
@@ -955,54 +955,54 @@ class CriticVersionTest(ReviewCase):
                 code, out, err = self.review(self.fake_claude(review_text(FINDING_A), **kwargs), "--run", f"V{number}")
                 self.assertEqual(code, 0, err)
                 self.assertEqual(len(err.splitlines()), 1, err)
-                self.assertIn("warning: critic version not recorded", err)
+                self.assertIn("warning: reviewer version not recorded", err)
                 self.assertIn(reason, err)
                 self.assertIn("reviewer_version is null", err)
                 run = self.review_runs()[-1]
                 self.assertEqual((run["run"], run["reviewer"], run["reviewer_version"]), (f"V{number}", "claude-code", None))
-                self.assertNotIn("critic version changed", out)
+                self.assertNotIn("reviewer version changed", out)
         self.assertEqual(len(self.findings()), 3)  # the reviews themselves went ahead
 
-    def test_a_new_critic_version_is_announced_on_its_first_review_and_flagged_in_the_ledger(self) -> None:
+    def test_a_new_reviewer_version_is_announced_on_its_first_review_and_flagged_in_the_ledger(self) -> None:
         outs = [self.review_with(version, "--run", f"A{number}")[1]
                 for number, version in enumerate([self.OLD, self.OLD, self.NEW, self.NEW], start=1)]
-        announcement = f"critic version changed: {self.OLD} -> {self.NEW} (first review on this version)"
+        announcement = f"reviewer version changed: {self.OLD} -> {self.NEW} (first review on this version)"
         self.assertEqual([announcement in out for out in outs], [False, False, True, False])
-        self.assertEqual(outs[2].count("critic version changed"), 1)
+        self.assertEqual(outs[2].count("reviewer version changed"), 1)
         self.assertEqual(self.versions(), [(self.OLD, None), (self.OLD, None), (self.NEW, True), (self.NEW, None)])
 
     def test_the_version_is_compared_with_the_latest_earlier_review_not_the_first(self) -> None:
         outs = [self.review_with(version, "--run", f"L{number}")[1] for number, version in enumerate("ABBA", start=1)]
         self.assertEqual(self.versions(), [("A", None), ("B", True), ("B", None), ("A", True)])
-        self.assertIn("critic version changed: B -> A (first review on this version)", outs[3])
+        self.assertIn("reviewer version changed: B -> A (first review on this version)", outs[3])
 
     def test_a_review_without_a_version_is_skipped_when_looking_for_the_previous_one(self) -> None:
         self.review_with("A", "--run", "S1")
         self.assertEqual(self.cli("review", "--from-file", str(self.saved_review()), "--run", "S2")[0], 0)
         self.review(self.fake_claude(review_text(), version_exit_code=1), "--run", "S3")
         _, out, _ = self.review_with("B", "--run", "S4")
-        self.assertIn("critic version changed: A -> B (first review on this version)", out)
+        self.assertIn("reviewer version changed: A -> B (first review on this version)", out)
         self.assertEqual(self.versions(), [("A", None), (None, None), (None, None), ("B", True)])
 
     def test_a_review_with_no_version_in_between_is_no_change(self) -> None:
         self.review_with("A", "--run", "N1")
         self.review(self.fake_claude(review_text(), version_exit_code=1), "--run", "N2")
         _, out, _ = self.review_with("A", "--run", "N3")
-        self.assertNotIn("critic version changed", out)
+        self.assertNotIn("reviewer version changed", out)
         self.assertEqual(self.versions(), [("A", None), (None, None), ("A", None)])
 
     def test_the_announcement_comes_before_the_findings_table(self) -> None:
         self.review_with("A", "--run", "T1")
         _, out, _ = self.review(self.fake_claude(review_text(FINDING_A), version="B"), "--run", "T2")
-        self.assertLess(out.index("critic version changed"), out.index("rule_id"))
+        self.assertLess(out.index("reviewer version changed"), out.index("rule_id"))
 
     def test_a_review_that_fails_leaves_the_announcement_for_the_next_one(self) -> None:
         self.review_with("A", "--run", "F1")
         code, out, _ = self.review_with("B", "--run", "F2", stdout="The model printed no JSON.\n")
         self.assertEqual(code, 1)
-        self.assertNotIn("critic version changed", out)
+        self.assertNotIn("reviewer version changed", out)
         _, out, _ = self.review_with("B", "--run", "F3")
-        self.assertIn("critic version changed: A -> B (first review on this version)", out)
+        self.assertIn("reviewer version changed: A -> B (first review on this version)", out)
         self.assertEqual(self.versions(), [("A", None), ("B", True)])
 
     def test_nothing_is_asked_or_announced_when_no_review_runs(self) -> None:
@@ -1013,7 +1013,7 @@ class CriticVersionTest(ReviewCase):
         self.assertEqual(self.review(newer, "--run", "D2")[0], 3)  # a refused round costs nothing
         _, out, err = self.cli("review", "--from-file", str(self.reviews_dir() / "D1.txt"), "--run", "D1")  # a replay
         self.assertEqual(err, "")
-        self.assertNotIn("critic version", out)
+        self.assertNotIn("reviewer version", out)
         self.assertEqual(self.version_asks(), [["--version"]])
         self.assertEqual(self.versions(), [("A", None)])
 

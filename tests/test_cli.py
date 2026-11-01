@@ -116,11 +116,11 @@ class CountByRuleTest(RepoCase):
         self.assertNotIn("P0E.1", self.cli_ok("count", "--by-rule", "--label-source"))
 
 
-class CountByCriticVersionTest(RepoCase):
-    """With findings from more than one critic version `count` lists them per version; with one it prints what it always did."""
+class CountByReviewerVersionTest(RepoCase):
+    """With findings from more than one reviewer version `count` lists them per version; with one it prints what it always did."""
 
     A, B = "2.1.0 (Claude Code)", "2.2.0 (Claude Code)"
-    HEADING = "by critic version:"
+    HEADING = "by reviewer version:"
 
     def fixed(self, finding: dict) -> dict:
         return {"v": 1, "kind": "outcome", "id": finding["id"], "outcome": "fixed", "outcome_by": "human", "evidence": "e",
@@ -137,7 +137,7 @@ class CountByCriticVersionTest(RepoCase):
             review_round(run="r1", reviewer_version=self.A), review_finding("r1-1", run="r1"), closed, self.fixed(closed),
             review_round(run="r2", round=2, reviewer_version=self.B), review_finding("r2-1", run="r2", source="l2"),
             review_round(run="r3", round=3, source="file", reviewer=None, reviewer_version=None), review_finding("r3-1", run="r3"),
-            review_finding("r4-1", run="r4"),  # from before review_run events: no run to say which critic
+            review_finding("r4-1", run="r4"),  # from before review_run events: no run to say which reviewer
             gate_finding("a.py"))
         out = self.cli_ok("count")
         self.assertEqual(self.lines_after_heading(out), [f"  {self.A}: 2 total, 1 open", f"  {self.B}: 1 total, 1 open",
@@ -165,7 +165,7 @@ class CountByCriticVersionTest(RepoCase):
                         review_round(run="r2", round=2, reviewer_version=self.B))  # a clean review
         self.assertNotIn(self.HEADING, self.cli_ok("count"))
 
-    def test_a_ledger_from_before_the_critic_fields_prints_what_it_always_did(self) -> None:
+    def test_a_ledger_from_before_the_reviewer_fields_prints_what_it_always_did(self) -> None:
         self.ledger.write_text((FIXTURES / "legacy_ledger.jsonl").read_text(encoding="utf-8"), encoding="utf-8")
         self.append_raw(review_round(run="r1"), review_round(run="r2", round=2))
         self.assertNotIn(self.HEADING, self.cli_ok("count"))

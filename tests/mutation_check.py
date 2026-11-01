@@ -426,7 +426,7 @@ MUTANTS = (
            'event["kind"] == "review_run" and event["run"] == run_id for event in events)  # re-ingesting',
            'event["kind"] == "review_run" for event in events)  # re-ingesting'),
 
-    # v1: review snippet + critic version
+    # v1: review snippet + reviewer version
     Mutant("snippet: review never fills one", "house_rules/cli.py",
            'discovered_at=None, label="review", locate=locate)', 'discovered_at=None, label="review", locate=None)'),
     Mutant("snippet: a worktree snippet is labeled review", "house_rules/review_evidence.py",
@@ -458,8 +458,8 @@ MUTANTS = (
            'return re.search(pattern[:-1] + r"\\Z" if pattern.endswith("$") else pattern, text) is not None',
            "return re.search(pattern, text) is not None"),
     Mutant("critic: the new-version banner is dropped", "house_rules/cli.py",
-           '    if replaced_version is not None:\n        print(f"critic version changed',
-           '    if False:\n        print(f"critic version changed'),
+           '    if replaced_version is not None:\n        print(f"reviewer version changed',
+           '    if False:\n        print(f"reviewer version changed'),
     Mutant("critic: version_changed is computed against the first review, not the latest", "house_rules/review.py",
            "for event in reversed(events)\n", "for event in events\n"),
     Mutant("critic: version_changed is not written", "house_rules/review.py",
@@ -468,9 +468,9 @@ MUTANTS = (
            "        return critic_version(tree)\n    except HouseRulesError as exc:\n        reason = str(exc).splitlines()[0]",
            "        return critic_version(tree)\n    except KeyError as exc:\n        reason = str(exc).splitlines()[0]"),
     Mutant("critic: an unreadable version is not said", "house_rules/cli.py",
-           'print(f"warning: critic version not recorded ({reason}); this review', 'pass  # print(f"warning: critic version not recorded ({reason}); this review'),
+           'print(f"warning: reviewer version not recorded ({reason}); this review', 'pass  # print(f"warning: reviewer version not recorded ({reason}); this review'),
     Mutant("critic: count has no breakdown by version", "house_rules/cli.py",
-           '    if version_rows:\n        print("by critic version:")', '    if False:\n        print("by critic version:")'),
+           '    if version_rows:\n        print("by reviewer version:")', '    if False:\n        print("by reviewer version:")'),
     Mutant("critic: count lists a single version", "house_rules/review.py",
            "    if len(versions) < 2:", "    if len(versions) < 1:"),
     Mutant("critic: count counts gate findings", "house_rules/review.py",

@@ -156,7 +156,7 @@ def review_run_event(repo: str, ts: str, *, run_id: str, key: str, round_number:
 
 
 def replaced_critic_version(events: list[Event], reviewer_version: str | None) -> str | None:
-    """The critic version this review replaces: the latest one a review_run recorded, if `reviewer_version` differs from it.
+    """The reviewer version this review replaces: the latest one a review_run recorded, if `reviewer_version` differs from it.
 
     None means nothing to announce: this review has no version, none was recorded before, or it is the same one. A
     review_run without a version (read with --from-file, or `--version` failed) is skipped, not taken as "the previous".
@@ -169,12 +169,12 @@ def replaced_critic_version(events: list[Event], reviewer_version: str | None) -
 
 
 def critic_version_counts(events: list[Event], state: dict[str, FindingState]) -> list[tuple[str | None, int, int]]:
-    """[(critic version, findings, open)] for the review findings in `state`, versions in the order they first reviewed.
+    """[(reviewer version, findings, open)] for the review findings in `state`, versions in the order they first reviewed.
 
     A finding has the version recorded by the review_run of its run. The row with version None collects review findings
     whose run recorded none (an older ledger, a --from-file review, an unreadable version) and comes last. Empty unless
     findings come from two or more distinct versions: with one there is nothing to tell apart. Gate findings are not the
-    critic's and are left out. The rows are a listing, not a comparison: a different critic is a different instrument.
+    reviewer's and are left out. The rows are a listing, not a comparison: a different reviewer is a different instrument.
     """
     version_of_run: dict[str, str | None] = {}
     version_order: list[str] = []

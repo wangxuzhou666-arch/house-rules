@@ -140,7 +140,7 @@ def _read_critic_version(tree: Path) -> str | None:
         return critic_version(tree)
     except HouseRulesError as exc:
         reason = str(exc).splitlines()[0]
-        print(f"warning: critic version not recorded ({reason}); this review's reviewer_version is null", file=sys.stderr)
+        print(f"warning: reviewer version not recorded ({reason}); this review's reviewer_version is null", file=sys.stderr)
         return None
 
 
@@ -250,7 +250,7 @@ def cmd_review(args: argparse.Namespace, config: Config, *, base: Base | None = 
                                                         sha=head_sha(tree), discovered_at=None, label="review", locate=locate)
     replaced_version = replaced_critic_version(events, reviewer_version)
     if replaced_version is not None:
-        print(f"critic version changed: {replaced_version} -> {reviewer_version} (first review on this version)")
+        print(f"reviewer version changed: {replaced_version} -> {reviewer_version} (first review on this version)")
     print("\n".join(findings_table(fresh)) if fresh else "no new findings")
     run_event = review_run_event(config.repo_slug, now_iso(), run_id=run_id, key=key, round_number=round_number,
                                  max_rounds=config.max_review_rounds, over_cap=over_cap, finding_count=finding_count,
@@ -293,9 +293,9 @@ def cmd_count(args: argparse.Namespace, config: Config) -> int:
         counts = Counter(effective_rule_id(finding, config.legacy_unmapped_alias) for finding in open_list)
         for rule_id, count in sorted(counts.items(), key=lambda pair: (-pair[1], pair[0])):
             print(f"  {rule_id}: {count}" + (_label_sources(rule_id, open_list, config) if args.label_source else ""))
-    version_rows = critic_version_counts(events, state)  # empty unless the findings come from two or more critic versions
+    version_rows = critic_version_counts(events, state)  # empty unless the findings come from two or more reviewer versions
     if version_rows:
-        print("by critic version:")
+        print("by reviewer version:")
         for version, finding_total, open_total in version_rows:
             print(f"  {version or 'no version recorded'}: {finding_total} total, {open_total} open")
     print(_review_rounds_line(events, config, config.worktree))

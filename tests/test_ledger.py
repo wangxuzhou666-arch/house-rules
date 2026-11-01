@@ -79,8 +79,8 @@ class ValidateTest(unittest.TestCase):
         self.assertEqual(ledger.effective_rule_id(review_finding(rule_id="P0E.1"), alias), "P0E.1")
 
 
-class SnippetAndCriticFieldsTest(unittest.TestCase):
-    """snippet_source and the review_run fields about the critic: optional, so old events stay valid, and the same in the schema file."""
+class SnippetAndReviewerFieldsTest(unittest.TestCase):
+    """snippet_source and the review_run fields about the reviewer: optional, so old events stay valid, and the same in the schema file."""
 
     def problems(self, event: dict) -> tuple[list[str], list[str]]:
         """(problems found by the code, errors found by the schema file)."""
@@ -109,23 +109,23 @@ class SnippetAndCriticFieldsTest(unittest.TestCase):
         self.assert_valid(review_finding())
         self.assert_valid(review_finding(snippet="typed by hand"))
 
-    def test_a_review_run_may_carry_every_critic_field(self) -> None:
+    def test_a_review_run_may_carry_every_reviewer_field(self) -> None:
         self.assert_valid(review_round(reviewer="claude-code", reviewer_version="2.1.45 (Claude Code)", level="high",
                                        head="0123456789abcdef0123456789abcdef01234567", version_changed=True))
         self.assert_valid(review_round(reviewer="claude-code", reviewer_version="2.1.45", level="max", head="none",
                                        version_changed=False))
 
-    def test_the_critic_fields_may_be_null_where_the_value_is_not_known(self) -> None:
+    def test_the_reviewer_fields_may_be_null_where_the_value_is_not_known(self) -> None:
         self.assert_valid(review_round(source="file", reviewer=None, reviewer_version=None, level=None, head="0a1b2c3d"))
         for field in ("reviewer", "reviewer_version", "level"):
             self.assert_valid(review_round(**{field: None}))
 
-    def test_a_review_run_from_before_the_critic_fields_is_still_valid(self) -> None:
+    def test_a_review_run_from_before_the_reviewer_fields_is_still_valid(self) -> None:
         old = review_round()
         self.assertTrue({"reviewer", "reviewer_version", "level", "head", "version_changed"}.isdisjoint(old))
         self.assert_valid(old)
 
-    def test_malformed_critic_fields_are_invalid(self) -> None:
+    def test_malformed_reviewer_fields_are_invalid(self) -> None:
         for field, bad in (("reviewer", ""), ("reviewer", 7), ("reviewer_version", ""), ("reviewer_version", 2.1),
                            ("reviewer_version", ["2.1"]), ("level", ""), ("level", 3), ("head", None), ("head", ""),
                            ("head", "XYZ"), ("head", "main"), ("head", "abc"), ("head", "A" * 40), ("head", "a" * 41),
@@ -133,7 +133,7 @@ class SnippetAndCriticFieldsTest(unittest.TestCase):
             with self.subTest(field=field, value=bad):
                 self.assert_invalid(review_round(**{field: bad}))
 
-    def test_the_critic_fields_do_not_make_other_kinds_valid_elsewhere(self) -> None:
+    def test_the_reviewer_fields_do_not_make_other_kinds_valid_elsewhere(self) -> None:
         self.assert_invalid(review_finding(reviewer="claude-code"))
         self.assert_invalid(gate_pass(["a.py"]) | {"head": "0a1b2c3d"})
 

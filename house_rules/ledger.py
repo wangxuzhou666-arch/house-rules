@@ -2,7 +2,7 @@
 
 Four event kinds share one JSON-lines file: `finding` (something was flagged), `outcome` (what became of it),
 `gate_pass` (an automated gate passed over these files) and `review_run` (one review round of a change happened; it
-feeds the round cap, records which critic ran and on what HEAD and working tree, and never touches a finding; the daily cap on
+feeds the round cap, records which reviewer ran and on what HEAD and working tree, and never touches a finding; the daily cap on
 automatic reviews does not read it: that counts the reservations in `.house-rules/auto-reservations.jsonl`, see reservations.py).
 Current state = fold of the events in file order.
 Validation mirrors schemas/finding.v1.schema.json; tests/test_schema.py keeps the two in step.
@@ -146,7 +146,7 @@ _REVIEW_RUN_FIELDS: dict[str, Check] = {
     "over_cap": lambda value: type(value) is bool,
     "finding_count": _is_int_at_least(0),
     "source": _one_of(REVIEW_RUN_SOURCES),
-    # Added with the critic version: absent on older events. Structural checks only, so a later reviewer or level never
+    # Added with the reviewer version: absent on older events. Structural checks only, so a later reviewer or level never
     # makes an old ledger unreadable.
     "reviewer": _or_null(_nonempty_str),
     "reviewer_version": _or_null(_nonempty_str),
