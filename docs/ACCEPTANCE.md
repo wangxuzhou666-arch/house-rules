@@ -10,14 +10,15 @@ follows unchanged.
 
 | Check | Result |
 |---|---|
-| Unit and integration suite | 2,097 tests passed |
+| Unit and integration suite | 2,101 tests passed |
 | Offline acceptance script ([Clean installation](#clean-installation)) | passed |
-| Mutation definitions | 1,533 defined; each matches exactly one place in its file |
+| Mutation definitions | 1,534 defined; each matches exactly one place in its file |
 | Full mutation run | not completed for this release (below) |
 | `claude plugin validate` | passes with two warnings; `--strict` fails on one of them (below) |
 | Generalization check | three rounds recorded; the replay is offline and reproduces the committed results |
 | Automatic wrap-up | exercised live twice: headless with a stand-in reviewer, and in an editor session with the real reviewer (below) |
-| Remote marketplace install | not checked yet; it needs the first push |
+| Remote marketplace install | done from the GitHub repository while it was still private (below) |
+| Workshop, free path | walked from a fresh clone of the GitHub repository (below) |
 
 **Mutation.** The last complete run is the one of 2026-10-28 below: 328 of 328
 caught. Mutants were added in groups with the code they guard, and each group was
@@ -51,6 +52,23 @@ review run. In an editor session with the real built-in `/code-review`, commits
 triggered three automatic wrap-ups in turn, the three review rounds of one branch
 (9, 8 and 6 findings). No review started another, and each left one review run in
 the ledger.
+
+**Remote install.** With the GitHub repository still private, `claude plugin
+marketplace add wangxuzhou666-arch/house-rules` and `claude plugin install
+house-rules@house-rules` were run against a separate, empty Claude Code configuration
+directory. The installed copy was byte-identical to the pushed tree, and a headless
+session listed the plugin and its four skills. That configuration had no login, so
+the session ended before a model turn and the Stop hook was not exercised on the
+downloaded copy; it was exercised on the same files locally (above). Claude Code
+cloned over SSH; installing from the public repository over HTTPS is not checked here.
+
+**Workshop.** An agent given only [WORKSHOP.md](../WORKSHOP.md) cloned the GitHub
+repository into an empty directory and followed the free path of every section,
+skipping the paid steps and the plugin install. Every "What you should see" block
+matched its output. It reported four frictions, fixed before release: no command to
+check the Python version (and a traceback instead of a message on Python 3.9, now one
+line naming the requirement), a `tail` that cut off the totals in section 6, a missing
+output line in section 4, and an unclear reference to which `heldout_safe.py` to use.
 
 ## v0 record (2026-10-28)
 
