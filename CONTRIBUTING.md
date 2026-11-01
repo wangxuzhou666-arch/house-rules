@@ -16,6 +16,11 @@ useful for your own repo. If you want to give something back, this is what helps
   snippet that must stay clean. [samples/config-replacement](samples/config-replacement/README.md)
   is the model. The two sides should differ in the behavior that matters, not in
   variable names.
+- **Generalization cases.** A violation file, a legitimate control (compliant, or covered by
+  the rule's stated exemption) and an `oracle.py` that runs both under the failure the rule is
+  about and exits 0 only if the violation breaks and the control does not, in the shape of
+  [samples/generalization/cases/rel-1](samples/generalization/cases/rel-1/). Say which clause
+  it tests. Standard library only.
 - **Bug fixes with tests.** Show the failing test first, then the fix.
 - **Docs.** Corrections, clearer wording, translations. `README.zh.md`,
   `docs/RULE-WRITING.zh.md` and `templates/CODING-STYLE.template.zh.md` mirror their English
