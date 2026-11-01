@@ -18,19 +18,24 @@ its work gets easier over time.
 1. **The problem.** Claude Code's `/code-review` is good at finding problems in my code, but
    it does not know my coding style. It reviews against its own idea of good code, and nothing
    it finds makes it back into my rules.
-2. **The idea.** Let the coding style and the reviewer work as each other's copilot. The style
-   goes into every coding session and every review. What the reviewer finds that the style
-   does not cover comes back as a proposed rule change, and I decide.
-3. **The catch.** Rules that only pile up can backfire: a growing style document blows up the
-   context, every session and every review pays for it, and a context file has to earn that
-   cost. In recent studies, LLM-written context files did not help and cost about 20% more,
+2. **The idea: a data flywheel.** Every review's findings are data. A finding a rule covers is
+   recorded under that clause; one no rule covers is a blind spot, and it comes back as a
+   proposed rule change that I decide on. The rules I accept go into the next coding session
+   and the next review, and that review produces the next findings. The aim is a style that
+   gets closer, turn by turn, to what I actually care about.
+3. **The catch.** A flywheel that only adds rules can backfire: a growing style document blows
+   up the context, every session and every review pays for it, and a context file has to earn
+   that cost. In recent studies, LLM-written context files did not help and cost about 20% more,
    and a few focused skills beat one big one ([related work](docs/METHOD.md#6-related-work)).
    Reviews cost money too, so reviewing every commit is not an option.
-4. **What I built.** A low-cost plugin that keeps the style document evolving while I work:
+4. **What I built.** A low-cost plugin that keeps the flywheel turning while I work, without
+   letting it grow heavier:
+   - a proposal is not only an addition: it can also rewrite, merge or retire a rule (this
+     repo's REL.4 went in by merging two older clauses to free the bytes);
    - the rules are compiled into a digest of at most 4096 bytes by default, so a new rule has
      to fit, or something is merged or retired first;
    - a review runs only when enough has changed, and is capped per change and per day;
-   - it asks me only when it finds a blind spot.
+   - it asks me only when it finds a blind spot, and I approve every rule change.
 
 ## What it is, and what it is not
 
