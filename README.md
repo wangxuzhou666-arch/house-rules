@@ -8,7 +8,26 @@ What an external code reviewer (Claude Code's built-in `/code-review`) keeps fin
 your code becomes written, versioned rules. You approve each rule change one by one. The
 rules are compiled into a short digest that both your coding session and the next review read.
 
-[Limits](#limits-stated-first) · [The loop](#the-loop) · [Try it for free](#try-it-for-free) · [Install](#install) · [Quickstart](#quickstart) · [Make it yours](#make-it-yours) · [Cost controls](#cost-controls)
+[Why this exists](#why-this-exists) · [The loop](#the-loop) · [Limits](#limits) · [Try it for free](#try-it-for-free) · [Install](#install) · [Quickstart](#quickstart) · [Make it yours](#make-it-yours) · [Cost controls](#cost-controls)
+
+## Why this exists
+
+1. **The problem.** Claude Code's `/code-review` is good at finding problems in my code, but
+   it does not know my coding style. It reviews against its own idea of good code, and nothing
+   it finds makes it back into my rules.
+2. **The idea.** Let the coding style and the reviewer work as each other's copilot. The style
+   goes into every coding session and every review. What the reviewer finds that the style
+   does not cover comes back as a proposed rule change, and I decide.
+3. **The catch.** A style document that keeps growing blows up the context: every session and
+   every review pays for it, and a context file has to earn that cost. In recent studies,
+   LLM-written context files did not help and cost about 20% more, and a few focused skills
+   beat one big one ([related work](docs/METHOD.md#6-related-work)). Reviews cost money too,
+   so reviewing every commit is not an option.
+4. **What I built.** A low-cost plugin that keeps the style document evolving while I work:
+   - the rules are compiled into a digest of at most 4096 bytes by default, so a new rule has
+     to fit, or something is merged or retired first;
+   - a review runs only when enough has changed, and is capped per change and per day;
+   - it asks me only when it finds a blind spot.
 
 ## What it is, and what it is not
 
@@ -36,7 +55,70 @@ both read, and to change that text on evidence:
 The one thing that is measured is whether a rule learned from one finding still works on a
 new case: [the generalization check](#the-generalization-check). Its result is mostly negative.
 
-## Limits, stated first
+## The loop
+
+```mermaid
+---
+config:
+  flowchart:
+    wrappingWidth: 360
+    rankSpacing: 30
+    nodeSpacing: 24
+---
+flowchart TD
+  S1["1. You write code as usual.<br/>Your session reads the rules digest."]
+  S2["2. You commit as usual.<br/>A fix commit with a Fixes-Finding line<br/>marks that finding as fixed."]
+  S3["3. A turn ends after a commit.<br/>Has enough changed since the last review?<br/>200 lines or 5 files."]
+  S4["4. Claude has a reviewer look at the changes<br/>in the background.<br/>It is Claude Code's own /code-review."]
+  S5["5. Each problem goes into a local ledger:<br/>where it is, the code, which rule it breaks.<br/>If no rule covers it, it is a blind spot."]
+  S6["6. If there is a new blind spot,<br/>Claude asks you one question:<br/>which of these are not real problems?<br/>Write the rest into rules now?"]
+  S7["7. Claude drafts at most 3 rule changes.<br/>You approve, edit, reject or defer each one."]
+  S8["8. Rules, digest and changelog update together.<br/>The changelog keeps the text before and after,<br/>the evidence and your words.<br/>A batch can be rolled back."]
+  X1["Output from another reviewer:<br/>import it with review --from-file."]
+  G1["Generalization check: test a rule on similar code<br/>it has not seen.<br/>Replaying recorded reviews is free,<br/>a new round costs money.<br/>Mostly failed so far: round 1 passed 1 of 7."]
+  G2["Keep the change or roll it back?<br/>You decide."]
+  N["Spending is capped.<br/>Automatic reviews are off<br/>until init turns them on.<br/>Nothing runs below 200 lines or 5 files.<br/>At most 3 rounds per change.<br/>At most 2 automatic reviews in any 24 hours,<br/>a failed one counts.<br/>One question and at most 3 drafts per wrap-up."]
+  B1a(["back to step 1"])
+  B1b(["back to step 1"])
+  B1c(["back to step 1"])
+  B7(["back to step 7"])
+
+  S1 --> S2 --> S3
+  S3 -->|"not yet"| B1a
+  S3 -->|"enough"| S4
+  S4 --> S5
+  S5 --> S6
+  S6 -->|"no new blind spot"| B1b
+  S6 -->|"new blind spot"| S7
+  S7 --> S8
+  S8 --> B1c
+  X1 -.-> S5
+  S8 -.-> G1
+  G1 -.-> G2
+  G2 -.-> B7
+  S3 ~~~ N
+
+  classDef decide fill:#ffd54f,stroke:#8d6e00,stroke-width:2px,color:#1a1a1a
+  classDef cap fill:#e8eaf0,stroke:#5c6370,stroke-dasharray:5 3,color:#1a1a1a
+  class S6,S7,G2 decide
+  class N cap
+```
+
+Yellow boxes: the three places where you decide. Dotted lines: optional side paths. Round boxes: back to an earlier step.
+
+With the Claude Code plugin the loop runs by itself. Install it, run `/house-rules:setup`
+once, and commit as usual: when enough has changed, Claude runs the review in the background,
+and you answer one question only when it finds a new blind spot. See the
+[Quickstart](#quickstart) and [how it fits into daily work](docs/INTEGRATION.md).
+
+The author has used the loop on this repository. Its local ledger, which is not committed and
+cannot be checked by you, held 39 findings from 5 reviews on 2026-10-31: 24 fixed, 5 marked as
+not a real problem, 10 still open. 32 of the 39 matched no existing rule. The 17 accepted
+rule changes (some later rolled back) are public in
+[CODING-STYLE.changelog.md](CODING-STYLE.changelog.md), each with its evidence and the
+decision. That is a record of activity, not evidence that the code got better.
+
+## Limits
 
 - **The one measurement is small and mostly negative.** The generalization check covers
   4 rules, 7 cases, 3 runs per condition, one reviewer version (Claude Code 2.1.284) and one
@@ -61,34 +143,6 @@ new case: [the generalization check](#the-generalization-check). Its result is m
   sample, so a quiet review does not prove that no blind spot is left.
 
 The full list, with the evidence: [docs/METHOD.md](docs/METHOD.md#8-limits).
-
-## The loop
-
-```mermaid
-flowchart LR
-  A["Code change"] --> B["Reviewer: Claude Code /code-review"]
-  B --> C["Findings with source evidence"]
-  C --> D["Model: does a rule cover it? proposes a rule change"]
-  D --> E["You decide, one proposal at a time"]
-  E -->|"approve the exact text"| F["Rules + digest + changelog"]
-  E -->|"adjust / reject / defer"| G["Decision history kept"]
-  F --> B
-  F --> H["Your coding session reads the digest"]
-  F --> I["Generalization check: replay recorded reviews"]
-  I -.->|"you keep or roll back"| E
-```
-
-With the Claude Code plugin the loop runs by itself. Install it, run `/house-rules:setup`
-once, and commit as usual: when enough has changed, Claude runs the review in the background,
-and you answer one question only when it finds a new blind spot. See the
-[Quickstart](#quickstart) and [how it fits into daily work](docs/INTEGRATION.md).
-
-The author has used the loop on this repository. Its local ledger, which is not committed and
-cannot be checked by you, held 39 findings from 5 reviews on 2026-10-31: 24 fixed, 5 marked as
-not a real problem, 10 still open. 32 of the 39 matched no existing rule. The 17 accepted
-rule changes (some later rolled back) are public in
-[CODING-STYLE.changelog.md](CODING-STYLE.changelog.md), each with its evidence and the
-decision. That is a record of activity, not evidence that the code got better.
 
 ## The generalization check
 
