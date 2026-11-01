@@ -1,11 +1,16 @@
 {
   "v": 1,
+  "round": 1,
+  "digest_sha256": "f85fe1df1803e7e5ca40660f2e60eccfa26f8f31a82c9938ca2f04a5d360a3eb",
   "level": "high",
   "runs_per_condition": 3,
   "pass_rule": {
     "violation_labeled_runs_at_least": 2,
     "control_labeled_runs_at_most": 0,
     "decided_in": "with_rule"
+  },
+  "secondary_metrics": {
+    "cited": "secondary, declared after round 1, no pass line, never part of a verdict: the runs in which a finding on that file has a summary that names the case's clause (REL.4 or rel-4); the failure scenario is not read"
   },
   "reviewer_versions": [
     "2.1.284 (Claude Code)"
@@ -28,6 +33,10 @@
           "violation_flagged_runs": 3,
           "control_labeled_runs": 3,
           "control_flagged_runs": 3,
+          "secondary": {
+            "violation_cited_runs": 1,
+            "control_cited_runs": 1
+          },
           "runs": [
             {
               "run": 1,
@@ -49,7 +58,11 @@
               ],
               "other_file_findings": 0,
               "attempts": 1,
-              "first_attempt_failure": null
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": false,
+                "control_cited": false
+              }
             },
             {
               "run": 2,
@@ -69,7 +82,11 @@
               ],
               "other_file_findings": 0,
               "attempts": 1,
-              "first_attempt_failure": null
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": true,
+                "control_cited": true
+              }
             },
             {
               "run": 3,
@@ -91,7 +108,11 @@
               ],
               "other_file_findings": 0,
               "attempts": 1,
-              "first_attempt_failure": null
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": false,
+                "control_cited": false
+              }
             }
           ]
         },
@@ -103,6 +124,10 @@
           "violation_flagged_runs": 3,
           "control_labeled_runs": 0,
           "control_flagged_runs": 3,
+          "secondary": {
+            "violation_cited_runs": 0,
+            "control_cited_runs": 0
+          },
           "runs": [
             {
               "run": 1,
@@ -124,7 +149,11 @@
               ],
               "other_file_findings": 0,
               "attempts": 1,
-              "first_attempt_failure": null
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": false,
+                "control_cited": false
+              }
             },
             {
               "run": 2,
@@ -145,7 +174,11 @@
               ],
               "other_file_findings": 0,
               "attempts": 1,
-              "first_attempt_failure": null
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": false,
+                "control_cited": false
+              }
             },
             {
               "run": 3,
@@ -166,7 +199,11 @@
               ],
               "other_file_findings": 0,
               "attempts": 1,
-              "first_attempt_failure": null
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": false,
+                "control_cited": false
+              }
             }
           ]
         }
@@ -188,6 +225,10 @@
           "violation_flagged_runs": 3,
           "control_labeled_runs": 2,
           "control_flagged_runs": 3,
+          "secondary": {
+            "violation_cited_runs": 1,
+            "control_cited_runs": 0
+          },
           "runs": [
             {
               "run": 1,
@@ -207,7 +248,11 @@
               ],
               "other_file_findings": 0,
               "attempts": 1,
-              "first_attempt_failure": null
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": true,
+                "control_cited": false
+              }
             },
             {
               "run": 2,
@@ -227,7 +272,11 @@
               ],
               "other_file_findings": 0,
               "attempts": 1,
-              "first_attempt_failure": null
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": false,
+                "control_cited": false
+              }
             },
             {
               "run": 3,
@@ -247,7 +296,11 @@
               ],
               "other_file_findings": 0,
               "attempts": 1,
-              "first_attempt_failure": null
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": false,
+                "control_cited": false
+              }
             }
           ]
         },
@@ -259,6 +312,10 @@
           "violation_flagged_runs": 3,
           "control_labeled_runs": 0,
           "control_flagged_runs": 3,
+          "secondary": {
+            "violation_cited_runs": 0,
+            "control_cited_runs": 0
+          },
           "runs": [
             {
               "run": 1,
@@ -278,7 +335,11 @@
               ],
               "other_file_findings": 0,
               "attempts": 1,
-              "first_attempt_failure": null
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": false,
+                "control_cited": false
+              }
             },
             {
               "run": 2,
@@ -297,7 +358,11 @@
               ],
               "other_file_findings": 0,
               "attempts": 1,
-              "first_attempt_failure": null
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": false,
+                "control_cited": false
+              }
             },
             {
               "run": 3,
@@ -317,7 +382,11 @@
               ],
               "other_file_findings": 0,
               "attempts": 1,
-              "first_attempt_failure": null
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": false,
+                "control_cited": false
+              }
             }
           ]
         }
@@ -339,6 +408,10 @@
           "violation_flagged_runs": 3,
           "control_labeled_runs": 3,
           "control_flagged_runs": 3,
+          "secondary": {
+            "violation_cited_runs": 1,
+            "control_cited_runs": 1
+          },
           "runs": [
             {
               "run": 1,
@@ -360,7 +433,11 @@
               ],
               "other_file_findings": 0,
               "attempts": 1,
-              "first_attempt_failure": null
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": false,
+                "control_cited": false
+              }
             },
             {
               "run": 2,
@@ -382,7 +459,11 @@
               ],
               "other_file_findings": 0,
               "attempts": 1,
-              "first_attempt_failure": null
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": false,
+                "control_cited": false
+              }
             },
             {
               "run": 3,
@@ -404,7 +485,11 @@
               ],
               "other_file_findings": 0,
               "attempts": 1,
-              "first_attempt_failure": null
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": true,
+                "control_cited": true
+              }
             }
           ]
         },
@@ -416,6 +501,10 @@
           "violation_flagged_runs": 3,
           "control_labeled_runs": 0,
           "control_flagged_runs": 3,
+          "secondary": {
+            "violation_cited_runs": 0,
+            "control_cited_runs": 0
+          },
           "runs": [
             {
               "run": 1,
@@ -437,7 +526,11 @@
               ],
               "other_file_findings": 0,
               "attempts": 1,
-              "first_attempt_failure": null
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": false,
+                "control_cited": false
+              }
             },
             {
               "run": 2,
@@ -459,7 +552,11 @@
               ],
               "other_file_findings": 0,
               "attempts": 1,
-              "first_attempt_failure": null
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": false,
+                "control_cited": false
+              }
             },
             {
               "run": 3,
@@ -480,7 +577,11 @@
               ],
               "other_file_findings": 0,
               "attempts": 1,
-              "first_attempt_failure": null
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": false,
+                "control_cited": false
+              }
             }
           ]
         }
@@ -502,6 +603,10 @@
           "violation_flagged_runs": 3,
           "control_labeled_runs": 0,
           "control_flagged_runs": 3,
+          "secondary": {
+            "violation_cited_runs": 1,
+            "control_cited_runs": 0
+          },
           "runs": [
             {
               "run": 1,
@@ -523,7 +628,11 @@
               ],
               "other_file_findings": 0,
               "attempts": 1,
-              "first_attempt_failure": null
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": true,
+                "control_cited": false
+              }
             },
             {
               "run": 2,
@@ -543,7 +652,11 @@
               ],
               "other_file_findings": 0,
               "attempts": 1,
-              "first_attempt_failure": null
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": false,
+                "control_cited": false
+              }
             },
             {
               "run": 3,
@@ -565,7 +678,11 @@
               ],
               "other_file_findings": 0,
               "attempts": 1,
-              "first_attempt_failure": null
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": false,
+                "control_cited": false
+              }
             }
           ]
         },
@@ -577,6 +694,10 @@
           "violation_flagged_runs": 3,
           "control_labeled_runs": 0,
           "control_flagged_runs": 3,
+          "secondary": {
+            "violation_cited_runs": 0,
+            "control_cited_runs": 0
+          },
           "runs": [
             {
               "run": 1,
@@ -598,7 +719,11 @@
               ],
               "other_file_findings": 0,
               "attempts": 1,
-              "first_attempt_failure": null
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": false,
+                "control_cited": false
+              }
             },
             {
               "run": 2,
@@ -620,7 +745,11 @@
               ],
               "other_file_findings": 0,
               "attempts": 1,
-              "first_attempt_failure": null
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": false,
+                "control_cited": false
+              }
             },
             {
               "run": 3,
@@ -642,7 +771,11 @@
               ],
               "other_file_findings": 0,
               "attempts": 1,
-              "first_attempt_failure": null
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": false,
+                "control_cited": false
+              }
             }
           ]
         }
@@ -664,6 +797,10 @@
           "violation_flagged_runs": 3,
           "control_labeled_runs": 0,
           "control_flagged_runs": 3,
+          "secondary": {
+            "violation_cited_runs": 2,
+            "control_cited_runs": 0
+          },
           "runs": [
             {
               "run": 1,
@@ -684,7 +821,11 @@
               ],
               "other_file_findings": 0,
               "attempts": 1,
-              "first_attempt_failure": null
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": false,
+                "control_cited": false
+              }
             },
             {
               "run": 2,
@@ -705,7 +846,11 @@
               ],
               "other_file_findings": 0,
               "attempts": 1,
-              "first_attempt_failure": null
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": true,
+                "control_cited": false
+              }
             },
             {
               "run": 3,
@@ -725,7 +870,11 @@
               ],
               "other_file_findings": 0,
               "attempts": 1,
-              "first_attempt_failure": null
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": true,
+                "control_cited": false
+              }
             }
           ]
         },
@@ -737,6 +886,10 @@
           "violation_flagged_runs": 3,
           "control_labeled_runs": 0,
           "control_flagged_runs": 3,
+          "secondary": {
+            "violation_cited_runs": 0,
+            "control_cited_runs": 0
+          },
           "runs": [
             {
               "run": 1,
@@ -758,7 +911,11 @@
               ],
               "other_file_findings": 0,
               "attempts": 1,
-              "first_attempt_failure": null
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": false,
+                "control_cited": false
+              }
             },
             {
               "run": 2,
@@ -780,7 +937,11 @@
               ],
               "other_file_findings": 0,
               "attempts": 1,
-              "first_attempt_failure": null
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": false,
+                "control_cited": false
+              }
             },
             {
               "run": 3,
@@ -800,7 +961,11 @@
               ],
               "other_file_findings": 0,
               "attempts": 1,
-              "first_attempt_failure": null
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": false,
+                "control_cited": false
+              }
             }
           ]
         }

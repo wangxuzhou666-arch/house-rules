@@ -1,8 +1,10 @@
-"""The harness of the generalization check (samples/generalization/run_check.py): scoring, provenance, the digest snapshots, the
-without_rule digest, base versions, the spending guard, the repeat of a failed run and the live recording, all on synthetic cases
-under tests/fixtures/generalization/ and a fake reviewer.
+"""The harness of the generalization check (samples/generalization/run_check.py): scoring, the secondary "cited" count, provenance,
+the digest snapshots, the without_rule digest, base versions, rounds (their manifests, their guards, the comparison), the spending
+guard, the repeat of a failed run and the live recording, all on synthetic cases under tests/fixtures/generalization/ and a fake
+reviewer.
 
-The last class runs the oracles of the real cases under samples/generalization/cases/; it needs them to exist."""
+The last classes run the oracles of the real cases under samples/generalization/cases/ (they need them to exist) and replay the
+committed recordings of round 1."""
 import contextlib
 import hashlib
 import importlib.util
@@ -87,10 +89,30 @@ class CheckCase(unittest.TestCase):
     def current_digest(self) -> str:
         return (self.root / "CODING-STYLE.digest.md").read_text(encoding="utf-8")
 
+    def manifest_of(self, round_number: int = 1):
+        return rc.read_manifest(self.layout.of_round(round_number))
+
+    def write_manifest(self, round_number: int, digest_sha256: str, *case_ids: str) -> None:
+        layout = self.layout.of_round(round_number)
+        layout.recordings_dir.mkdir(parents=True, exist_ok=True)
+        layout.manifest.write_text(rc.Manifest(round_number, digest_sha256, tuple(case_ids)).to_text(), encoding="utf-8")
+
+    def open_round_one(self, *case_ids: str) -> None:
+        """Round 1 on the digest now, listing the cases but holding no recording: what replay reads the cases of."""
+        self.write_manifest(1, hashlib.sha256(self.current_digest().encode()).hexdigest(), *case_ids)
+
+    def list_in_manifest(self, round_number: int, case_id: str, digest: str) -> None:
+        """Put the case into the manifest of the round, which is made (on the sha256 of `digest`) if the round has none yet."""
+        manifest = self.manifest_of(round_number)
+        cases = sorted({*(manifest.cases if manifest else ()), case_id})
+        self.write_manifest(round_number, manifest.digest_sha256 if manifest else hashlib.sha256(digest.encode()).hexdigest(), *cases)
+
     def record(self, case_id: str, condition: str, run: int, text: str, *, exit_code: int | None = 0, attempt: int = 1,
-               failed_first_attempt: bool = False, digest: str | None = None, **overrides: object) -> None:
+               failed_first_attempt: bool = False, digest: str | None = None, round_number: int = 1, **overrides: object) -> None:
         """Write a recording the way --live does, with the hashes of the files as they are now (and `overrides` on top), and the
-        snapshot of its digest unless one is there. `failed_first_attempt` files it as the attempt before a repeat."""
+        snapshot of its digest unless one is there. `failed_first_attempt` files it as the attempt before a repeat. It goes into
+        round `round_number`, and the case is listed in that round's manifest, which a round gets on the digest now."""
+        layout = self.layout.of_round(round_number)
         case_dir = self.layout.cases_dir / case_id
         meta = json.loads((case_dir / "case.json").read_text(encoding="utf-8"))
         code = {rel: hashlib.sha256((case_dir / rel).read_bytes()).hexdigest() for rel in (meta["violation"], meta["control"])}
@@ -98,10 +120,11 @@ class CheckCase(unittest.TestCase):
                 for path in sorted((case_dir / "base").rglob("*")) if path.is_file()}
         digests = self.digests(meta["clause"])
         digest = digest if digest is not None else digests.full if condition == "with_rule" else digests.without[meta["clause"]]
-        snapshot = self.layout.snapshot(case_id, condition)
+        snapshot = layout.snapshot(case_id, condition)
         snapshot.parent.mkdir(parents=True, exist_ok=True)
         if not snapshot.exists():
             snapshot.write_text(digest, encoding="utf-8")
+        self.list_in_manifest(round_number, case_id, digests.full)
         prov = {"v": 1, "case": case_id, "condition": condition, "run": run, "attempt": attempt, "level": "high",
                 "date_utc": "2026-01-01T00:00:00Z", "command": ["claude", "-p", "/code-review high a..b"], "range": "a..b",
                 "reviewer_version": "2.1.0 (Claude Code)", "reviewer_version_error": None, "code_sha256": code, "base_sha256": base,
@@ -110,7 +133,7 @@ class CheckCase(unittest.TestCase):
                 "model_id": None, "raw_sha256": hashlib.sha256(text.encode()).hexdigest(),
                 "status": "ok" if exit_code == 0 else "failed", "failure": None}
         prov.update(overrides)
-        raw_path, prov_path = self.layout.recording(case_id, condition, run, failed_first_attempt=failed_first_attempt)
+        raw_path, prov_path = layout.recording(case_id, condition, run, failed_first_attempt=failed_first_attempt)
         raw_path.parent.mkdir(parents=True, exist_ok=True)
         raw_path.write_text(text, encoding="utf-8")
         prov_path.write_text(json.dumps(prov, indent=2) + "\n", encoding="utf-8")
@@ -120,14 +143,21 @@ class CheckCase(unittest.TestCase):
         self.record(case_id, condition, run, "partial output", exit_code=1, failed_first_attempt=True)
         self.record(case_id, condition, run, final_text, exit_code=final_exit_code, attempt=2)
 
-    def record_runs(self, case_id: str, condition: str, texts: list[str]) -> None:
+    def record_runs(self, case_id: str, condition: str, texts: list[str], *, round_number: int = 1) -> None:
         for run, text in enumerate(texts, start=1):
-            self.record(case_id, condition, run, text)
+            self.record(case_id, condition, run, text, round_number=round_number)
 
     def score(self, case_id: str = "fix-1", runs: int = 3) -> dict:
         """The row of `results` for one case, scored from the recordings on disk."""
         case = self.case(case_id)
         return rc.replay(self.layout, [case], self.current_digest(), runs)["cases"][0]
+
+    def edit_rules(self, old: str, new: str) -> None:
+        """Change the rules and compile the digest again: what a new digest generation (a new round) starts from."""
+        path = self.root / "CODING-STYLE.md"
+        self.assertIn(old, path.read_text())
+        path.write_text(path.read_text().replace(old, new))
+        self.compile_digest()
 
     def with_rule(self, texts: list[str], case_id: str = "fix-1") -> dict:
         self.record_runs(case_id, "with_rule", texts)
@@ -323,6 +353,100 @@ class ScoringTest(CheckCase):
         self.assertEqual(self.score(runs=2)["conditions"]["with_rule"]["runs_ok"], 2)
 
 
+class CitedTest(CheckCase):
+    """The secondary metric "cited": runs in which a finding on a file has a summary that names the case's clause. It has no pass line
+    and never changes a verdict."""
+
+    @staticmethod
+    def say(file: str, summary: str, **extra: object) -> str:
+        return review_text(review_item(file=file, line=1, summary=summary, severity="should-fix", **extra))
+
+    def cited(self, texts: list[str], condition: str = "with_rule") -> dict:
+        self.record_runs("fix-1", condition, texts)
+        return self.score()["conditions"][condition]["secondary"]
+
+    def test_a_summary_that_names_the_clause_is_cited_on_the_file_of_the_finding(self) -> None:
+        cited = self.cited([self.say(VIOLATION_1, "Violates REL.1: the old copy is deleted first"), self.say(CONTROL_1, "REL.1 applies"),
+                            self.say(VIOLATION_1, "Deletes the old copy first")])
+        self.assertEqual(cited, {"violation_cited_runs": 1, "control_cited_runs": 1})
+
+    def test_only_the_summary_is_read_not_the_failure_scenario(self) -> None:
+        praise = self.say(CONTROL_1, "Writes beside the file and renames", failure_scenario="This is what REL.1 requires (rel-1).")
+        cited = self.cited([praise, self.say(VIOLATION_1, "Deletes first", failure_scenario="Breaks REL.1"), praise])
+        self.assertEqual(cited, {"violation_cited_runs": 0, "control_cited_runs": 0})
+
+    def test_the_dotted_and_the_kebab_form_count_in_any_case_next_to_punctuation(self) -> None:
+        for summary in ("REL.1", "rel-1", "Rel.1", "REL-1", "see (REL.1).", "`rel-1`:", "REL.1, REL.2", "violates rel-1."):
+            with self.subTest(summary):
+                self.assertEqual(self.cited([self.say(VIOLATION_1, summary)] * 3)["violation_cited_runs"], 3)
+
+    def test_an_id_that_only_starts_or_ends_like_the_clause_is_not_a_citation(self) -> None:
+        for summary in ("REL.10", "rel-12", "REL.1x", "xREL.1", "PREL.1", "1rel-1", "REL1", "REL.2", "P0E.1"):
+            with self.subTest(summary):
+                self.assertEqual(self.cited([self.say(VIOLATION_1, summary)] * 3)["violation_cited_runs"], 0)
+
+    def test_a_label_without_a_mention_in_the_summary_is_not_a_citation(self) -> None:
+        row = self.with_rule([self.say(VIOLATION_1, "Deletes the old copy first", category="rel-1")] * 3)
+        self.assertEqual((row["conditions"]["with_rule"]["violation_labeled_runs"], row["conditions"]["with_rule"]["secondary"]["violation_cited_runs"]),
+                         (3, 0))
+
+    def test_runs_are_counted_not_findings(self) -> None:
+        twice = review_text(*[review_item(file=VIOLATION_1, line=n, summary="REL.1 again", category="unmapped") for n in (1, 2, 3)])
+        self.assertEqual(self.cited([twice, NOTHING, NOTHING])["violation_cited_runs"], 1)
+
+    def test_one_citing_finding_among_others_makes_the_run_cited(self) -> None:
+        for order in ((True, False, False), (False, False, True), (False, True, False)):
+            with self.subTest(order):
+                findings = [review_item(file=VIOLATION_1, line=n, summary="REL.1 applies" if cites else "Something else", category="unmapped")
+                            for n, cites in enumerate(order, start=1)]
+                self.assertEqual(self.cited([review_text(*findings), NOTHING, NOTHING])["violation_cited_runs"], 1)
+
+    def test_a_finding_on_another_file_is_not_cited(self) -> None:
+        self.assertEqual(self.cited([self.say("code/notes.py", "REL.1")] * 3), {"violation_cited_runs": 0, "control_cited_runs": 0})
+
+    def test_it_is_counted_in_without_rule_too(self) -> None:
+        self.record_runs("fix-1", "with_rule", [NOTHING] * 3)
+        self.assertEqual(self.cited([self.say(VIOLATION_1, "REL.1"), NOTHING, self.say(CONTROL_1, "rel-1")], "without_rule"),
+                         {"violation_cited_runs": 1, "control_cited_runs": 1})
+
+    def test_citing_the_clause_does_not_make_a_case_pass(self) -> None:
+        row = self.with_rule([self.say(VIOLATION_1, "Breaks REL.1", category="unmapped")] * 3)
+        self.assertEqual(row["conditions"]["with_rule"]["secondary"]["violation_cited_runs"], 3)
+        self.assertEqual((row["conditions"]["with_rule"]["violation_labeled_runs"], row["verdict"]), (0, "FAIL"))
+
+    def test_citing_the_clause_on_the_control_does_not_make_a_case_fail(self) -> None:
+        both = review_text(review_item(file=VIOLATION_1, line=1, summary="Deletes first", category="rel-1"),
+                           review_item(file=CONTROL_1, line=1, summary="Unlike the other file, this follows REL.1", category="unmapped"))
+        row = self.with_rule([both] * 3)
+        self.assertEqual(row["conditions"]["with_rule"]["secondary"], {"violation_cited_runs": 0, "control_cited_runs": 3})
+        self.assertEqual((row["conditions"]["with_rule"]["control_labeled_runs"], row["verdict"]), (0, "PASS"))
+
+    def test_citing_the_clause_does_not_complete_an_incomplete_case(self) -> None:
+        self.record("fix-1", "with_rule", 1, self.say(VIOLATION_1, "REL.1", category="rel-1"))
+        self.record("fix-1", "with_rule", 2, self.say(VIOLATION_1, "REL.1", category="rel-1"))
+        self.record("fix-1", "with_rule", 3, "partial output", exit_code=1)
+        row = self.score()
+        self.assertEqual((row["conditions"]["with_rule"]["secondary"]["violation_cited_runs"], row["verdict"]), (2, "INCOMPLETE"))
+
+    def test_the_results_keep_it_apart_from_the_counts_of_the_pass_line_and_mark_it_secondary(self) -> None:
+        self.record_runs("fix-1", "with_rule", [self.say(VIOLATION_1, "REL.1", category="rel-1"), NOTHING, NOTHING])
+        self.record_runs("fix-1", "without_rule", [NOTHING] * 3)
+        code, out, _ = self.check()
+        self.assertEqual(code, 0)
+        results = json.loads(self.layout.results_json.read_text())
+        counts = results["cases"][0]["conditions"]["with_rule"]
+        self.assertEqual(counts["secondary"], {"violation_cited_runs": 1, "control_cited_runs": 0})
+        self.assertEqual([run["secondary"] for run in counts["runs"]],
+                         [{"violation_cited": True, "control_cited": False}] + [{"violation_cited": False, "control_cited": False}] * 2)
+        self.assertFalse([key for key in counts if "cited" in key])  # the counts the verdict reads hold nothing about it
+        self.assertIn("never part of a verdict", results["secondary_metrics"]["cited"])
+        for text in (out, self.layout.results_md.read_text()):
+            self.assertIn("violation cited (secondary)", text)
+            self.assertIn("control cited (secondary)", text)
+            self.assertIn("no pass line", text)
+        self.assertIn("| fix-1 | REL.1 | compliant | with_rule | 3/3 | 1/3 | 1/3 | 0/3 | 0/3 | FAIL | 1/3 | 0/3 |", self.layout.results_md.read_text())
+
+
 class ReplayCommandTest(CheckCase):
     def record_everything(self) -> None:
         for case_id, violation in (("fix-1", VIOLATION_1), ("fix-2", VIOLATION_2)):
@@ -342,16 +466,23 @@ class ReplayCommandTest(CheckCase):
         self.assertEqual(self.check()[0], 0)
         self.assertEqual((self.layout.results_json.read_bytes(), self.layout.results_md.read_bytes()), first)
         self.assertNotIn(b"2026-01-01", first[0] + first[1])
-        self.assertIn("| fix-1 | REL.1 | compliant | with_rule | 3/3 | 3/3 | 3/3 | 0/3 | 0/3 | PASS |", first[1].decode())
+        self.assertIn("| fix-1 | REL.1 | compliant | with_rule | 3/3 | 3/3 | 3/3 | 0/3 | 0/3 | PASS | 0/3 | 0/3 |", first[1].decode())
         self.assertEqual(json.loads(first[0])["totals"], {"PASS": 2, "FAIL": 0, "INCOMPLETE": 0})
 
-    def test_a_case_without_recordings_is_incomplete(self) -> None:
+    def test_a_case_the_round_lists_without_recordings_is_incomplete(self) -> None:
+        self.open_round_one("fix-1", "fix-2")
         code, out, _ = self.check()
         self.assertEqual(code, 0)
         self.assertIn("PASS 0  FAIL 0  INCOMPLETE 2", out)
         self.assertIn("fix-1 with_rule-1: missing (no recording)", out)
-        self.assertIn("nothing is recorded yet", out)
+        self.assertIn("nothing is recorded in it yet", out)
         self.assertFalse(self.layout.results_json.exists())
+
+    def test_with_no_round_recorded_there_is_nothing_to_score_and_nothing_is_written(self) -> None:
+        code, out, err = self.check()
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("no round is recorded yet", out)
+        self.assertEqual(sorted(path.name for path in self.layout.gen_dir.iterdir()), ["cases"])
 
     def test_a_partial_selection_does_not_write_results(self) -> None:
         self.record_everything()
@@ -392,6 +523,7 @@ class ReplayCommandTest(CheckCase):
         self.assertIn("fix-1b without_rule-1: missing (no recording)", out)
 
     def test_a_case_file_that_does_not_fit_is_refused(self) -> None:
+        self.open_round_one("fix-1")
         path = self.layout.cases_dir / "fix-1" / "case.json"
         (self.layout.cases_dir / "fix-1" / "elsewhere").mkdir()
         shutil.copy(self.layout.cases_dir / "fix-1" / VIOLATION_1, self.layout.cases_dir / "fix-1" / "elsewhere" / "store_a.py")
@@ -404,6 +536,7 @@ class ReplayCommandTest(CheckCase):
                 self.assertEqual(self.check("--case", "fix-1")[0], 1)
 
     def test_a_base_file_without_a_counterpart_among_the_two_code_files_is_refused(self) -> None:
+        self.open_round_one("fix-2")
         case_dir = self.layout.cases_dir / "fix-2"
         (case_dir / "code" / "third.py").write_text("x = 2\n")  # a file of code/ that the case does not name
         (case_dir / "base" / "sub").mkdir()
@@ -418,6 +551,7 @@ class ReplayCommandTest(CheckCase):
         self.assertEqual(self.check("--case", "fix-2")[0], 0)
 
     def test_a_base_file_that_is_the_same_as_its_code_file_is_refused(self) -> None:
+        self.open_round_one("fix-2")
         case_dir = self.layout.cases_dir / "fix-2"
         shutil.copy(case_dir / "code" / "ids_a.py", case_dir / "base" / "ids_a.py")
         code, _, err = self.check("--case", "fix-2")
@@ -425,6 +559,7 @@ class ReplayCommandTest(CheckCase):
         self.assertIn("is the same as code/ids_a.py", err)
 
     def test_a_base_that_is_not_a_directory_is_refused(self) -> None:
+        self.open_round_one("fix-1")
         (self.layout.cases_dir / "fix-1" / "base").write_text("not a directory")
         code, _, err = self.check("--case", "fix-1")
         self.assertEqual(code, 1)
@@ -445,6 +580,188 @@ class ReplayCommandTest(CheckCase):
 
     def test_yes_spend_belongs_to_live(self) -> None:
         self.assertEqual(self.check("--yes-spend", "1")[0], 1)
+
+
+class RoundsTest(CheckCase):
+    """A round is one digest generation: its own directory, its own manifest, its own results; replay reads every round found."""
+
+    def rel(self, path: Path) -> str:
+        return path.relative_to(self.root).as_posix()
+
+    def record_fix_1(self, round_number: int, violation_labeled_runs: int = 3, **overrides: object) -> None:
+        """Round `round_number` holds fix-1: the first `violation_labeled_runs` of its with_rule runs name the clause."""
+        texts = [on(VIOLATION_1, "rel-1") if run < violation_labeled_runs else NOTHING for run in range(3)]
+        for run, text in enumerate(texts, start=1):
+            self.record("fix-1", "with_rule", run, text, round_number=round_number, **overrides)
+            self.record("fix-1", "without_rule", run, NOTHING, round_number=round_number, **overrides)
+
+    def test_a_round_has_its_own_directory_manifest_and_results_files(self) -> None:
+        base = "samples/generalization"
+        for number in (1, 2, 11):
+            layout = self.layout.of_round(number)
+            with self.subTest(number):
+                self.assertEqual(self.rel(layout.recordings_dir), f"{base}/recordings/round-{number}")
+                self.assertEqual(self.rel(layout.manifest), f"{base}/recordings/round-{number}/round.json")
+                self.assertEqual(self.rel(layout.results_json), f"{base}/results-round-{number}.json")
+                self.assertEqual(self.rel(layout.results_md), f"{base}/results-round-{number}.md")
+                self.assertEqual(self.rel(layout.recording("fix-1", "with_rule", 2)[0]), f"{base}/recordings/round-{number}/fix-1/with_rule-2.txt")
+                self.assertEqual(self.rel(layout.snapshot("fix-1", "without_rule")),
+                                 f"{base}/recordings/round-{number}/fix-1/without_rule.digest.md")
+        self.assertEqual(self.rel(self.layout.compare_md), f"{base}/results-compare.md")
+        self.assertEqual(rc.Layout(self.root).round_number, 1)
+
+    def test_the_manifest_holds_the_round_its_digest_and_its_cases_and_nothing_else(self) -> None:
+        sha = "ab" * 32
+        self.write_manifest(2, sha, "fix-1", "fix-2")
+        text = self.layout.of_round(2).manifest.read_text()
+        self.assertEqual(text, '{\n  "v": 1,\n  "round": 2,\n  "digest_sha256": "' + sha + '",\n  "cases": [\n    "fix-1",\n    "fix-2"\n  ]\n}\n')
+        self.assertEqual(self.manifest_of(2), rc.Manifest(2, sha, ("fix-1", "fix-2")))
+        self.assertIsNone(self.manifest_of(3))
+
+    def test_a_manifest_that_is_wrong_is_refused(self) -> None:
+        self.record_fix_1(1)
+        good = json.loads(self.layout.manifest.read_text())
+        for name, text in (("not json", "{not json"), ("not an object", "[]"), ("version", json.dumps({**good, "v": 2})),
+                           ("another round", json.dumps({**good, "round": 2})), ("short digest", json.dumps({**good, "digest_sha256": "abc"})),
+                           ("capital digest", json.dumps({**good, "digest_sha256": "AB" * 32})), ("no cases", json.dumps({**good, "cases": []})),
+                           ("a case twice", json.dumps({**good, "cases": ["fix-1", "fix-1"]})),
+                           ("a case that is not a name", json.dumps({**good, "cases": [1]}))):
+            with self.subTest(name):
+                self.layout.manifest.write_text(text, encoding="utf-8")
+                code, out, err = self.check()
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn("round.json", err)
+
+    def test_a_round_directory_without_its_manifest_is_refused(self) -> None:
+        self.record_fix_1(1)
+        self.layout.manifest.unlink()
+        code, out, err = self.check()
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("round.json: not found", err)
+
+    def test_replay_scores_the_cases_the_manifest_lists_and_does_not_read_the_others(self) -> None:
+        self.record_fix_1(1)
+        (self.layout.cases_dir / "fix-3").mkdir()
+        (self.layout.cases_dir / "fix-3" / "case.json").write_text("{half written", encoding="utf-8")  # not in the round: not read
+        code, out, err = self.check()
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual([case["id"] for case in json.loads(self.layout.results_json.read_text())["cases"]], ["fix-1"])
+        self.assertNotIn("fix-2", out)
+
+    def test_recordings_of_a_case_the_manifest_does_not_list_are_refused(self) -> None:
+        self.record_fix_1(1)
+        self.record_runs("fix-2", "with_rule", [on(VIOLATION_2, "rel-2")] * 3)
+        self.write_manifest(1, self.manifest_of().digest_sha256, "fix-1")
+        code, out, err = self.check()
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("recordings/round-1/fix-2: recordings of a case that the manifest of round 1 does not list", err)
+
+    def test_a_with_rule_snapshot_that_is_not_the_digest_of_the_round_is_refused(self) -> None:
+        self.record_fix_1(1)
+        self.write_manifest(1, "0" * 64, "fix-1")
+        code, out, err = self.check()
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("fix-1/with_rule.digest.md: not the digest of round 1", err)
+        self.assertNotIn("without_rule.digest.md: not the digest", err)
+
+    def test_a_round_nobody_recorded_cannot_be_asked_for(self) -> None:
+        self.record_fix_1(1)
+        code, _, err = self.check("--round", "3")
+        self.assertEqual(code, 1)
+        self.assertIn("round 3 has no recordings: the rounds found are [1]", err)
+        self.assertEqual(self.check("--round", "0")[0], 1)
+
+    def test_with_one_round_there_is_no_comparison(self) -> None:
+        self.record_fix_1(1)
+        self.assertEqual(self.check()[0], 0)
+        self.assertTrue(self.layout.results_json.exists())
+        self.assertFalse(self.layout.compare_md.exists())
+
+    def two_rounds(self, **round_two: object) -> None:
+        """Round 1 on one digest: fix-1 names the clause in 1 run of 3. Then the rules change (a line of another clause), and round 2
+        holds fix-1 (3 of 3) and fix-2 (3 of 3)."""
+        self.record_fix_1(1, violation_labeled_runs=1)
+        self.edit_rules("Keep the guarded block", "Keep the try block")
+        self.record_fix_1(2, **round_two)
+        for run in (1, 2, 3):
+            self.record("fix-2", "with_rule", run, on(VIOLATION_2, "rel-2"), round_number=2, **round_two)
+            self.record("fix-2", "without_rule", run, NOTHING, round_number=2, **round_two)
+
+    def test_two_rounds_replay_with_a_results_file_each_and_a_comparison(self) -> None:
+        self.two_rounds()
+        self.assertEqual(self.manifest_of(1).cases, ("fix-1",))
+        self.assertEqual(self.manifest_of(2).cases, ("fix-1", "fix-2"))
+        self.assertNotEqual(self.manifest_of(1).digest_sha256, self.manifest_of(2).digest_sha256)
+        code, out, err = self.check()
+        self.assertEqual((code, err), (0, ""))
+        self.assertLess(out.index("round 1 (with_rule digest "), out.index("round 2 (with_rule digest "))
+        self.assertIn("PASS 0  FAIL 1  INCOMPLETE 0", out)
+        self.assertIn("PASS 2  FAIL 0  INCOMPLETE 0", out)
+        by_round = {n: json.loads(self.layout.of_round(n).results_json.read_text()) for n in (1, 2)}
+        self.assertEqual({n: (results["round"], results["digest_sha256"], [case["id"] for case in results["cases"]])
+                          for n, results in by_round.items()},
+                         {1: (1, self.manifest_of(1).digest_sha256, ["fix-1"]), 2: (2, self.manifest_of(2).digest_sha256, ["fix-1", "fix-2"])})
+        self.assertEqual([case["verdict"] for case in by_round[1]["cases"]] + [case["verdict"] for case in by_round[2]["cases"]],
+                         ["FAIL", "PASS", "PASS"])
+        self.assertIn("# Generalization check results, round 2", self.layout.of_round(2).results_md.read_text())
+        compare = self.layout.compare_md.read_text()
+        self.assertIn("| fix-1 | REL.1 | 1/3 -> 3/3 | 0/3 -> 0/3 | FAIL -> PASS |", compare)
+        self.assertIn("| fix-2 | REL.2 | - -> 3/3 | - -> 0/3 | - -> PASS |", compare)
+        self.assertIn(f"round 1 (with_rule digest `{self.manifest_of(1).digest_sha256[:12]}`), round 2 (with_rule digest `", compare)
+        self.assertIn("Reviewer version: round 1: `2.1.0 (Claude Code)`; round 2: `2.1.0 (Claude Code)`.", compare)
+        self.assertNotIn("differs", compare)
+        self.assertIn("results-compare.md", out)
+        self.assertNotIn("2026-01-01", compare)  # no clock: the same recordings give the same comparison
+        self.assertEqual(self.check()[0], 0)
+        self.assertEqual(self.layout.compare_md.read_text(), compare)
+
+    def test_a_second_round_leaves_the_results_of_the_first_as_they_were(self) -> None:
+        self.record_fix_1(1, violation_labeled_runs=1)
+        self.assertEqual(self.check()[0], 0)
+        alone = self.layout.results_json.read_bytes(), self.layout.results_md.read_bytes()
+        self.edit_rules("Keep the guarded block", "Keep the try block")
+        self.record_fix_1(2)
+        self.assertEqual(self.check()[0], 0)
+        self.assertEqual((self.layout.results_json.read_bytes(), self.layout.results_md.read_bytes()), alone)
+
+    def test_a_round_asked_for_is_scored_alone_and_writes_no_comparison(self) -> None:
+        self.two_rounds()
+        code, out, _ = self.check("--round", "2")
+        self.assertEqual(code, 0)
+        self.assertNotIn("round 1 (with_rule", out)
+        self.assertIn("round 2 (with_rule", out)
+        self.assertIn("results-compare.md not written: --round scores only one round", out)
+        self.assertEqual([self.layout.of_round(n).results_json.exists() for n in (1, 2)], [False, True])
+        self.assertFalse(self.layout.compare_md.exists())
+
+    def test_a_case_asked_for_is_scored_in_the_rounds_that_hold_it_and_writes_no_results(self) -> None:
+        self.two_rounds()
+        code, out, _ = self.check("--case", "fix-2")
+        self.assertEqual(code, 0)
+        self.assertNotIn("round 1 (with_rule", out)  # round 1 does not hold fix-2
+        self.assertIn("round 2 (with_rule", out)
+        self.assertIn("not written", out)
+        self.assertEqual([path for path in self.layout.gen_dir.glob("results*")], [])
+        code, _, err = self.check("--case", "fix-1", "--round", "1")
+        self.assertEqual(code, 0)
+        self.assertEqual(self.check("--case", "fix-2", "--round", "1")[0], 1)
+
+    def test_a_reviewer_version_that_differs_between_rounds_is_said_in_the_comparison(self) -> None:
+        self.two_rounds(reviewer_version="2.2.0 (Claude Code)")
+        self.assertEqual(self.check()[0], 0)
+        compare = self.layout.compare_md.read_text()
+        self.assertIn("Reviewer version: round 1: `2.1.0 (Claude Code)`; round 2: `2.2.0 (Claude Code)`.", compare)
+        self.assertIn("The reviewer version differs between the rounds", compare)
+
+    def test_a_round_whose_manifest_lists_no_recording_is_not_written_and_leaves_no_comparison(self) -> None:
+        self.record_fix_1(1)
+        self.edit_rules("Keep the guarded block", "Keep the try block")
+        self.write_manifest(2, hashlib.sha256(self.current_digest().encode()).hexdigest(), "fix-1")
+        code, out, _ = self.check()
+        self.assertEqual(code, 0)
+        self.assertIn("results of round 2 not written: nothing is recorded in it yet", out)
+        self.assertEqual([self.layout.of_round(n).results_json.exists() for n in (1, 2)], [True, False])
+        self.assertFalse(self.layout.compare_md.exists())
 
 
 class ProvenanceTest(CheckCase):
@@ -584,23 +901,17 @@ class RulesChangedAfterRecordingTest(CheckCase):
         self.record_runs("fix-1", "with_rule", [on(VIOLATION_1, "rel-1")] * 3)
         self.record_runs("fix-1", "without_rule", [NOTHING] * 3)
 
-    def edit_rules(self, old: str, new: str) -> None:
-        path = self.root / "CODING-STYLE.md"
-        self.assertIn(old, path.read_text())
-        path.write_text(path.read_text().replace(old, new))
-        self.compile_digest()
-
     def test_an_edit_of_the_clause_does_not_break_the_replay_and_is_noted(self) -> None:
         self.edit_rules("Keep usable state until the replacement is ready", "Keep the old copy until the new one is ready")
         code, out, err = self.check()
         self.assertEqual((code, err), (0, ""))
         self.assertIn("fix-1: the rules changed since recording", out)
         self.assertIn("the scores describe the recorded digests", out)
-        self.assertIn("PASS 1  FAIL 0  INCOMPLETE 1", out)
+        self.assertIn("PASS 1  FAIL 0  INCOMPLETE 0", out)
         results = json.loads(self.layout.results_json.read_text())
         self.assertEqual([case["notes"] for case in results["cases"]],
                          [["fix-1: the rules changed since recording: the REL.1 line of the digest now differs from the recorded one; "
-                           "the scores describe the recorded digests"], []])
+                           "the scores describe the recorded digests"]])
         self.assertIn("the rules changed since recording", self.layout.results_md.read_text())
 
     def test_an_edit_that_leaves_the_digest_line_of_the_clause_alone_is_not_noted(self) -> None:
@@ -807,7 +1118,7 @@ sys.stdout.write(plan.get("preface", "Reviewed the diff.") + "\n\n```json\n" + j
         return "with_rule" if f"{clause} | " in call["digest"] else "without_rule"
 
     def test_without_yes_spend_it_makes_no_call_and_exits_2(self) -> None:
-        code, out, err = self.check("--live")
+        code, out, err = self.check("--live", "--round", "1")
         self.assertEqual(code, 2)
         self.assertEqual(self.calls(), [])
         self.assertIn("12 reviewer call(s) planned", out)
@@ -819,19 +1130,19 @@ sys.stdout.write(plan.get("preface", "Reviewed the diff.") + "\n\n```json\n" + j
     def test_a_yes_spend_that_is_not_the_planned_number_makes_no_call(self) -> None:
         for wrong in ("0", "11", "13", "24"):
             with self.subTest(wrong):
-                self.assertEqual(self.check("--live", "--yes-spend", wrong)[0], 2)
+                self.assertEqual(self.check("--live", "--round", "1", "--yes-spend", wrong)[0], 2)
         self.assertEqual(self.calls(), [])
 
     def test_the_planned_number_follows_the_cases_and_runs_asked_for(self) -> None:
-        code, out, _ = self.check("--live", "--case", "fix-2", "--runs", "2")
+        code, out, _ = self.check("--live", "--round", "1", "--case", "fix-2", "--runs", "2")
         self.assertEqual(code, 2)
         self.assertIn("4 reviewer call(s) planned", out)
-        self.assertEqual(self.check("--live", "--case", "fix-2", "--runs", "2", "--yes-spend", "4")[0], 0)
+        self.assertEqual(self.check("--live", "--round", "1", "--case", "fix-2", "--runs", "2", "--yes-spend", "4")[0], 0)
         self.assertEqual(len(self.calls()), 4)
         self.assertEqual({tuple(call["changed"]) for call in self.calls()}, {tuple(sorted([VIOLATION_2, CONTROL_2]))})
 
     def test_the_matching_yes_spend_makes_exactly_the_planned_calls_and_writes_every_recording(self) -> None:
-        code, out, err = self.check("--live", "--yes-spend", "12")
+        code, out, err = self.check("--live", "--round", "1", "--yes-spend", "12")
         self.assertEqual((code, err), (0, ""))
         self.assertEqual(len(self.calls()), 12)
         self.assertEqual(sorted(path.relative_to(self.layout.recordings_dir).as_posix() for path in self.layout.recordings_dir.glob("*/*")),
@@ -841,7 +1152,7 @@ sys.stdout.write(plan.get("preface", "Reviewed the diff.") + "\n\n```json\n" + j
         self.assertIn("recorded 12 run(s): 0 needed a repeat, 0 still failed", out)
 
     def test_each_call_reviews_exactly_the_two_files_as_a_range_in_a_scratch_repo(self) -> None:
-        self.assertEqual(self.check("--live", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")[0], 0)
+        self.assertEqual(self.check("--live", "--round", "1", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")[0], 0)
         for call in self.calls():
             self.assertEqual(call["args"][0], "-p")
             self.assertRegex(call["args"][1], r"^/code-review high [0-9a-f]{40}\.\.[0-9a-f]{40}$")
@@ -857,11 +1168,11 @@ sys.stdout.write(plan.get("preface", "Reviewed the diff.") + "\n\n```json\n" + j
         secret = "/home/someone/secret-project"
         warning = f"Permission allow rule (settings.json): Bash(find {secret}* -type f) has a wildcard before the rest of the command"
         self.set_plan(stderr_line=warning)
-        code, out, err = self.check("--live", "--yes-spend", "12")
+        code, out, err = self.check("--live", "--round", "1", "--yes-spend", "12")
         self.assertEqual((code, err), (0, ""))  # nothing is shown on the console for a run that worked
         self.assertEqual({call["stderr_line"] for call in self.calls()}, {warning})  # the reviewer did say it, on every call
         files = [path for path in self.layout.recordings_dir.rglob("*") if path.is_file()]
-        self.assertEqual(len(files), 12 * 2 + 4)  # raw and provenance of every run, a snapshot of every case and condition, nothing else
+        self.assertEqual(len(files), 12 * 2 + 4 + 1)  # raw and provenance of every run, a snapshot of every case and condition, the manifest, nothing else
         self.assertEqual([path.name for path in files if "stderr" in path.name], [])
         for path in files:
             text = path.read_text(encoding="utf-8")
@@ -872,17 +1183,17 @@ sys.stdout.write(plan.get("preface", "Reviewed the diff.") + "\n\n```json\n" + j
 
     def test_the_child_marker_is_set_and_the_session_id_is_gone(self) -> None:
         self.assertEqual(os.environ["CLAUDE_CODE_SESSION_ID"], "session-of-the-caller")
-        self.assertEqual(self.check("--live", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")[0], 0)
+        self.assertEqual(self.check("--live", "--round", "1", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")[0], 0)
         self.assertEqual([(call["child"], call["session"]) for call in self.calls()], [("1", None), ("1", None)])
 
     def test_with_rule_gets_the_full_digest_and_without_rule_the_digest_without_the_clause(self) -> None:
         digests = self.digests("REL.1")
-        self.assertEqual(self.check("--live", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")[0], 0)
+        self.assertEqual(self.check("--live", "--round", "1", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")[0], 0)
         by_condition = {self.condition_of(call): call["digest"] for call in self.calls()}
         self.assertEqual(by_condition, {"with_rule": digests.full, "without_rule": digests.without["REL.1"]})
 
     def test_the_conditions_alternate_so_that_drift_falls_on_both(self) -> None:
-        self.assertEqual(self.check("--live", "--yes-spend", "12")[0], 0)
+        self.assertEqual(self.check("--live", "--round", "1", "--yes-spend", "12")[0], 0)
         conditions = [self.condition_of(call) for call in self.calls()]
         self.assertEqual(len(conditions), 12)
         for start in range(0, 12, 2):
@@ -899,7 +1210,7 @@ sys.stdout.write(plan.get("preface", "Reviewed the diff.") + "\n\n```json\n" + j
 
     def test_the_provenance_of_a_recording_says_what_produced_it(self) -> None:
         self.set_plan(violations={VIOLATION_1: ["REL.1", "rel-1"]}, preface="Reviewed with claude-sonnet-4-5 today.")
-        self.assertEqual(self.check("--live", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")[0], 0)
+        self.assertEqual(self.check("--live", "--round", "1", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")[0], 0)
         raw_path, prov_path = self.layout.recording("fix-1", "without_rule", 1)
         prov = json.loads(prov_path.read_text())
         digests = self.digests("REL.1")
@@ -923,7 +1234,7 @@ sys.stdout.write(plan.get("preface", "Reviewed the diff.") + "\n\n```json\n" + j
 
     def test_a_failed_call_is_repeated_once_and_both_attempts_are_kept(self) -> None:
         self.set_plan(fail_calls=[2])  # the second call is the with_rule review of fix-1 (see plan_jobs)
-        code, out, err = self.check("--live", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")
+        code, out, err = self.check("--live", "--round", "1", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")
         self.assertEqual(code, 0)
         self.assertEqual([self.condition_of(call) for call in self.calls()], ["without_rule", "with_rule", "with_rule"])  # the repeat is at once
         self.assertIn("recorded 2 run(s): 1 needed a repeat, 0 still failed", out)
@@ -957,7 +1268,7 @@ sys.stdout.write(plan.get("preface", "Reviewed the diff.") + "\n\n```json\n" + j
 
     def test_a_run_that_fails_twice_stays_failed_and_makes_the_case_incomplete(self) -> None:
         self.set_plan(fail_calls=[2, 3])
-        code, out, err = self.check("--live", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")
+        code, out, err = self.check("--live", "--round", "1", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")
         self.assertEqual(code, 1)
         self.assertEqual(sorted(path.name for path in self.layout.recordings_dir.glob("fix-1/*.stderr.txt")),
                          ["with_rule-1.attempt1.stderr.txt", "with_rule-1.stderr.txt"])  # one for each failed attempt
@@ -976,20 +1287,20 @@ sys.stdout.write(plan.get("preface", "Reviewed the diff.") + "\n\n```json\n" + j
 
     def test_no_run_is_repeated_more_than_once(self) -> None:
         self.set_plan(fail_calls=list(range(1, 20)))
-        code, out, _ = self.check("--live", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")
+        code, out, _ = self.check("--live", "--round", "1", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")
         self.assertEqual(code, 1)
         self.assertEqual(len(self.calls()), 4)  # two run slots, two attempts each
         self.assertIn("recorded 2 run(s): 2 needed a repeat, 2 still failed", out)
 
     def test_a_run_that_did_not_fail_is_never_repeated(self) -> None:
-        self.assertEqual(self.check("--live", "--yes-spend", "12")[0], 0)
+        self.assertEqual(self.check("--live", "--round", "1", "--yes-spend", "12")[0], 0)
         self.assertEqual(len(self.calls()), 12)
         self.assertEqual(list(self.layout.recordings_dir.glob("*/*.attempt1.*")), [])
         self.assertEqual({json.loads(path.read_text())["attempt"] for path in self.layout.recordings_dir.glob("*/*.json")}, {1})
 
     def test_output_without_json_findings_is_a_failed_run_and_is_repeated_but_an_empty_array_is_not(self) -> None:
         self.set_plan(prose_calls=[1])
-        self.assertEqual(self.check("--live", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")[0], 0)
+        self.assertEqual(self.check("--live", "--round", "1", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")[0], 0)
         self.assertEqual(len(self.calls()), 3)
         first = rc.plan_jobs([self.case("fix-1")], 1)[0]
         raw_path, prov_path = self.layout.recording("fix-1", first.condition, 1, failed_first_attempt=True)
@@ -998,21 +1309,21 @@ sys.stdout.write(plan.get("preface", "Reviewed the diff.") + "\n\n```json\n" + j
         self.assertEqual(list(self.layout.recordings_dir.glob("*/*.stderr.txt")), [])  # it said nothing on stderr: no empty file
         calls_so_far = len(self.calls())
         self.set_plan(violations={})  # a review that finds nothing prints an empty array: a run with 0 findings
-        self.assertEqual(self.check("--live", "--case", "fix-2", "--runs", "1", "--yes-spend", "2")[0], 0)
+        self.assertEqual(self.check("--live", "--round", "1", "--case", "fix-2", "--runs", "1", "--yes-spend", "2")[0], 0)
         self.assertEqual(len(self.calls()) - calls_so_far, 2)
         self.assertEqual(list(self.layout.recordings_dir.glob("fix-2/*.attempt1.*")), [])
 
     def test_a_run_left_with_only_its_failed_first_attempt_gets_just_the_repeat(self) -> None:
         self.record("fix-1", "with_rule", 1, "partial output", exit_code=1, failed_first_attempt=True)
-        code, _, err = self.check("--live", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")
+        code, _, err = self.check("--live", "--round", "1", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")
         self.assertEqual(code, 1)
         self.assertIn("recordings already exist: fix-1/with_rule-1", err)
         self.assertEqual(self.calls(), [])
-        code, out, _ = self.check("--live", "--case", "fix-1", "--runs", "1", "--skip-existing")
+        code, out, _ = self.check("--live", "--round", "1", "--case", "fix-1", "--runs", "1", "--skip-existing")
         self.assertEqual(code, 2)
         self.assertIn("2 reviewer call(s) planned", out)
         self.assertIn("plus at most 1 more as repeats", out)  # the run that has its first attempt already is not given another repeat
-        self.assertEqual(self.check("--live", "--case", "fix-1", "--runs", "1", "--skip-existing", "--yes-spend", "2")[0], 0)
+        self.assertEqual(self.check("--live", "--round", "1", "--case", "fix-1", "--runs", "1", "--skip-existing", "--yes-spend", "2")[0], 0)
         self.assertEqual(len(self.calls()), 2)
         first_raw, first_prov = self.layout.recording("fix-1", "with_rule", 1, failed_first_attempt=True)
         self.assertEqual(first_raw.read_text(), "partial output")
@@ -1022,7 +1333,7 @@ sys.stdout.write(plan.get("preface", "Reviewed the diff.") + "\n\n```json\n" + j
 
     def test_a_reviewer_that_cannot_be_started_is_a_failed_run(self) -> None:
         self.script.write_text("#!/nonexistent/interpreter\n", encoding="utf-8")  # executable, so the PATH check passes; exec fails
-        code, out, _ = self.check("--live", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")
+        code, out, _ = self.check("--live", "--round", "1", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")
         self.assertEqual(code, 1)
         prov = json.loads(self.layout.recording("fix-1", "with_rule", 1)[1].read_text())
         self.assertEqual((prov["status"], prov["exit_code"], prov["raw_sha256"]), ("failed", None, hashlib.sha256(b"").hexdigest()))
@@ -1031,7 +1342,7 @@ sys.stdout.write(plan.get("preface", "Reviewed the diff.") + "\n\n```json\n" + j
 
     def test_a_command_that_is_not_installed_refuses_before_any_spending(self) -> None:
         with mock.patch.dict(os.environ, {"HOUSE_RULES_CLAUDE_CMD": "/nonexistent/claude"}):
-            code, _, err = self.check("--live", "--yes-spend", "12")
+            code, _, err = self.check("--live", "--round", "1", "--yes-spend", "12")
         self.assertEqual(code, 1)
         self.assertIn("not found on PATH", err)
         self.assertFalse(self.layout.recordings_dir.exists())
@@ -1039,7 +1350,7 @@ sys.stdout.write(plan.get("preface", "Reviewed the diff.") + "\n\n```json\n" + j
     def test_existing_recordings_are_never_overwritten(self) -> None:
         self.record("fix-1", "with_rule", 1, NOTHING)
         before = self.layout.recording("fix-1", "with_rule", 1)[0].read_bytes()
-        code, _, err = self.check("--live", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")
+        code, _, err = self.check("--live", "--round", "1", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")
         self.assertEqual(code, 1)
         self.assertIn("fix-1/with_rule-1", err)
         self.assertEqual(self.calls(), [])
@@ -1047,20 +1358,20 @@ sys.stdout.write(plan.get("preface", "Reviewed the diff.") + "\n\n```json\n" + j
 
     def test_skip_existing_records_only_the_runs_that_have_none(self) -> None:
         self.record("fix-1", "with_rule", 1, NOTHING)
-        code, out, _ = self.check("--live", "--case", "fix-1", "--runs", "1", "--skip-existing", "--yes-spend", "1")
+        code, out, _ = self.check("--live", "--round", "1", "--case", "fix-1", "--runs", "1", "--skip-existing", "--yes-spend", "1")
         self.assertEqual(code, 0, out)
         self.assertEqual([self.condition_of(call) for call in self.calls()], ["without_rule"])
         self.assertEqual(self.layout.recording("fix-1", "with_rule", 1)[0].read_text(), NOTHING)
 
     def test_with_everything_recorded_skip_existing_has_nothing_to_do(self) -> None:
-        self.assertEqual(self.check("--live", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")[0], 0)
+        self.assertEqual(self.check("--live", "--round", "1", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")[0], 0)
         calls = len(self.calls())
-        code, out, _ = self.check("--live", "--case", "fix-1", "--runs", "1", "--skip-existing")
+        code, out, _ = self.check("--live", "--round", "1", "--case", "fix-1", "--runs", "1", "--skip-existing")
         self.assertEqual((code, len(self.calls())), (0, calls))
         self.assertIn("nothing to record", out)
 
     def test_recordings_made_live_replay_to_a_pass_for_with_rule_only(self) -> None:
-        self.assertEqual(self.check("--live", "--yes-spend", "12")[0], 0)
+        self.assertEqual(self.check("--live", "--round", "1", "--yes-spend", "12")[0], 0)
         code, out, err = self.check()
         self.assertEqual((code, err), (0, ""))
         self.assertIn("PASS 2  FAIL 0  INCOMPLETE 0", out)
@@ -1072,11 +1383,11 @@ sys.stdout.write(plan.get("preface", "Reviewed the diff.") + "\n\n```json\n" + j
 
     def test_a_with_rule_call_that_fails_again_makes_that_case_incomplete_after_a_live_run(self) -> None:
         self.set_plan(fail_calls=[2, 3])
-        self.assertEqual(self.check("--live", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")[0], 1)
+        self.assertEqual(self.check("--live", "--round", "1", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")[0], 1)
         self.assertEqual(self.check("--case", "fix-1", "--runs", "1")[1].count("INCOMPLETE 1"), 1)
 
     def test_a_case_with_base_files_is_reviewed_as_a_modification_of_them(self) -> None:
-        self.assertEqual(self.check("--live", "--case", "fix-2", "--runs", "1", "--yes-spend", "2")[0], 0)
+        self.assertEqual(self.check("--live", "--round", "1", "--case", "fix-2", "--runs", "1", "--yes-spend", "2")[0], 0)
         case_dir = self.layout.cases_dir / "fix-2"
         self.assertEqual(len(self.calls()), 2)
         for call in self.calls():
@@ -1090,14 +1401,14 @@ sys.stdout.write(plan.get("preface", "Reviewed the diff.") + "\n\n```json\n" + j
 
     def test_a_case_with_a_base_for_one_file_only_adds_the_other(self) -> None:
         (self.layout.cases_dir / "fix-2" / "base" / "ids_b.py").unlink()
-        self.assertEqual(self.check("--live", "--case", "fix-2", "--runs", "1", "--yes-spend", "2")[0], 0)
+        self.assertEqual(self.check("--live", "--round", "1", "--case", "fix-2", "--runs", "1", "--yes-spend", "2")[0], 0)
         for call in self.calls():
             self.assertEqual(call["changed"], sorted([VIOLATION_2, CONTROL_2]))
             self.assertEqual(call["base_files"], ["CLAUDE.md", "CODING-STYLE.digest.md", VIOLATION_2])
             self.assertEqual(call["at_base"][CONTROL_2], "")
 
     def test_the_provenance_names_the_base_files_and_their_hashes(self) -> None:
-        self.assertEqual(self.check("--live", "--case", "fix-2", "--runs", "1", "--yes-spend", "2")[0], 0)
+        self.assertEqual(self.check("--live", "--round", "1", "--case", "fix-2", "--runs", "1", "--yes-spend", "2")[0], 0)
         case_dir = self.layout.cases_dir / "fix-2"
         prov = json.loads(self.layout.recording("fix-2", "with_rule", 1)[1].read_text())
         self.assertEqual(prov["base_sha256"], {f"base/{name}": hashlib.sha256((case_dir / "base" / name).read_bytes()).hexdigest()
@@ -1105,7 +1416,7 @@ sys.stdout.write(plan.get("preface", "Reviewed the diff.") + "\n\n```json\n" + j
         self.assertEqual(self.check("--case", "fix-2", "--runs", "1")[0], 0)  # and replay finds them unchanged
 
     def test_every_case_and_condition_keeps_the_exact_digest_its_runs_used(self) -> None:
-        self.assertEqual(self.check("--live", "--yes-spend", "12")[0], 0)
+        self.assertEqual(self.check("--live", "--round", "1", "--yes-spend", "12")[0], 0)
         for case_id, clause in (("fix-1", "REL.1"), ("fix-2", "REL.2")):
             digests = self.digests(clause)
             self.assertEqual(self.layout.snapshot(case_id, "with_rule").read_text(), digests.full)
@@ -1116,18 +1427,28 @@ sys.stdout.write(plan.get("preface", "Reviewed the diff.") + "\n\n```json\n" + j
             self.assertEqual(prov["digest_sha256"], hashlib.sha256(snapshot).hexdigest(), prov_path.name)
 
     def test_runs_added_after_the_rules_changed_are_refused_before_any_call(self) -> None:
-        self.assertEqual(self.check("--live", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")[0], 0)
+        self.assertEqual(self.check("--live", "--round", "1", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")[0], 0)
         calls_so_far = len(self.calls())
         path = self.root / "CODING-STYLE.md"
         path.write_text(path.read_text().replace("Keep usable state until the replacement is ready", "Keep the old copy until the new one is ready"))
         self.compile_digest()
-        code, _, err = self.check("--live", "--case", "fix-1", "--runs", "2", "--skip-existing", "--yes-spend", "2")
+        code, _, err = self.check("--live", "--round", "1", "--case", "fix-1", "--runs", "2", "--skip-existing", "--yes-spend", "2")
         self.assertEqual(code, 1)
-        self.assertIn("the digest now is not the one its earlier runs were recorded with", err)
+        self.assertIn("round 1 was recorded on the digest", err)
+        self.assertEqual(len(self.calls()), calls_so_far)
+
+    def test_a_snapshot_that_is_not_the_digest_of_its_case_and_condition_is_refused_before_any_call(self) -> None:
+        self.assertEqual(self.check("--live", "--round", "1", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")[0], 0)
+        calls_so_far = len(self.calls())
+        snapshot = self.layout.snapshot("fix-1", "without_rule")
+        snapshot.write_text(snapshot.read_text() + "\nA line the digest does not have.\n")
+        code, _, err = self.check("--live", "--round", "1", "--case", "fix-1", "--runs", "2", "--skip-existing", "--yes-spend", "2")
+        self.assertEqual(code, 1)
+        self.assertIn("fix-1/without_rule: the digest now is not the one its earlier runs were recorded with", err)
         self.assertEqual(len(self.calls()), calls_so_far)
 
     def test_recordings_made_live_still_replay_after_the_rules_change(self) -> None:
-        self.assertEqual(self.check("--live", "--yes-spend", "12")[0], 0)
+        self.assertEqual(self.check("--live", "--round", "1", "--yes-spend", "12")[0], 0)
         path = self.root / "CODING-STYLE.md"
         path.write_text(path.read_text().replace("Keep usable state until the replacement is ready", "Keep the old copy until the new one is ready"))
         self.compile_digest()
@@ -1141,10 +1462,139 @@ sys.stdout.write(plan.get("preface", "Reviewed the diff.") + "\n\n```json\n" + j
         inside = self.root / "scratch"
         inside.mkdir()
         with mock.patch.object(tempfile, "tempdir", str(inside)):
-            code, _, err = self.check("--live", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")
+            code, _, err = self.check("--live", "--round", "1", "--case", "fix-1", "--runs", "1", "--yes-spend", "2")
         self.assertEqual(code, 1)
         self.assertIn("inside the repo", err)
         self.assertEqual(self.calls(), [])
+
+
+    # ---- rounds ----
+
+    def live(self, *argv: str, round_number: int = 1, spend: int | None = None) -> tuple[int, str, str]:
+        return self.check("--live", "--round", str(round_number), *argv, *(["--yes-spend", str(spend)] if spend is not None else []))
+
+    def new_digest(self) -> None:
+        """The rules change (a line of another clause): a new digest generation."""
+        self.edit_rules("Keep the guarded block", "Keep the try block")
+
+    def test_live_needs_a_round_and_makes_no_call_without_one(self) -> None:
+        for argv in (("--live",), ("--live", "--yes-spend", "12"), ("--live", "--case", "fix-1", "--yes-spend", "4")):
+            with self.subTest(argv):
+                code, out, err = self.check(*argv)
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn("--live needs --round N", err)
+        self.assertEqual(self.calls(), [])
+        self.assertFalse(self.layout.recordings_root.exists())
+
+    def test_round_must_be_at_least_one(self) -> None:
+        code, _, err = self.live(round_number=0, spend=12)
+        self.assertEqual(code, 1)
+        self.assertIn("--round must be at least 1", err)
+        self.assertEqual(self.calls(), [])
+
+    def test_the_plan_names_the_round_and_a_later_round_writes_nothing_before_the_spending_is_confirmed(self) -> None:
+        self.assertEqual(self.live(spend=12)[0], 0)
+        self.new_digest()
+        calls_so_far = len(self.calls())
+        code, out, err = self.live(round_number=2)
+        self.assertEqual(code, 2)
+        self.assertIn("12 reviewer call(s) planned into round 2 (", out)
+        self.assertIn("--yes-spend 12", err)
+        self.assertEqual(self.live(round_number=2, spend=11)[0], 2)
+        self.assertEqual(len(self.calls()), calls_so_far)
+        self.assertFalse(self.layout.of_round(2).recordings_dir.exists())  # no manifest, no snapshot
+
+    def test_a_round_is_recorded_into_its_own_directory_with_a_manifest_in_name_order(self) -> None:
+        self.new_digest()
+        code, out, err = self.live(round_number=2, spend=12)
+        self.assertEqual((code, err), (0, ""))
+        layout = self.layout.of_round(2)
+        self.assertFalse(self.layout.recordings_dir.exists())  # round 1 was not touched
+        self.assertEqual(sorted(path.name for path in layout.recordings_dir.iterdir()), ["fix-1", "fix-2", "round.json"])
+        self.assertEqual(layout.manifest.read_text(encoding="utf-8"),
+                         rc.Manifest(2, hashlib.sha256(self.digests("REL.1").full.encode()).hexdigest(), ("fix-1", "fix-2")).to_text())
+        prov = json.loads(layout.recording("fix-2", "with_rule", 1)[1].read_text())
+        self.assertEqual((prov["case"], prov["digest_sha256"]), ("fix-2", hashlib.sha256(layout.snapshot("fix-2", "with_rule").read_bytes()).hexdigest()))
+        self.assertEqual(self.check("--round", "2")[0], 0)
+        self.assertEqual(json.loads(layout.results_json.read_text())["round"], 2)
+
+    def test_a_case_may_join_a_round_while_the_digest_is_still_its_own(self) -> None:
+        self.assertEqual(self.live("--case", "fix-2", "--runs", "1", spend=2)[0], 0)
+        first = self.manifest_of()
+        self.assertEqual(first.cases, ("fix-2",))
+        code, out, err = self.live("--case", "fix-1", "--runs", "1", spend=2)
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("planned into round 1", out)
+        self.assertEqual(len(self.calls()), 4)
+        joined = self.manifest_of()
+        self.assertEqual((joined.cases, joined.digest_sha256), (("fix-1", "fix-2"), first.digest_sha256))  # in name order, nothing dropped
+        self.assertEqual(sorted(path.name for path in self.layout.recordings_dir.iterdir()), ["fix-1", "fix-2", "round.json"])
+
+    def test_a_case_cannot_join_a_round_on_another_digest_and_nothing_is_called_or_written(self) -> None:
+        self.assertEqual(self.live("--case", "fix-1", "--runs", "1", spend=2)[0], 0)
+        before = self.layout.manifest.read_bytes()
+        self.new_digest()
+        calls_so_far = len(self.calls())
+        for spend in (None, 2):  # the refusal does not wait for the confirmation of the spending
+            with self.subTest(spend):
+                code, out, err = self.live("--case", "fix-2", "--runs", "1", spend=spend)
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn("round 1 was recorded on the digest", err)
+                self.assertIn("a case joins a round only on that round's own digest", err)
+        self.assertEqual(len(self.calls()), calls_so_far)
+        self.assertEqual(self.layout.manifest.read_bytes(), before)
+        self.assertFalse((self.layout.recordings_dir / "fix-2").exists())
+
+    def test_a_new_round_cannot_start_on_the_digest_of_an_earlier_round_and_nothing_is_called_or_written(self) -> None:
+        self.assertEqual(self.live(spend=12)[0], 0)
+        for spend in (None, 12):
+            with self.subTest(spend):
+                code, out, err = self.live(round_number=2, spend=spend)
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn("round 2 would start on the digest", err)
+                self.assertIn("which round 1 was already recorded on", err)
+        self.assertEqual(len(self.calls()), 12)
+        self.assertFalse(self.layout.of_round(2).recordings_dir.exists())
+
+    def test_a_new_round_is_checked_against_every_earlier_round_not_only_the_last(self) -> None:
+        self.assertEqual(self.live(spend=12)[0], 0)
+        self.new_digest()
+        self.assertEqual(self.live(round_number=2, spend=12)[0], 0)
+        self.edit_rules("Keep the try block", "Keep the guarded block")  # the rules are back to what round 1 was recorded on
+        self.assertEqual(self.digests("REL.1").full, self.layout.snapshot("fix-1", "with_rule").read_text())
+        code, _, err = self.live(round_number=3, spend=12)
+        self.assertEqual(code, 1)
+        self.assertIn("which round 1 was already recorded on", err)
+        self.assertEqual(len(self.calls()), 24)
+
+    def test_a_new_round_on_a_new_digest_is_recorded_and_replays_next_to_the_first(self) -> None:
+        self.assertEqual(self.live(spend=12)[0], 0)
+        self.new_digest()
+        self.assertEqual(self.live(round_number=2, spend=12)[0], 0)
+        self.assertNotEqual(self.manifest_of(1).digest_sha256, self.manifest_of(2).digest_sha256)
+        code, out, err = self.check()
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out.count("PASS 2  FAIL 0  INCOMPLETE 0"), 2)
+        self.assertTrue(self.layout.compare_md.exists())
+        self.assertIn("| fix-1 | REL.1 | 3/3 -> 3/3 | 0/3 -> 0/3 | PASS -> PASS |", self.layout.compare_md.read_text())
+
+    def test_the_guards_hold_in_a_later_round(self) -> None:
+        self.new_digest()
+        self.assertEqual(self.live(round_number=2, spend=12)[0], 0)
+        calls_so_far = len(self.calls())
+        before = self.layout.of_round(2).recording("fix-1", "with_rule", 1)[0].read_bytes()
+        code, _, err = self.live("--case", "fix-1", round_number=2, spend=6)
+        self.assertEqual(code, 1)  # never overwritten
+        self.assertIn("recordings already exist:", err)
+        self.assertIn("fix-1/with_rule-1", err)
+        self.assertEqual(self.live("--case", "fix-1", "--skip-existing", round_number=2)[0], 0)  # nothing left to do
+        self.assertEqual(len(self.calls()), calls_so_far)
+        self.assertEqual(self.layout.of_round(2).recording("fix-1", "with_rule", 1)[0].read_bytes(), before)
+        self.set_plan(fail_calls=[calls_so_far + 1])  # and a failed call is repeated once in round 2 too
+        self.assertEqual(self.live("--case", "fix-1", "--runs", "4", "--skip-existing", round_number=2, spend=2)[0], 0)
+        self.assertEqual(len(self.calls()) - calls_so_far, 3)
+        self.assertEqual(len(list(self.layout.of_round(2).recordings_dir.glob("fix-1/*.attempt1.json"))), 1)
+        self.assertFalse(self.layout.recordings_dir.exists())
 
 
 class RealCasesTest(unittest.TestCase):
@@ -1188,6 +1638,41 @@ class RealCasesTest(unittest.TestCase):
             with self.subTest(case=case.id):
                 self.assertIn(case.clause, defined)
                 self.assertTrue(re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", case.label))
+
+
+class RoundOneRecordingsTest(unittest.TestCase):
+    """The committed recordings of round 1 score as they did when they sat directly under recordings/ (and as results.md first said).
+    Recordings never change, so these numbers are pinned: (violation labeled, violation flagged, control labeled, control flagged) of
+    the runs of 3, and the secondary pair (violation cited, control cited), for with_rule and without_rule."""
+
+    ROUND_ONE_DIGEST = "f85fe1df1803e7e5ca40660f2e60eccfa26f8f31a82c9938ca2f04a5d360a3eb"
+    PINNED = {
+        "rel-1": ("FAIL", ((3, 3, 3, 3), (1, 1)), ((0, 3, 0, 3), (0, 0))),
+        "rel-2": ("FAIL", ((2, 3, 2, 3), (1, 0)), ((0, 3, 0, 3), (0, 0))),
+        "rel-3": ("FAIL", ((3, 3, 3, 3), (1, 1)), ((0, 3, 0, 3), (0, 0))),
+        "rel-3b": ("PASS", ((2, 3, 0, 3), (1, 0)), ((0, 3, 0, 3), (0, 0))),
+        "rel-4": ("FAIL", ((1, 3, 0, 3), (2, 0)), ((0, 3, 0, 3), (0, 0))),
+    }
+
+    def test_round_one_replays_to_the_scores_it_had_before_it_was_filed_under_round_1(self) -> None:
+        layout = rc.Layout(REPO_ROOT)
+        manifest = rc.load_manifest(layout)
+        self.assertEqual((manifest.round_number, manifest.digest_sha256, manifest.cases),
+                         (1, self.ROUND_ONE_DIGEST, tuple(self.PINNED)))
+        cases = rc.load_cases(layout.cases_dir, list(manifest.cases))
+        results = rc.replay(layout, cases, (REPO_ROOT / "CODING-STYLE.digest.md").read_text(encoding="utf-8"), 3)
+        got = {}
+        for case in results["cases"]:
+            rows = [case["conditions"][condition] for condition in ("with_rule", "without_rule")]
+            got[case["id"]] = (case["verdict"],
+                               *[(tuple(row[key] for key in ("violation_labeled_runs", "violation_flagged_runs", "control_labeled_runs",
+                                                             "control_flagged_runs")),
+                                  (row["secondary"]["violation_cited_runs"], row["secondary"]["control_cited_runs"])) for row in rows])
+            self.assertEqual([row["runs_ok"] for row in rows], [3, 3])
+        self.assertEqual(got, self.PINNED)
+        self.assertEqual(results["totals"], {"PASS": 1, "FAIL": 4, "INCOMPLETE": 0})
+        self.assertEqual(results["repeats"], {"slots_repeated": 0, "failed_attempts": []})
+        self.assertEqual(results["round"], 1)
 
 
 if __name__ == "__main__":

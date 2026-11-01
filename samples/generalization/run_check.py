@@ -4,19 +4,24 @@ The question: after a rule was learned from one finding, does the reviewer flag 
 it with that rule, and leave a similar legitimate control alone? CRITERIA.md fixes the reading before anything is recorded;
 this file only counts, and records what the reviewer said so that the count can be redone for free.
 
-    python3.12 samples/generalization/run_check.py                          # --replay: score the committed recordings, free
-    python3.12 samples/generalization/run_check.py --live --yes-spend 24    # record: runs the reviewer, COSTS MONEY
+    python3.12 samples/generalization/run_check.py                                      # --replay: score every recorded round, free
+    python3.12 samples/generalization/run_check.py --live --round 2 --yes-spend 24      # record into round 2: runs the reviewer, COSTS MONEY
+
+A round is one digest generation: every recording of a round was made with the same with_rule digest, and a new round starts on a
+digest no earlier round used. Round 1 exists; a case may join an existing round only on that round's digest.
 
 Layout, all under samples/generalization/:
   cases/<id>/case.json, oracle.py, code/<violation>, code/<control>    written by hand; never shown to the reviewer
   cases/<id>/base/<file>                  optional: the earlier version of a code file, so that the review sees a modification
-  recordings/<id>/<condition>-<n>.txt     the reviewer's raw stdout (the last attempt of that run)
-  recordings/<id>/<condition>-<n>.json    provenance: which code, base files and digest produced that text, with which command
-  recordings/<id>/<condition>-<n>.attempt1.txt/.json    the failed first attempt of a run that was repeated (both are kept)
-  recordings/<id>/<condition>-<n>[.attempt1].stderr.txt    the reviewer's stderr of a FAILED attempt, for diagnosis on this machine only:
+  recordings/round-<N>/round.json         the round: its number, the sha256 of its with_rule digest and the cases recorded in it
+  recordings/round-<N>/<id>/<condition>-<n>.txt     the reviewer's raw stdout (the last attempt of that run)
+  recordings/round-<N>/<id>/<condition>-<n>.json    provenance: which code, base files and digest produced that text, with which command
+  recordings/round-<N>/<id>/<condition>-<n>.attempt1.txt/.json    the failed first attempt of a run that was repeated (both are kept)
+  recordings/round-<N>/<id>/<condition>-<n>[.attempt1].stderr.txt    the reviewer's stderr of a FAILED attempt, for diagnosis on this machine only:
                                           it names the recording machine's settings and paths, so it is git-ignored and no provenance holds it
-  recordings/<id>/<condition>.digest.md   the exact digest text those runs were made with: replay checks against this, not the repo's
-  results.json, results.md                what --replay computes from them (no clock in either)
+  recordings/round-<N>/<id>/<condition>.digest.md   the exact digest text those runs were made with: replay checks against this, not the repo's
+  results-round-<N>.json, .md             what --replay computes from one round (no clock in either)
+  results-compare.md                      the rounds side by side, written when more than one round has results
 
 Two conditions per case: `with_rule` (the repo's full digest) and `without_rule` (the same digest compiled from the rules
 with that case's clause block removed). Each is reviewed `--runs` times (3) at `/code-review high`, in a scratch git repo
@@ -38,7 +43,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 
 # house_rules is imported from the checkout this file sits in, whatever the current directory is.
 DEFAULT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -66,10 +71,14 @@ MIN_LABELED_RUNS = 2  # (1) a finding on the violation file carries the case's l
 MAX_CONTROL_LABELED_RUNS = 0  # (2) ... and a finding on the control file carries it in no more than this many
 CONTROL_KINDS = ("compliant", "exempt")
 RECORDING_VERSION = 1
+MANIFEST_VERSION = 1  # round.json
 MAX_ATTEMPTS = 2  # CRITERIA.md: a run slot is repeated at most once, and only because its first attempt failed
 SESSION_ID_ENV = "CLAUDE_CODE_SESSION_ID"  # a headless review must not look like a continuation of the caller's session
 EXIT_NOT_CONFIRMED = 2  # --live without the matching --yes-spend
 STDERR_TAIL_LINES = 5  # how much of a failed attempt's stderr goes to the console; the side file has all of it
+
+CITED_DESCRIPTION = ("secondary, declared after round 1, no pass line, never part of a verdict: the runs in which a finding on that "
+                     "file has a summary that names the case's clause (REL.4 or rel-4); the failure scenario is not read")
 
 OK, FAILED, MISSING = "ok", "failed", "missing"  # what became of one run
 EMPTY, RECORDED, INTERRUPTED = "empty", "recorded", "interrupted"  # a run slot on disk: nothing / a final recording / only a failed first attempt
@@ -84,7 +93,9 @@ _GIT_IDENTITY = {"GIT_AUTHOR_NAME": "generalization", "GIT_AUTHOR_EMAIL": "gener
 
 @dataclass(frozen=True)
 class Layout:
+    """Where everything of one round lives. Round 1 unless told otherwise."""
     root: Path
+    round_number: int = 1
 
     @property
     def gen_dir(self) -> Path:
@@ -95,16 +106,32 @@ class Layout:
         return self.gen_dir / "cases"
 
     @property
-    def recordings_dir(self) -> Path:
+    def recordings_root(self) -> Path:
+        """The directory that holds one `round-<N>` directory per round."""
         return self.gen_dir / "recordings"
 
     @property
+    def recordings_dir(self) -> Path:
+        return self.recordings_root / f"round-{self.round_number}"
+
+    @property
+    def manifest(self) -> Path:
+        return self.recordings_dir / "round.json"
+
+    @property
     def results_json(self) -> Path:
-        return self.gen_dir / "results.json"
+        return self.gen_dir / f"results-round-{self.round_number}.json"
 
     @property
     def results_md(self) -> Path:
-        return self.gen_dir / "results.md"
+        return self.gen_dir / f"results-round-{self.round_number}.md"
+
+    @property
+    def compare_md(self) -> Path:
+        return self.gen_dir / "results-compare.md"
+
+    def of_round(self, round_number: int) -> "Layout":
+        return dataclasses.replace(self, round_number=round_number)
 
     def recording(self, case_id: str, condition: str, run: int, *, failed_first_attempt: bool = False) -> tuple[Path, Path]:
         """(raw output, provenance) of one run: its last attempt, or with `failed_first_attempt` the failed attempt before a repeat."""
@@ -207,16 +234,98 @@ def read_case(case_dir: Path) -> Case:
     return Case(case_dir.name, raw["clause"].strip(), raw["control_kind"], violation, control, code, read_base(case_dir, code))
 
 
-def load_cases(cases_dir: Path, wanted: Sequence[str]) -> list[Case]:
-    """The cases under `cases_dir` in name order, or only those named in `wanted`."""
-    case_dirs = sorted(path.parent for path in cases_dir.glob("*/case.json"))
-    if not case_dirs:
+def known_case_ids(cases_dir: Path, wanted: Sequence[str] = ()) -> list[str]:
+    """The ids of the case directories under `cases_dir` in name order, without reading any of them. Refuses (HouseRulesError) when
+    there are none, or when `wanted` names one that is not there."""
+    known = sorted(path.parent.name for path in cases_dir.glob("*/case.json"))
+    if not known:
         raise HouseRulesError(f"no cases found: expected {cases_dir}/<id>/case.json")
-    known = [path.name for path in case_dirs]
     unknown = sorted(set(wanted) - set(known))
     if unknown:
         raise HouseRulesError(f"unknown case {unknown}; the cases are {known}")
-    return [read_case(path) for path in case_dirs if not wanted or path.name in wanted]
+    return known
+
+
+def load_cases(cases_dir: Path, wanted: Sequence[str]) -> list[Case]:
+    """The cases under `cases_dir` in name order, or only those named in `wanted`."""
+    known = known_case_ids(cases_dir, wanted)
+    return [read_case(cases_dir / case_id) for case_id in known if not wanted or case_id in wanted]
+
+
+# ---- rounds ---------------------------------------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Manifest:
+    """recordings/round-<N>/round.json: what a round is. A round is one digest generation, so it names the digest its with_rule
+    runs were made with (sha256 of the digest text) and the cases recorded in it. Nothing else, and no clock."""
+    round_number: int
+    digest_sha256: str
+    cases: tuple[str, ...]
+
+    def to_text(self) -> str:
+        return json.dumps({"v": MANIFEST_VERSION, "round": self.round_number, "digest_sha256": self.digest_sha256,
+                           "cases": list(self.cases)}, indent=2) + "\n"
+
+
+def _manifest_error(layout: Layout, problem: str) -> HouseRulesError:
+    return HouseRulesError(f"{display_path(layout.manifest, layout.root)}: {problem}")
+
+
+def read_manifest(layout: Layout) -> Manifest | None:
+    """The manifest of the round, None when the round has none. A manifest that is there but wrong is refused."""
+    text = read_text(layout.manifest)
+    if text is None:
+        return None
+    try:
+        raw = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise _manifest_error(layout, f"not valid JSON: {exc}") from exc
+    if not isinstance(raw, dict) or raw.get("v") != MANIFEST_VERSION:
+        raise _manifest_error(layout, f'must be an object with "v": {MANIFEST_VERSION}')
+    if raw.get("round") != layout.round_number:
+        raise _manifest_error(layout, f'"round" is {raw.get("round")!r}, but the directory is round-{layout.round_number}')
+    digest, cases = raw.get("digest_sha256"), raw.get("cases")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise _manifest_error(layout, '"digest_sha256" must be the sha256 of the with_rule digest, 64 hex digits')
+    if (not isinstance(cases, list) or not cases or not all(isinstance(case, str) and case.strip() for case in cases)
+            or len(set(cases)) != len(cases)):
+        raise _manifest_error(layout, '"cases" must be a non-empty list of different case ids')
+    return Manifest(layout.round_number, digest, tuple(cases))
+
+
+def load_manifest(layout: Layout) -> Manifest:
+    manifest = read_manifest(layout)
+    if manifest is None:
+        raise _manifest_error(layout, "not found: a round directory without its manifest cannot be scored")
+    return manifest
+
+
+def found_rounds(layout: Layout) -> list[int]:
+    """The numbers of the `round-<N>` directories under recordings/, lowest first."""
+    if not layout.recordings_root.is_dir():
+        return []
+    matches = (re.fullmatch(r"round-([1-9][0-9]*)", path.name) for path in layout.recordings_root.iterdir() if path.is_dir())
+    return sorted(int(match.group(1)) for match in matches if match)
+
+
+def check_round_digest(layout: Layout, digest_sha256: str) -> Manifest | None:
+    """Before recording into the round of `layout` with the with_rule digest of the given hash: the manifest of that round, None
+    for a round that does not exist yet. Refuses (HouseRulesError), before anything is called, a case that would join a round on
+    another digest than the round's own, and a new round on a digest that an earlier round already used."""
+    manifest = read_manifest(layout)
+    here = f"round {layout.round_number}"
+    if manifest is not None:
+        if manifest.digest_sha256 != digest_sha256:
+            raise HouseRulesError(f"{here} was recorded on the digest {manifest.digest_sha256[:12]}, the digest now is "
+                                  f"{digest_sha256[:12]}: a case joins a round only on that round's own digest. Record it into a new "
+                                  "round (--round N) once the rules are meant to change")
+        return manifest
+    for other in found_rounds(layout):
+        if other != layout.round_number and load_manifest(layout.of_round(other)).digest_sha256 == digest_sha256:
+            raise HouseRulesError(f"{here} would start on the digest {digest_sha256[:12]}, which round {other} was already recorded on: "
+                                  "a round is a digest generation. Change the rules first, or add the cases to "
+                                  f"round {other} (--round {other})")
+    return None
 
 
 # ---- digests --------------------------------------------------------------------------------------------------------
@@ -387,6 +496,8 @@ class RunScore:
     model_id: str | None
     attempts: int  # reviewer calls recorded for this run: 0, 1, or 2 (the first failed and was repeated)
     first_failure: str | None  # why the first attempt failed, when it did
+    violation_cited: bool = False  # secondary: a finding on the violation file has a summary that names the case's clause
+    control_cited: bool = False  # secondary: the same for the control file
 
 
 def _unscored(run: int, status: str, reason: str, prov: dict, attempts: int = 0, first_failure: str | None = None) -> RunScore:
@@ -398,8 +509,17 @@ def _text_or_none(value: object) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def cites_clause(item: dict, case: Case) -> bool:
+    """The secondary metric "cited" (declared after round 1, no pass line, never part of a verdict): the `summary` of the finding
+    names the case's clause, as `REL.4` or `rel-4`, whole word, any case. Only the summary is read: the failure scenario of a
+    finding on a control that complies can praise the clause ("is what REL.4 requires")."""
+    summary = item.get("summary")
+    return isinstance(summary, str) and _mentions(summary, case.clause)
+
+
 def score_items(items: list[dict], case: Case, run: int, prov: dict, attempts: int, first_failure: str | None) -> RunScore:
     labels: dict[str, list[str]] = {VIOLATION: [], CONTROL: []}
+    cited = {VIOLATION: False, CONTROL: False}
     others = 0
     for item in items:
         side = which_file(item.get("file"), case)
@@ -407,8 +527,10 @@ def score_items(items: list[dict], case: Case, run: int, prov: dict, attempts: i
             others += 1
         else:
             labels[side].append(finding_label(item))
+            cited[side] = cited[side] or cites_clause(item, case)
     return RunScore(run, OK, None, len(items), tuple(labels[VIOLATION]), tuple(labels[CONTROL]), others,
-                    _text_or_none(prov.get("reviewer_version")), _text_or_none(prov.get("model_id")), attempts, first_failure)
+                    _text_or_none(prov.get("reviewer_version")), _text_or_none(prov.get("model_id")), attempts, first_failure,
+                    cited[VIOLATION], cited[CONTROL])
 
 
 def tally(runs: Sequence[RunScore], label: str) -> dict[str, int]:
@@ -422,6 +544,15 @@ def tally(runs: Sequence[RunScore], label: str) -> dict[str, int]:
         "violation_flagged_runs": sum(1 for run in scored if run.violation_labels),
         "control_labeled_runs": sum(1 for run in scored if label in run.control_labels),
         "control_flagged_runs": sum(1 for run in scored if run.control_labels),
+    }
+
+
+def cited_tally(runs: Sequence[RunScore]) -> dict[str, int]:
+    """Counts of runs for the secondary metric "cited" (see cites_clause), kept apart from the counts the verdict reads."""
+    scored = [run for run in runs if run.status == OK]
+    return {
+        "violation_cited_runs": sum(1 for run in scored if run.violation_cited),
+        "control_cited_runs": sum(1 for run in scored if run.control_cited),
     }
 
 
@@ -540,10 +671,12 @@ def rules_changed_note(case: Case, recorded_digest: str | None, current_digest: 
 
 def condition_row(runs: Sequence[RunScore], label: str) -> dict:
     row: dict = dict(tally(runs, label))
+    row["secondary"] = cited_tally(runs)
     row["runs"] = [
         {"run": run.run, "status": run.status, "findings": run.findings, "violation_labels": list(run.violation_labels),
          "control_labels": list(run.control_labels), "other_file_findings": run.other_file_findings, "attempts": run.attempts,
-         "first_attempt_failure": run.first_failure}
+         "first_attempt_failure": run.first_failure,
+         "secondary": {"violation_cited": run.violation_cited, "control_cited": run.control_cited}}
         if run.status == OK else {"run": run.run, "status": run.status, "reason": run.reason, "attempts": run.attempts,
                                   "first_attempt_failure": run.first_failure}
         for run in runs]
@@ -566,10 +699,19 @@ def repeat_summary(case_rows: Sequence[dict]) -> dict:
     return {"slots_repeated": repeated, "failed_attempts": failed}
 
 
+def manifest_problems(layout: Layout, manifest: Manifest) -> list[str]:
+    """Recordings of a round that its manifest does not list: they would never be scored."""
+    listed = set(manifest.cases)
+    return [f"{display_path(path, layout.root)}: recordings of a case that the manifest of round {layout.round_number} does not list"
+            for path in sorted(layout.recordings_dir.iterdir()) if path.is_dir() and path.name not in listed]
+
+
 def replay(layout: Layout, cases: Sequence[Case], current_digest: str | None, runs: int) -> dict:
-    """Score every recording of `cases`. Refuses (HouseRulesError) if a recording is not of the code, base files and digest snapshot
-    it was made with. `current_digest` (the digest the repo ships now, None if it has none) only decides whether to add a note."""
-    problems: list[str] = []
+    """Score every recording of `cases` in the round of `layout`. Refuses (HouseRulesError) if a recording is not of the code, base
+    files and digest snapshot it was made with, or if the round's manifest does not agree with what is recorded. `current_digest`
+    (the digest the repo ships now, None if it has none) only decides whether to add a note."""
+    manifest = load_manifest(layout)
+    problems = manifest_problems(layout, manifest)
     scored: dict[tuple[str, str], list[RunScore]] = {}
     snapshots: dict[tuple[str, str], str | None] = {}
     for case in cases:
@@ -577,6 +719,9 @@ def replay(layout: Layout, cases: Sequence[Case], current_digest: str | None, ru
             snapshot = read_text(layout.snapshot(case.id, condition))
             snapshots[(case.id, condition)] = snapshot
             problems += snapshot_problems(case, condition, snapshot)
+            if condition == "with_rule" and snapshot is not None and sha256_hex(snapshot) != manifest.digest_sha256:
+                problems.append(f"{case.id}/with_rule.digest.md: not the digest of round {layout.round_number} (the manifest names "
+                                f"{manifest.digest_sha256[:12]}, the snapshot is {sha256_hex(snapshot)[:12]}): a round is one digest")
             loaded = [load_run(layout, case, condition, run, sha256_hex(snapshot) if snapshot is not None else None)
                       for run in range(1, runs + 1)]
             scored[(case.id, condition)] = [score for score, _ in loaded]
@@ -593,10 +738,13 @@ def replay(layout: Layout, cases: Sequence[Case], current_digest: str | None, ru
     every_run = [run for runs_of in scored.values() for run in runs_of]
     return {
         "v": 1,
+        "round": layout.round_number,
+        "digest_sha256": manifest.digest_sha256,
         "level": LEVEL,
         "runs_per_condition": runs,
         "pass_rule": {"violation_labeled_runs_at_least": MIN_LABELED_RUNS, "control_labeled_runs_at_most": MAX_CONTROL_LABELED_RUNS,
                       "decided_in": "with_rule"},
+        "secondary_metrics": {"cited": CITED_DESCRIPTION},
         "reviewer_versions": sorted({run.reviewer_version for run in every_run if run.reviewer_version}),
         "model_ids": sorted({run.model_id for run in every_run if run.model_id}),
         "cases": case_rows,
@@ -611,15 +759,17 @@ def _fraction(count: int, results: dict) -> str:
 
 def table_rows(results: dict) -> list[list[str]]:
     header = ["case", "clause", "control", "condition", "runs ok", "violation labeled", "violation flagged", "control labeled",
-              "control flagged", "verdict"]
+              "control flagged", "verdict", "violation cited (secondary)", "control cited (secondary)"]
     rows = [header]
     for case in results["cases"]:
         for condition in CONDITIONS:
             counts = case["conditions"][condition]
+            cited = counts["secondary"]
             rows.append([case["id"], case["clause"], case["control_kind"], condition,
                          _fraction(counts["runs_ok"], results), _fraction(counts["violation_labeled_runs"], results),
                          _fraction(counts["violation_flagged_runs"], results), _fraction(counts["control_labeled_runs"], results),
-                         _fraction(counts["control_flagged_runs"], results), case["verdict"] if condition == "with_rule" else "-"])
+                         _fraction(counts["control_flagged_runs"], results), case["verdict"] if condition == "with_rule" else "-",
+                         _fraction(cited["violation_cited_runs"], results), _fraction(cited["control_cited_runs"], results)])
     return rows
 
 
@@ -641,14 +791,17 @@ def case_notes(results: dict) -> list[str]:
     return [note for case in results["cases"] for note in case["notes"]]
 
 
-def render_text_table(results: dict) -> str:
-    rows = table_rows(results)
+def align(rows: Sequence[Sequence[str]]) -> list[str]:
     widths = [max(len(row[column]) for row in rows) for column in range(len(rows[0]))]
-    lines = ["  ".join(cell.ljust(width) for cell, width in zip(row, widths)).rstrip() for row in rows]
+    return ["  ".join(cell.ljust(width) for cell, width in zip(row, widths)).rstrip() for row in rows]
+
+
+def render_text_table(results: dict) -> str:
+    lines = [f"round {results['round']} (with_rule digest {results['digest_sha256'][:12]})", "", *align(table_rows(results))]
     totals = results["totals"]
     lines += ["", f"PASS {totals[PASS]}  FAIL {totals[FAIL]}  INCOMPLETE {totals[INCOMPLETE]}",
               "labeled = a finding carries the case's clause as its category; flagged = a finding on that file, any label "
-              "(unmapped included); counts are runs, not findings",
+              "(unmapped included); counts are runs, not findings", f"cited = {CITED_DESCRIPTION}",
               f"run slots that needed a repeat after a failed first attempt (both attempts are kept): {results['repeats']['slots_repeated']}"]
     for heading, notes in (("repeated runs:", repeat_notes(results)), ("runs without findings:", run_notes(results)),
                            ("notes:", case_notes(results))):
@@ -658,11 +811,13 @@ def render_text_table(results: dict) -> str:
 
 def render_markdown(results: dict) -> str:
     rows = table_rows(results)
-    lines = ["# Generalization check results", "",
-             f"Level `{results['level']}`, {results['runs_per_condition']} runs per condition. PASS is decided in `with_rule` alone: "
+    lines = [f"# Generalization check results, round {results['round']}", "",
+             f"Round {results['round']}, with_rule digest `{results['digest_sha256'][:12]}`. Level `{results['level']}`, "
+             f"{results['runs_per_condition']} runs per condition. PASS is decided in `with_rule` alone: "
              f"a finding on the violation file carries the case's label in at least {MIN_LABELED_RUNS} runs, and a finding on the "
              f"control file carries it in {MAX_CONTROL_LABELED_RUNS}. `without_rule` has no pass line; it is shown for comparison. "
-             "Columns count runs, not findings; flagged means a finding on that file with any label, `unmapped` included.", "",
+             "Columns count runs, not findings; flagged means a finding on that file with any label, `unmapped` included. "
+             f"`cited` is {CITED_DESCRIPTION}.", "",
              "| " + " | ".join(rows[0]) + " |", "|" + "---|" * len(rows[0])]
     lines += ["| " + " | ".join(row) + " |" for row in rows[1:]]
     totals = results["totals"]
@@ -681,6 +836,40 @@ def has_recordings(results: dict) -> bool:
 def write_results(layout: Layout, results: dict) -> None:
     write_text(layout.results_json, json.dumps(results, indent=2, ensure_ascii=False) + "\n")
     write_text(layout.results_md, render_markdown(results))
+
+
+def comparison_rows(rounds: Sequence[dict]) -> list[list[str]]:
+    """One row per case, in name order: its `with_rule` violation labeled, control labeled and verdict in every round, the rounds in
+    order and separated by `->`; `-` where the case was not recorded in that round."""
+    by_round = [{case["id"]: case for case in results["cases"]} for results in rounds]
+    clauses = {case["id"]: case["clause"] for results in rounds for case in results["cases"]}
+
+    def across_rounds(case_id: str, pick: Callable[[dict, dict], str]) -> str:
+        return " -> ".join(pick(results, cases[case_id]) if case_id in cases else "-" for results, cases in zip(rounds, by_round))
+
+    rows = [["case", "clause", "violation labeled (with_rule)", "control labeled (with_rule)", "verdict"]]
+    for case_id in sorted(clauses):
+        rows.append([case_id, clauses[case_id],
+                     across_rounds(case_id, lambda results, case: _fraction(case["conditions"]["with_rule"]["violation_labeled_runs"], results)),
+                     across_rounds(case_id, lambda results, case: _fraction(case["conditions"]["with_rule"]["control_labeled_runs"], results)),
+                     across_rounds(case_id, lambda results, case: case["verdict"])])
+    return rows
+
+
+def render_comparison(rounds: Sequence[dict]) -> str:
+    """results-compare.md: the rounds side by side. Like the other results it holds no clock."""
+    versions = [", ".join(f"`{version}`" for version in results["reviewer_versions"]) or "none recorded" for results in rounds]
+    named = ", ".join(f"round {results['round']} (with_rule digest `{results['digest_sha256'][:12]}`)" for results in rounds)
+    lines = ["# Generalization check: rounds compared", "",
+             f"Rounds: {named}. Every cell lists the rounds in this order, separated by `->`; `-` means the case was not recorded "
+             f"in that round. Counts are runs of {rounds[0]['runs_per_condition']} in `with_rule`, verdicts are the ones of the "
+             "round's own results file.", ""]
+    rows = comparison_rows(rounds)
+    lines += ["| " + " | ".join(rows[0]) + " |", "|" + "---|" * len(rows[0]), *["| " + " | ".join(row) + " |" for row in rows[1:]]]
+    lines += ["", "Reviewer version: " + "; ".join(f"round {results['round']}: {version}" for results, version in zip(rounds, versions)) + "."]
+    if len({tuple(results["reviewer_versions"]) for results in rounds}) > 1:
+        lines += ["", "The reviewer version differs between the rounds, so a difference between them is confounded by it."]
+    return "\n".join(lines) + "\n"
 
 
 # ---- live -----------------------------------------------------------------------------------------------------------
@@ -850,9 +1039,9 @@ def check_snapshots(layout: Layout, targets: Sequence[Job], digests: Digests) ->
                                   "again with the rules as they are now")
 
 
-def plan_line(jobs: Sequence[Job], states: dict[tuple[str, str, int], str], cases: int, runs: int) -> str:
+def plan_line(jobs: Sequence[Job], states: dict[tuple[str, str, int], str], cases: int, runs: int, round_number: int) -> str:
     repeats = sum(1 for job in jobs if states[job.key] != INTERRUPTED)
-    return (f"live plan: {len(jobs)} reviewer call(s) planned ({cases} case(s) x {len(CONDITIONS)} conditions x {runs} run(s) at "
+    return (f"live plan: {len(jobs)} reviewer call(s) planned into round {round_number} ({cases} case(s) x {len(CONDITIONS)} conditions x {runs} run(s) at "
             f"/code-review {LEVEL}), plus at most {repeats} more as repeats (one per run at most, only for a run whose call fails or "
             f"whose output has no findings array); --yes-spend must equal the {len(jobs)} planned calls, repeats are covered by it; "
             "this spends real money")
@@ -872,13 +1061,17 @@ def run_live(layout: Layout, config: Config, cases: Sequence[Case], digests: Dig
     if not jobs:
         print("nothing to record: every run already has a recording")
         return 0
+    digest_sha256 = sha256_hex(digests.full)
+    manifest = check_round_digest(layout, digest_sha256)  # a round is one digest: before any call, refuse the wrong one
     targets = list({(job.case.id, job.condition): job for job in jobs}.values())  # one job of every case and condition
     check_snapshots(layout, targets, digests)
     require_claude(claude_command(LEVEL, "<range>"))
-    print(plan_line(jobs, states, len(cases), runs))
+    print(plan_line(jobs, states, len(cases), runs, layout.round_number))
     if yes_spend != len(jobs):
         print(f"not started: pass --yes-spend {len(jobs)} to confirm exactly this many calls", file=sys.stderr)
         return EXIT_NOT_CONFIRMED
+    in_round = {case.id for case in cases} | set(manifest.cases if manifest else ())
+    write_text(layout.manifest, Manifest(layout.round_number, digest_sha256, tuple(sorted(in_round))).to_text())
     for job in targets:
         if not layout.snapshot(job.case.id, job.condition).exists():
             write_text(layout.snapshot(job.case.id, job.condition), digests.for_condition(job.condition, job.case.clause))
@@ -900,8 +1093,9 @@ def run_live(layout: Layout, config: Config, cases: Sequence[Case], digests: Dig
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Score or record the generalization check (see CRITERIA.md).")
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--replay", action="store_true", help="score the committed recordings (the default; free)")
-    mode.add_argument("--live", action="store_true", help="run the reviewer and record it; costs money")
+    mode.add_argument("--replay", action="store_true", help="score the committed recordings of every round (the default; free)")
+    mode.add_argument("--live", action="store_true", help="run the reviewer and record it into --round N; costs money")
+    parser.add_argument("--round", type=int, metavar="N", help="with --live: the round to record into (required); with --replay: score only this round")
     parser.add_argument("--yes-spend", type=int, metavar="N", help="with --live: the number of reviewer calls planned, to confirm them (the plan line says how many repeats may come on top)")
     parser.add_argument("--case", action="append", default=[], metavar="ID", help="only this case (repeatable); results are not written")
     parser.add_argument("--runs", type=int, default=DEFAULT_RUNS, help=f"runs per condition (default {DEFAULT_RUNS}, which CRITERIA.md assumes)")
@@ -910,29 +1104,64 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def run(args: argparse.Namespace) -> int:
-    layout = Layout(args.repo_root.resolve())
-    if args.runs < 1:
-        raise HouseRulesError("--runs must be at least 1")
-    if (args.yes_spend is not None or args.skip_existing) and not args.live:
-        raise HouseRulesError("--yes-spend and --skip-existing only apply to --live")
-    cases = load_cases(layout.cases_dir, args.case)
-    config = load_repo_config(layout.root)
-    if args.live:
-        return run_live(layout, config, cases, build_digests(config, [case.clause for case in cases]), args.runs, args.yes_spend,
-                        args.skip_existing)
-    results = replay(layout, cases, read_text(config.digest_path), args.runs)
-    print(render_text_table(results))
+def run_replay(layout: Layout, config: Config, args: argparse.Namespace) -> int:
+    """Score the rounds found (or the one asked for), print each, and write the results of every round and their comparison."""
+    known_case_ids(layout.cases_dir, args.case)
+    found = found_rounds(layout)
+    if args.round is not None and args.round not in found:
+        raise HouseRulesError(f"round {args.round} has no recordings: the rounds found are {found}")
+    if not found:
+        print("no round is recorded yet (see --live --round 1)")
+        return 0
+    current_digest = read_text(config.digest_path)
+    scored: list[dict] = []
+    for number in [args.round] if args.round is not None else found:
+        round_layout = layout.of_round(number)
+        ids = [case_id for case_id in load_manifest(round_layout).cases if not args.case or case_id in args.case]
+        if ids:  # with --case, a round that holds none of the cases asked for is passed over
+            scored.append(replay(round_layout, load_cases(layout.cases_dir, ids), current_digest, args.runs))
+    if not scored:
+        raise HouseRulesError(f"no round records {args.case}")
+    print("\n\n".join(render_text_table(results) for results in scored))
     if args.runs != DEFAULT_RUNS:
         print(f"note: CRITERIA.md assumes {DEFAULT_RUNS} runs per condition; this reading was not pre-registered")
     if args.case:
-        print("results.json and results.md not written: --case scores only part of the check")
-    elif not has_recordings(results):
-        print("results.json and results.md not written: nothing is recorded yet (see --live)")
-    else:
-        write_results(layout, results)
-        print(f"wrote {display_path(layout.results_json, layout.root)} and {display_path(layout.results_md, layout.root)}")
+        print("results files not written: --case scores only part of the check")
+        return 0
+    recorded = []
+    for results in scored:
+        round_layout = layout.of_round(results["round"])
+        if not has_recordings(results):
+            print(f"results of round {results['round']} not written: nothing is recorded in it yet (see --live --round {results['round']})")
+            continue
+        recorded.append(results)
+        write_results(round_layout, results)
+        print(f"wrote {display_path(round_layout.results_json, layout.root)} and {display_path(round_layout.results_md, layout.root)}")
+    if args.round is not None and len(found) > 1:
+        print(f"{display_path(layout.compare_md, layout.root)} not written: --round scores only one round")
+    elif len(recorded) > 1:
+        write_text(layout.compare_md, render_comparison(recorded))
+        print(f"wrote {display_path(layout.compare_md, layout.root)}")
     return 0
+
+
+def run(args: argparse.Namespace) -> int:
+    root = args.repo_root.resolve()
+    if args.runs < 1:
+        raise HouseRulesError("--runs must be at least 1")
+    if args.round is not None and args.round < 1:
+        raise HouseRulesError("--round must be at least 1")
+    if (args.yes_spend is not None or args.skip_existing) and not args.live:
+        raise HouseRulesError("--yes-spend and --skip-existing only apply to --live")
+    if args.live and args.round is None:
+        raise HouseRulesError("--live needs --round N: the round to record into (a round is one digest generation; see README.md)")
+    config = load_repo_config(root)
+    if args.live:
+        layout = Layout(root, args.round)
+        cases = load_cases(layout.cases_dir, args.case)
+        return run_live(layout, config, cases, build_digests(config, [case.clause for case in cases]), args.runs, args.yes_spend,
+                        args.skip_existing)
+    return run_replay(Layout(root), config, args)
 
 
 def main(argv: list[str] | None = None) -> int:
