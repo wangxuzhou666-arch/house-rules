@@ -1,0 +1,46 @@
+```json
+[
+  {
+    "file": "code/item_index.py",
+    "line": 40,
+    "summary": "The stored key changes from `feed_url|guid` to `host|guid`, and `KEY_VERSION` goes from 1 to 2. `import_items` now ignores every old row when it builds `seen`, so every old row's item is added again.",
+    "failure_scenario": "A file holds v1 rows such as `https://example.com/feed.xml|abc`, and some of them are marked read. After the upgrade, `import_items` for the same feed builds an empty `seen` set and appends a fresh v2 row `example.com|abc` with `read=False`. Items the user already read come back as unread duplicates. The v1 row stays in the file, so `unread_titles` can now list the same title twice. This breaks REL.2, because a change to a stored dedup key needs compatible reads or a migration plus an old-identity check. Neither is present."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 57,
+    "summary": "`mark_read` only matches rows whose `key_version` equals the current version, so it can no longer mark legacy v1 rows as read.",
+    "failure_scenario": "The user reads an item that was imported before the upgrade, which is a v1 row. `mark_read` computes the v2 key and requires `key_version == 2`, so it finds no match and returns False. Nothing is saved, and the v1 row stays unread forever. Even if a v2 duplicate has been added, the user has to mark that duplicate instead. There is no code path that ever migrates or closes v1 rows (REL.2)."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 13,
+    "summary": "The new key keeps only the feed's host and drops its path. Two different feeds on the same host that share a guid now get the same key, so they collide.",
+    "failure_scenario": "`https://blog.example.com/news.xml` and `https://blog.example.com/releases.xml` both publish a guid like `1` or `post-42`. Under v1 the keys were distinct. Under v2 both become `blog.example.com|1`. `import_items` for the second feed treats its items as already seen and silently drops them. `mark_read` on one feed's item marks the other feed's row as read. This is data loss from the key-format change. Because of the key change, the same collision also affects old data that gets re-keyed."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 12,
+    "summary": "`feed_host` is a hand-rolled URL split that keeps userinfo and port, and is copy-pasted verbatim into `reading_list.py`. The standard library already has `urllib.parse.urlsplit`.",
+    "failure_scenario": "`https://user@Example.com:8080/feed` becomes `user@example.com:8080`, and `Example.com` without a scheme parses differently. Feeds that differ only in port or credentials get different identities, while feeds that differ only in path get the same one. The identical function in two modules can drift apart when one is fixed. Use `urllib.parse.urlsplit(feed_url).hostname` in one shared helper (P2.2)."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 40,
+    "summary": "`load_rows` checks that `key_version` exists but not that it is a known value. `import_items` and `mark_read` quietly skip any row whose version is not the current one, and nothing reports it.",
+    "failure_scenario": "The file holds rows with an unexpected version, such as a hand-edited or future-version file. Every row is ignored with no log and no named error. All items are re-imported on every run, the file grows with duplicates, and `mark_read` returns False. This is a silent fallback with no logging and no named fallback behaviour (P0F.2, REL.3)."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 20,
+    "summary": "`label` only branches on `label_style == 1`, so any other value falls into the v2 format, and a missing or odd `label_style` is not checked.",
+    "failure_scenario": "A row has `label_style: 3` from a future version or a hand edit. It is rendered as `feed#N` with no error, and old padded labels like `host-0007` change to `host#7` for users who saw the old format. The change also applies only at read time, so the same row can be shown in two formats across versions."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 47,
+    "summary": "Two feeds on the same host share one `feed` and one `number` sequence and can share a uid, because the identity is host-only.",
+    "failure_scenario": "Feeds `https://example.com/a.xml` and `https://example.com/b.xml` both use `example.com` as `feed`. Their numbers share one counter, so labels like `example.com#3` do not say which feed they belong to. A guid that both feeds use produces the same uid, so `add_items` drops the second feed's item as a duplicate."
+  }
+]
+```

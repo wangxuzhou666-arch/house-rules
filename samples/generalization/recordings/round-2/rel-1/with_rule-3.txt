@@ -1,0 +1,52 @@
+```json
+[
+  {
+    "file": "code/site_publisher.py",
+    "line": 8,
+    "summary": "publish() deletes the live directory before any page has been rendered, so a failure partway through leaves the live site empty or half-written (REL.1, should-fix).",
+    "failure_scenario": "The live site is served from live_dir and holds 50 pages. publish() is called and rmtree wipes the directory. The 20th render() then raises, or the disk fills, or the process is killed. The exception propagates, and live_dir holds only the first 19 pages (or none) with no rollback. Visitors get 404s until someone re-runs a successful publish. The fix is to render into a sibling staging directory such as live_dir.with_name(live_dir.name + '.new'), validate it, then swap it in with os.replace (or rename the old directory aside and rename it back on failure). This is not exempt: the live site is not a cache that can be rebuilt on demand."
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 12,
+    "summary": "Page names are used unvalidated as paths, so '..' segments or an absolute name write outside live_dir. read_page() has the same hole on the read side (P0F.1, blocker).",
+    "failure_scenario": "pages = {'../../etc/cron.d/x': ...} gives target = live_dir/'../../etc/cron.d/x', so write_text and mkdir write outside live_dir. An absolute name like '/tmp/evil' makes the pathlib '/' operator discard live_dir entirely. read_page(live_dir, '../secret.txt') reads arbitrary files. Reject names whose resolved path is not inside live_dir at this boundary."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 15,
+    "summary": "The cache name is used unvalidated in the file path, so '../' or an absolute name makes get() write and read files outside the cache root (P0F.1, blocker).",
+    "failure_scenario": "get('../../victim') renders bytes and writes root/../../victim.png, then renames over it. With a name derived from a request, an attacker overwrites arbitrary .png paths or reads arbitrary .png files. Validate that name has no path separators, or check that the resolved path stays under root."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 18,
+    "summary": "Every writer of the same name uses one shared '.part' temp file, and a failed write leaves a stale '.part' behind. This makes the write-then-replace sequence unsafe under concurrency.",
+    "failure_scenario": "Two threads or processes call get('a') on a cold cache. A opens a.part, then B opens and truncates the same a.part. A calls replace, which moves it to a.png. B's replace then raises FileNotFoundError, because a.part no longer exists. In the other interleaving, a reader can get a.png containing B's half-written bytes. If write_bytes fails midway (disk full), the partial a.part stays on disk and is never cleaned up. Use a unique temp name (tempfile.NamedTemporaryFile(dir=root) or a pid/uuid suffix) and clean up in a handler."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 25,
+    "summary": "rebuild() deletes the whole cache before re-rendering, so readers see an empty cache for the duration of the rebuild, and a render failure leaves it empty (not mapped to a clause, because REL.1 exempts a cache rebuilt on demand).",
+    "failure_scenario": "rebuild(['a','b','c']) removes root, and render('b') then raises. The cache now holds only a.png, and the old b.png and c.png are gone. Concurrent get() callers all miss during the rebuild and trigger a thundering herd of renders. A concurrent rebuild also races get(): get() can see path.exists() true and then fail in read_bytes after rmtree removes the file. Building into a temp directory and swapping it in avoids both problems, though the exemption makes this low priority."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 21,
+    "summary": "get() checks exists() and then reads, so the file can be deleted between the two calls; the miss path also reads the file back from disk right after writing it (TOCTOU, and one redundant read).",
+    "failure_scenario": "Another process runs rebuild() or clears the cache between path.exists() returning True and path.read_bytes(). This raises FileNotFoundError instead of re-rendering. On the cold path, the code already holds the rendered bytes in memory but re-reads the whole PNG from disk. Keep the rendered bytes in a local variable and return them, and on the hit path wrap the read so a missing file falls back to re-rendering."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 26,
+    "summary": "rebuild() does not de-duplicate names and returns len(names), which overstates the work done when the input has repeats.",
+    "failure_scenario": "rebuild(['a','a','b']) renders 'a' twice. The second get() is a cache hit because the first call already wrote it, so only 2 renders happen. The method returns 3, so callers that report or assert on the count are wrong. Dedupe the input or count actual renders."
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 8,
+    "summary": "publish() calls shutil.rmtree on whatever live_dir it is given, with no check that it is a directory this module owns (P0F.1, blocker).",
+    "failure_scenario": "A misconfigured live_dir (for example '/', the home directory, or the project root) is deleted recursively before anything is written. If live_dir is a symlink to a directory, rmtree raises OSError ('Cannot call rmtree on a symbolic link'), and publish fails permanently. Assert that live_dir is not a symlink and carries a marker or expected shape before deleting."
+  }
+]
+```

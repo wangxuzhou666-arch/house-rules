@@ -1,0 +1,58 @@
+```json
+[
+  {
+    "file": "code/sms_codes.py",
+    "line": 24,
+    "summary": "The limit check, the delivery and the counter update are not atomic and have no lock. The write at line 29 also uses the stale `used` value read at line 22.",
+    "failure_scenario": "per_phone_limit=3 and 10 concurrent send_code(phone) calls (web workers or threads). All 10 read used=0, pass the check, deliver 10 SMS, and each writes sent[phone]=1. The per-phone cap is bypassed (SMS pumping and cost abuse), and the counter ends at 1. mail_codes.py in the same change already has a lock, so the two modules are inconsistent."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 28,
+    "summary": "_reserve increments the quota before transport.send runs, and nothing rolls it back when sending fails (P0F.2, REL.1).",
+    "failure_scenario": "The SMTP transport raises a transient error. The user's counter is already incremented, but no email was sent. After 3 failed attempts the user gets TooManyRequests for the rest of the day without ever receiving a code. The sms module has the opposite behaviour (the count is only bumped after success), so the two modules disagree on semantics."
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 4,
+    "summary": "TooManyRequests is defined separately in both modules, and CodeSender duplicates the CodeMailer rate-limit logic (daily reset, per-key counter, limit check).",
+    "failure_scenario": "A caller that handles both channels with `except mail_codes.TooManyRequests` will not catch sms_codes.TooManyRequests, so it surfaces as a 500 instead of a 429. The two copies of the limiter have already diverged: one has a lock and reserves before sending, the other has neither. The fix is a shared RateLimiter and a single exception class (the reuse and simplification angles)."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 22,
+    "summary": "The limiter key is the raw address string with no normalization, so trivial variants count as different recipients.",
+    "failure_scenario": "A user, or an attacker mail-bombing a victim, alternates `Victim@x.com`, `victim@x.com`, ` victim@x.com`, or `victim+1@gmail.com`. Each variant gets its own 3-code quota, so the per-address limit is effectively unbounded. The same applies to phone formats in sms_codes.py, such as `+1 555...`, `555...` and `+1-555...`."
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 29,
+    "summary": "The rate-limit state (`self.sent`) is process-local and in-memory, so the limit resets on restart and is not shared across workers (the same applies to mail_codes.py).",
+    "failure_scenario": "Under gunicorn with 4 workers the effective limit is 12 per phone per day. A restart or deploy mid-day resets every counter to zero, so an attacker can trigger restarts or round-robin across workers to evade the cap."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 33,
+    "summary": "The code is generated and sent but never stored, hashed or given an expiry, and no attempt limit or verify path exists. The plaintext code is also returned to the caller.",
+    "failure_scenario": "Nothing in the module lets the system later verify the code, so the caller must store it itself, likely in plaintext and without a TTL. Returning the code from the send API makes it easy to leak into logs or HTTP responses by accident. The same applies to sms_codes.py."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 18,
+    "summary": "The day rollover calls self.today() twice, so a value could differ between the comparison and the assignment. The daily wipe also uses local-time date.today and clears every address at once.",
+    "failure_scenario": "A call straddling local midnight, or a DST or timezone change, can set self.day to a different date than the one compared. All counters reset at local midnight, so an attacker gets 3 codes just before midnight and 3 more just after. Compare once with `now = self.today()`. A rolling window or a per-day key would be sturdier. The same applies to sms_codes.py line 20."
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 26,
+    "summary": "The exception message leaks the raw phone number and the exact usage count (PII in exceptions and logs, and information disclosure to the client if the message is surfaced).",
+    "failure_scenario": "A handler that logs or returns str(exc) writes the phone number or email in clear text to logs, or reveals to a caller probing the endpoint how many codes were sent to a given recipient. The same applies to mail_codes.py line 24."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 15,
+    "summary": "The `self.sent` dict grows with every distinct address for the whole day and is only cleared on rollover. Entries are never evicted.",
+    "failure_scenario": "A flood of requests with many unique random addresses or phone numbers, each cheap to produce, grows the dict without bound until midnight and can exhaust memory (the same applies to sms_codes.py)."
+  }
+]
+```

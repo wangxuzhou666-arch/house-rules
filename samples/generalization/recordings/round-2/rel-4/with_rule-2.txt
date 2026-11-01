@@ -1,0 +1,52 @@
+```json
+[
+  {
+    "file": "code/sms_codes.py",
+    "line": 29,
+    "summary": "The per-phone cap is counted only after `gateway.deliver` succeeds, so attempts that fail are never counted. This breaks REL.4: count each attempt as it starts.",
+    "failure_scenario": "The SMS gateway times out or throws, for example after queuing the message upstream or when it is flaky. `deliver` raises before `self.sent[phone] = used + 1` runs, so the counter never moves. A caller can retry indefinitely, and every retry that still reaches the carrier is a billable SMS to that number. The limit meant to stop SMS pumping and spam is bypassed exactly when the gateway misbehaves. `mail_codes.py` reserves the slot before sending, so the two modules now disagree."
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 24,
+    "summary": "The limit check (`_used`) and the increment are separate steps with no lock, so concurrent requests all pass the check. `mail_codes.py` guards the same sequence with `threading.Lock`, and this module does not.",
+    "failure_scenario": "A server runs this under threads or a threadpool. Five requests for the same phone arrive together, each reads `used == 0` and passes the check, and each sends an SMS. Because `deliver` is slow network I/O, the window is wide. The result is five codes against a limit of 3. Later writes also overwrite each other with `used + 1`, so the counter ends at 1 and the cap is almost never enforced under load. The day-rollover `sent.clear()` in `_used` is also an unsynchronized shared-state mutation."
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 17,
+    "summary": "`_used` is named like a getter but mutates state: it rolls the day and clears `sent`. It also duplicates the rollover logic in `mail_codes._reserve`.",
+    "failure_scenario": "A later change calls `_used` for a read-only status or metrics check, and the call silently wipes the daily counters. Any fix to the rollover logic has to be made in both files. The two copies have already diverged: one is locked and one is not."
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 5,
+    "summary": "`TooManyRequests` is defined again, separately from the one in `mail_codes.py`. The two modules are otherwise near copies (rate-limit state, daily reset, code generation).",
+    "failure_scenario": "A caller handling both channels writes `except mail_codes.TooManyRequests`, which does not catch `sms_codes.TooManyRequests`. The SMS limit then surfaces as a 500. The same quota logic is maintained in two places, and the existing divergence (locked and unlocked, reserve-first and count-on-success) shows the cost."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 20,
+    "summary": "The quota key is the raw address string with no normalization. The same applies to the raw phone string in `sms_codes.py`.",
+    "failure_scenario": "A user, or an attacker mass-mailing a victim, requests codes for `Bob@x.com`, `bob@x.com`, ` bob@x.com` and `b.o.b@gmail.com`-style variants. Each string gets its own counter of 3, so the effective limit is unbounded. For SMS, `+1 555 0100`, `+15550100` and `0015550100` do the same."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 31,
+    "summary": "`send_code` returns the secret code, and neither module stores or expires it. Nothing verifies the code later.",
+    "failure_scenario": "A handler returns `send_code(...)` in the HTTP response for debugging or convenience. The verification code is then exposed to the requester, so anyone can verify any address or phone without owning it. The caller must also keep the code, with its TTL and attempt limits, in a store that this class does not provide. Nothing documents this contract."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 17,
+    "summary": "The `sent` dict only clears when the day changes and a request arrives. It gets one entry per distinct address, with no cap on key count.",
+    "failure_scenario": "A bot sends one request each for millions of unique made-up addresses or numbers in a day. The dict grows without bound until the next day's first call, which causes memory pressure or an OOM in a long-lived process. State is also lost on restart, so the daily limit resets whenever the process is redeployed or crashes. Neither limitation is documented."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 24,
+    "summary": "The rate-limit exception message embeds the full address (or phone in the SMS module) and the usage count.",
+    "failure_scenario": "A top-level handler or logger prints `str(exc)`, or an API returns it to the client. Email addresses and phone numbers (PII) end up in logs and error responses. It also confirms to an attacker exactly how many codes were issued."
+  }
+]
+```

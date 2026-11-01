@@ -1,0 +1,64 @@
+```json
+[
+  {
+    "file": "code/mail_routes.py",
+    "line": 20,
+    "summary": "apply_routes opens the live routes file with mode 'w' (truncating it) and validates each route only while writing, so one invalid route or an I/O error leaves a truncated, partial file.",
+    "failure_scenario": "apply_routes(path, [good1, good2, {'domain': 'bad', 'folder': 'x'}, good4]). The file is truncated on open, good1 and good2 are written, then render_route raises RouteError on the third route. The file on disk now holds only 2 of 4 routes. Later folder_for/load_routes calls read this partial table with no error, so mail for the missing domains silently goes to 'inbox'. Readers running concurrently with a successful apply also see an empty or half-written file. The fix is to validate and render everything first, write to a temp file in the same directory, then os.replace it (REL.1). This also affects P0F.2 and P0F.4."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 36,
+    "summary": "The index is built once and trusted forever. Nothing invalidates it when the source routes change, and _load only checks the file's own internal consistency.",
+    "failure_scenario": "The index is built from routes {a.com: Work}. Later apply_routes (or any other writer) changes a.com to Billing. folder_for still calls _load, finds a valid trailer, and keeps returning 'Work' indefinitely. The index is rebuilt only if the file is deleted or corrupted. There is no mtime, version or source-hash check against read_routes."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 13,
+    "summary": "rebuild writes the index in place with open('w') and no atomic rename. Concurrent callers (or a crash) see a truncated or half-written file.",
+    "failure_scenario": "Process A is in rebuild() and has truncated the file. Process B calls folder_for, _load sees a missing or mismatched 'end' trailer and returns None, and B starts its own rebuild, which truncates the file again under A. The two writers interleave and thrash, and each reader pays a full rebuild. The 'end' trailer detects tearing but does not prevent it. Writing to a temp file and calling os.replace would give readers either the old index or the new one (REL.1)."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 11,
+    "summary": "Domain validation does not reject tab, newline or other control characters, and the folder check misses \\r and the Unicode line separators that splitlines splits on. The tab-separated format can be corrupted.",
+    "failure_scenario": "route = {'domain': 'a.com\\tevil', 'folder': 'Work'} passes the checks (it has a '.', no '@' and no ' '). It is written as 'a.com\\tevil\\tWork'. load_routes then partitions it into domain 'a.com' and folder 'evil\\tWork', which hijacks a.com's routing. A folder such as 'Work\\rX' or 'A\\u2028B' passes the '\\t'/'\\n' check but is split by splitlines on read, producing bogus entries."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 11,
+    "summary": "rebuild writes whatever read_routes yields with no validation of tab or newline in domain or folder. It also does not strip the folder, while mail_routes does.",
+    "failure_scenario": "A folder 'Work\\nArchive' is written as two lines, so the trailer count (len(routes)) no longer equals len(lines)-1. Every later _load returns None, and every folder_for call re-runs the full rebuild and rewrites the file. A domain or folder containing a tab re-parses to a wrong key and value. A folder with trailing spaces gives a different result than the same route through mail_routes.render_route."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 31,
+    "summary": "load_routes silently drops malformed lines and has no handling for decode errors. A damaged or partial routes file looks identical to a valid one with fewer routes.",
+    "failure_scenario": "A routes file with a corrupt line, or one truncated mid-write, loads successfully with fewer entries and no log. Affected senders fall back to 'inbox' with no signal. A non-UTF-8 file raises UnicodeDecodeError out of folder_for, unlike SenderIndex._load, which treats the same case as invalid. This breaks the rule to degrade explicitly and name the fallback (P0F.2, REL.3)."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 37,
+    "summary": "folder_for re-reads and re-parses the whole routes file on every lookup.",
+    "failure_scenario": "Classifying a mailbox of N messages calls folder_for N times. Each call does a full read_text and parse of the routes file, so the cost is O(N x routes) of repeated disk I/O. The caller can't parse once and reuse the table."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 38,
+    "summary": "SenderIndex re-implements the route line format, the parsing, the address-to-domain extraction and the 'inbox' default that already live in mail_routes.py, and the two copies have already drifted apart.",
+    "failure_scenario": "domain = address.rsplit('@',1)[-1].strip().lower() and the default 'inbox' are duplicated. The two writers also differ (the folder is stripped in one and not the other), and so do their on-disk formats (the 'end' trailer exists only in the index). A change to the route format or default folder in one module won't reach the other. The index could take mail_routes.load_routes as its read_routes source and share one domain-extraction helper."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 9,
+    "summary": "str(route.get(...)) turns a missing or None folder into the literal string 'None', which passes validation.",
+    "failure_scenario": "{'domain': 'a.com', 'folder': None} gives folder = 'None', which is non-empty and passes the check, so mail for a.com is routed to a folder literally named 'None'. A missing 'domain' key is also coerced to '' and reported as \"invalid domain ''\" rather than as a missing key, so the error is hard to diagnose. Input shape is not validated at the boundary (P0F.1)."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 22,
+    "summary": "_load swallows all read failures (OSError, UnicodeDecodeError) and returns None with no log, so the caller silently triggers a full rebuild.",
+    "failure_scenario": "On a permissions error or a disk fault, every folder_for call silently falls into rebuild(), re-reading all the routes and rewriting the file each time. Nothing is logged to show the index is unreadable or that the fallback is happening (P0F.2). The fallback is also not distinguished from the normal case of the file not existing yet."
+  }
+]
+```

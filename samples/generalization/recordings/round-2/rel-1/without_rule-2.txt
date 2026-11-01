@@ -1,0 +1,64 @@
+```json
+[
+  {
+    "file": "code/site_publisher.py",
+    "line": 8,
+    "summary": "publish() deletes the live directory before any page is rendered, so the live site is torn down and rebuilt in place and is not atomic.",
+    "failure_scenario": "pages = {'index.html': ok, 'about.html': raises}. rmtree(live_dir) has already run, index.html is written, then about.html's render() raises. The site is left half-published, or empty if the first render fails, and the previous good version is lost. Readers calling read_page() or page_names() during the rebuild get FileNotFoundError or a partial listing. Fix: render everything into a sibling temp dir, then swap it in with os.replace or a rename. Roll back, or delete nothing, if any render fails."
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 12,
+    "summary": "Page names are joined to live_dir without containment checks, so '..' or absolute names write outside the live dir.",
+    "failure_scenario": "pages = {'../../etc/cron.d/x': ...} writes outside live_dir. An absolute name such as '/tmp/evil' makes `live_dir / name` resolve to '/tmp/evil', because pathlib discards the left side. Any caller that derives names from user or CMS input gets arbitrary file write. Fix: resolve target and require `target.resolve().is_relative_to(live_dir.resolve())`, or reject names that are absolute or contain '..'."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 25,
+    "summary": "rebuild() rmtree's the whole cache before regenerating, so the cache is destroyed first and a failed render loses everything. Concurrent get() calls also race with it.",
+    "failure_scenario": "rebuild(['a','b','c']) removes root. Rendering 'b' raises, so the cache is left with only 'a' and the old previews for b and c are gone. If get('x') runs in another thread or process, a reader can hit FileNotFoundError at `path.read_bytes()` (line 21) after `part.replace(path)`, because rmtree removed the file in between. The same pattern is duplicated in site_publisher.publish. Fix: build into a temp dir and swap it in, or overwrite entries individually and prune the ones no longer listed."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 18,
+    "summary": "The temp file name is a fixed `<name>.part`, so concurrent get() calls for the same name clobber each other. A failed render leaves a stale .part file.",
+    "failure_scenario": "Two workers miss on get('hero') at once. Both write to hero.part. One may replace() it into hero.png while the other is still writing or has already renamed it. The loser then raises FileNotFoundError at `part.replace`, or a truncated PNG gets published. If write_bytes or render raises midway, hero.part stays on disk and is never cleaned up. Fix: use tempfile.NamedTemporaryFile(dir=root, delete=False), or a unique suffix such as pid plus uuid, and unlink the temp file on error."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 12,
+    "summary": "The cache name is used unvalidated in the path, so traversal is possible. Rebuild with names that contain a dot or slash is also unsafe.",
+    "failure_scenario": "get('../../secrets/x') writes `<root>/../../secrets/x.png` and the .part file outside the cache root. A name with a slash such as 'a/b' fails because the 'a' subdirectory is never created: mkdir only creates root, so write_bytes raises FileNotFoundError. Fix: validate that name is a single path component, for example `Path(name).name == name`."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 16,
+    "summary": "The cache key is the name alone and entries are never invalidated. Whatever render() returns, including empty or garbage bytes, is cached forever.",
+    "failure_scenario": "The source asset for 'logo' changes, but get('logo') keeps returning the old PNG until someone runs the destructive rebuild(). If render() once returns b'' because of a transient upstream issue, a zero-byte logo.png is persisted and served as a hit from then on. Fix: include a version or mtime in the key, or accept a staleness check, and refuse to cache empty bytes."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 31,
+    "summary": "The `if not self.root.is_dir(): return []` guard is redundant, because Path.glob on a missing directory already yields nothing. This is the over-protection that P0F.3 and P0F.4 warn about.",
+    "failure_scenario": "No functional failure. The extra branch adds a code path and a second stat call with no behavioral difference. The same dead guard appears in site_publisher.page_names at line 24. Drop the guard and return the sorted glob directly."
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 7,
+    "summary": "The `live_dir.exists()` then rmtree check is a time-of-check/time-of-use race. It also breaks when live_dir is a symlink or a regular file.",
+    "failure_scenario": "If live_dir is a symlink, as in blue/green deployments with a 'current' link, shutil.rmtree raises OSError ('Cannot call rmtree on a symbolic link') and publish fails. If live_dir is a regular file, mkdir later raises FileExistsError after the old state is already gone. The same issue exists in preview_cache.rebuild at line 24. Atomic swap through a symlink or rename would avoid both."
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 14,
+    "summary": "write_text(render(), encoding='utf-8') uses default newline translation and has no handling for conflicting names such as 'a' and 'a/b'.",
+    "failure_scenario": "On Windows, '\\n' in a page is rewritten to '\\r\\n', so published bytes differ per platform, which matters for hashes and diffs. With pages {'docs': ..., 'docs/intro.html': ...}, 'docs' is written as a file and then `target.parent.mkdir` for 'docs/intro.html' raises FileExistsError. The live dir is left half-built, which compounds the non-atomic delete at line 8."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 28,
+    "summary": "rebuild() returns len(names), not the number of entries actually rendered.",
+    "failure_scenario": "rebuild(['a','a','b']) renders 'a' once and returns 3. Callers that log or assert on the count see 3 although only 2 files exist. The first get('a') renders and the second is a hit, so the count misreports work done. Fix: return len(set(names)), or count cache misses."
+  }
+]
+```

@@ -1,0 +1,64 @@
+```json
+[
+  {
+    "file": "code/sender_index.py",
+    "line": 34,
+    "summary": "The index is only rebuilt when the file is missing or corrupt. Nothing ever invalidates it when the source routes change, so lookups serve stale data forever.",
+    "failure_scenario": "A valid index exists. apply_routes (or whatever feeds read_routes) then adds, changes or removes a domain. folder_for still finds a well-formed file with a correct 'end' footer, returns the old folder, and never calls read_routes again. Mail is misrouted until someone deletes the file by hand. P0F.2 / REL.2 also apply, because the index silently diverges from its source of truth."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 18,
+    "summary": "apply_routes truncates the live routes file ('w') and validates each route lazily while writing. A bad route or crash mid-loop leaves a truncated or empty file, and readers can see partial content.",
+    "failure_scenario": "routes_path holds 100 good routes. apply_routes is called with 50 routes and the 30th is invalid. The file is already truncated and holds 29 lines when RouteError is raised. The previous 100 routes are gone, and folder_for sends the other domains to 'inbox'. A concurrent folder_for during the write also reads a half-written table. The fix is to validate all routes first (P0F.1, validate at the boundary), then write a temp file and os.replace it."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 13,
+    "summary": "Validation lets through characters that corrupt the TSV format. The domain is checked only for '.', '@' and ' ', so embedded tabs and newlines pass. The folder check misses '\\r', '\\x0b', '\\x0c', '\\x85', '\\u2028' and similar. load_routes parses with splitlines(), which breaks on all of those.",
+    "failure_scenario": "domain='a.com\\nevil.com' or folder='x\\u2028y' is written as one record but read back as two lines. A domain such as 'a.com\\tx' is read back as domain 'a.com' with folder 'x\\tfolder'. This produces wrong or injected routes, e.g. mail for evil.com routed where an attacker chose."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 10,
+    "summary": "str(route.get('folder', '')) turns a None value into the literal string 'None', which passes validation. A missing or None folder therefore becomes a folder named 'None'.",
+    "failure_scenario": "{'domain': 'x.com', 'folder': None} is accepted and written as 'x.com\\tNone'. All mail from x.com is filed into a folder called 'None' instead of raising RouteError."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 11,
+    "summary": "rebuild trusts read_routes output and writes it with no validation. A folder or domain containing a newline or other splitlines separator breaks the line-count footer check.",
+    "failure_scenario": "One route has folder='a\\nb'. rebuild writes N+1 physical lines plus the footer 'end\\tN'. _load computes len(lines)-1 != N and returns None. Every folder_for call then rebuilds the file and re-reads the source, and still falls back to 'inbox' for that domain. The cache never takes effect."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 13,
+    "summary": "rebuild rewrites the live index in place with 'w'. Concurrent callers each see a truncated file with no footer, treat it as corrupt, and start their own rebuild. The writers then race on the same path.",
+    "failure_scenario": "Two workers call folder_for at the same moment. Worker A is mid-rebuild with a truncated file. Worker B's _load fails, so B also opens with 'w' and truncates A's output. Interleaved writes can leave a file with a valid-looking footer but wrong or duplicated content. Write to a temp file in the same directory and os.replace it."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 23,
+    "summary": "_load returns None on I/O errors, an empty file, a bad footer or a malformed line, with no log or reason. The silent fallback rebuild hides corruption (P0F.2).",
+    "failure_scenario": "A disk error or a half-written index makes every lookup quietly re-read all routes. No log says why, so the cause of the slowdown, or of any repeated corruption, is invisible. read_routes errors also propagate out of folder_for with no distinction between the two failure modes."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 32,
+    "summary": "load_routes silently drops any line that has no tab, an empty domain or an empty folder (P0F.2). A corrupt routes file therefore degrades to 'inbox' with no signal.",
+    "failure_scenario": "The routes file is truncated or hand-edited to 'example.com' with no tab. load_routes skips it, and folder_for('a@example.com') returns 'inbox'. No error or log appears, even though the user configured a different folder."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 34,
+    "summary": "folder_for re-reads and re-parses the whole index file on every lookup. The result is never kept in memory, so there is O(file size) disk I/O per message.",
+    "failure_scenario": "Routing 10,000 messages against a 5,000-domain index reads and parses the file 10,000 times. mail_routes.folder_for has the same issue through load_routes. Cache the parsed table and invalidate it on mtime or content change."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 38,
+    "summary": "The index duplicates the routes-file TSV format and the address-to-domain normalization from mail_routes.py. It does not reuse mail_routes.render_route, load_routes or folder_for's domain parsing.",
+    "failure_scenario": "The two modules write and parse the same 'domain\\tfolder' format with different validation and different tolerance. Mail_routes validates and skips bad lines, while sender_index validates nothing and rejects the whole file on a bad line. A change to normalization, such as subdomain handling or IDNA, has to be made in two places and will drift."
+  }
+]
+```

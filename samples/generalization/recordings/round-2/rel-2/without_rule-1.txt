@@ -1,0 +1,52 @@
+```json
+[
+  {
+    "file": "code/item_index.py",
+    "line": 41,
+    "summary": "Bumping KEY_VERSION to 2 and filtering `seen` by version makes every existing v1 row invisible to dedup, with no migration, so a re-import duplicates every item.",
+    "failure_scenario": "The index file holds v1 rows with keys like 'https://a.com/feed|g1'. The next import_items call for the same feed builds `seen` from v2 rows only, which is empty. Every guid is therefore appended again as a v2 row, and the saved file holds two rows per item. unread_titles then lists each unread item twice, once from the stale v1 row and once from the new v2 row. The old rows are never upgraded or removed, which breaks REL.1 (keep usable state until the replacement is ready)."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 57,
+    "summary": "mark_read only matches rows whose key_version equals the current KEY_VERSION, so items imported under v1 can never be marked read.",
+    "failure_scenario": "A user has an item that was imported before the upgrade. mark_read(path, feed_url, guid) computes the new host|guid key and finds no matching v2 row, so it returns False. The v1 row stays unread permanently and keeps showing in unread_titles. Because import_items also ignores v1 rows, the user then sees a second copy that can be marked read while the original cannot."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 17,
+    "summary": "The new key keeps only the host, so two different feeds on one host that reuse the same guid collide.",
+    "failure_scenario": "https://example.com/blog/feed.xml and https://example.com/podcast/feed.xml both publish guid '1'. Both produce the key 'example.com|1'. The second feed's items are treated as already seen and are silently dropped. mark_read on one feed marks the other feed's item read as well. The old key included the full feed_url and did not have this problem, so this narrowing is a regression."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 13,
+    "summary": "feed_host does not parse the URL, so userinfo, ports, fragments, queries and scheme-less URLs give inconsistent hosts.",
+    "failure_scenario": "'https://user:pw@example.com/f' yields 'user:pw@example.com', and the credentials end up in the persisted key. 'https://example.com?x=1' yields 'example.com?x=1'. 'example.com:8080/f' yields 'example.com:8080', and so on. The same feed reached through slightly different URL spellings gets different keys, so the same item is imported twice. Using urllib.parse.urlsplit(...).hostname handles all of these cases correctly."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 16,
+    "summary": "feed_host is now copy-pasted verbatim into reading_list.py and item_index.py, which also now share the same key-building logic.",
+    "failure_scenario": "The two modules already duplicate load_rows, save_rows and the host-keyed id logic. Any later fix to host parsing, such as the userinfo or port issues above, has to be made in both places. If only one copy is fixed, the key formats drift apart. This is the second copy of the same function, so it falls under P2.2 (abstract on repetition) and should be moved into a shared helper."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 20,
+    "summary": "The label function branches on label_style == 1, and every other value, including unknown or corrupt ones, silently falls into the v2 format.",
+    "failure_scenario": "A row written with label_style 3, or one that was corrupted, is rendered as 'feed#number' with no error. The explicit `== 1` check, followed by a silent default for everything else, hides unknown styles. The file's load_rows validation checks only that the key exists, not its value, so a bad file never reaches the named error path (REL.3). It should list the known styles and raise ListFileError for any other value."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 4,
+    "summary": "LABEL_STYLE is bumped to 2 and the label format changes, but the number counter and any consumers of 'feed-0001' labels are not updated, so the label namespace now mixes two formats.",
+    "failure_scenario": "A list that already holds style-1 rows now gets new rows labeled 'host#5' next to old rows labeled 'host-0004'. The same list shows two formats, which sort inconsistently as text because the new numbers are not zero-padded ('host#10' sorts before 'host#9'). Anything that stored the earlier label strings, such as bookmarks or logs, can no longer match the new add_items return values, because add_items returns labels rather than uids."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 9,
+    "summary": "The key format change in item_index.py has no comment explaining the version bump or why the host-only key is intended.",
+    "failure_scenario": "KEY_VERSION and the host-only key look like arbitrary changes. A later maintainer cannot tell whether rows with a different key_version are meant to be ignored or migrated. This is P3.2: the decision and the ordering constraint (old rows are skipped, not converted) are the non-obvious part and are not recorded."
+  }
+]
+```

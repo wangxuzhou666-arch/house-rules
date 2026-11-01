@@ -1,0 +1,40 @@
+```json
+[
+  {
+    "file": "code/payment_events.py",
+    "line": 6,
+    "summary": "The stored dedup key changes from `provider:event_id` to `account/provider/event_id` with no migration or compatibility read, so every existing row in `events` is orphaned (REL.2).",
+    "failure_scenario": "The ledger already holds the key `stripe:evt_1`. After deploy, a provider retry of `evt_1` produces the key `acct/stripe/evt_1`, which is not found. `INSERT OR IGNORE` inserts a second row, `record_charge` returns True, and `net_cents` double-counts the charge. A refund for a charge recorded before the deploy matches no row, so `record_refund` returns False and `refunded` stays 0. The refunded charge stays in `net_cents`."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 12,
+    "summary": "The invoice label format changes from `INV-000123` to `2026/0123` with no compatibility handling, so invoices already issued and communicated get a different public identifier.",
+    "failure_scenario": "A customer was told invoice `INV-000042`. After the change, `outstanding()` lists the same invoice as `2024/0042`, and any lookup or reconciliation by the old label no longer matches. The year is also derived from `issued_on`, so the label is not a stable function of the row's identity. Only the `uid` and `number` columns stay stable."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 12,
+    "summary": "The new label pads the number to 4 digits and prefixes the year, but `number` is a global `MAX(number)+1` counter that never resets per year.",
+    "failure_scenario": "The label `2027/0001` implies the first invoice of 2027. The real number could be 8421, which reads as `2027/8421`. At 10000 invoices the width overflows (`2026/10000`), so labels become inconsistent in length and sort wrongly as strings. The old 6-digit width gave far more headroom."
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 6,
+    "summary": "`account` is used raw in the key, while `provider` is lowercased and `event_id` is stripped, so key normalization is inconsistent. The `/` separator is also not escaped, so distinct tuples can produce the same key.",
+    "failure_scenario": "`event_key('acme', 'stripe', 'x')` and `event_key('Acme ', 'stripe', 'x')` differ, so the same event is stored twice under a differently-cased or padded account. Separately, `event_key('a/b', 'c', 'd')` and `event_key('a', 'b/c', 'd')` both give `a/b/c/d`, so a charge from one tenant is silently ignored as a duplicate of another's."
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 19,
+    "summary": "The public signatures of `record_charge` and `record_refund` gain a new positional `account` argument in the middle of the parameter list, so callers written for the old signature bind the wrong arguments.",
+    "failure_scenario": "An existing call `record_charge(conn, 'stripe', 'evt_1', 500)` now binds provider='evt_1', event_id=500 and account='stripe'. It then fails on `500.strip()` with an AttributeError. Old two-ID `record_refund(conn, 'stripe', 'ch_1')` calls raise a TypeError. A caller that passes a string for the fourth argument would instead silently write a wrong key. `account` should be keyword-only, or added at the end with a default."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 49,
+    "summary": "`outstanding()` now includes the raw `order_ref` in each output line, which widens what the report exposes. It also changes the line format that downstream parsers read: label, then amount.",
+    "failure_scenario": "A consumer that splits the line as `label amount` and parses the second token as a float now gets the `order_ref` string and fails. An `order_ref` containing spaces shifts the amount column. If the report is sent to customers or logs, internal order references are leaked."
+  }
+]
+```

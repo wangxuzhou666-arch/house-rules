@@ -1,0 +1,46 @@
+```json
+[
+  {
+    "file": "code/item_index.py",
+    "line": 40,
+    "summary": "Bumping KEY_VERSION to 2 and filtering `seen` to current-version rows makes every legacy v1 row invisible to dedup, with no migration. Every item already in the index is re-imported as a new unread row.",
+    "failure_scenario": "The index file holds v1 row {key: 'https://ex.com/feed|g1', key_version: 1, read: True}. import_items runs with the same feed and guid. The v1 key is excluded from `seen`, and the new key 'ex.com|g1' is not in `seen` either. A second row {key: 'ex.com|g1', key_version: 2, read: False} is appended and reported as added. Every previously imported item is duplicated, and items the user already read come back as unread."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 57,
+    "summary": "mark_read only matches rows of the current key version, so legacy v1 rows can never be marked read. The new `key_version` clause also deletes behavior the old code had.",
+    "failure_scenario": "An item exists only as a v1 row, such as an old unread item whose feed is not re-imported. mark_read(path, feed_url, guid) computes the v2 key, finds no match, and returns False. The row stays unread and keeps appearing in unread_titles. Before this diff the same call would have marked it read."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 65,
+    "summary": "unread_titles does not account for the key-version change, so legacy v1 unread rows and their re-imported v2 duplicates are both listed.",
+    "failure_scenario": "After the first import under v2, the file holds an old unread v1 row and a new unread v2 row for the same article. unread_titles returns the title twice. Marking the item read flips only the v2 row (see mark_read), so the v1 duplicate stays in the list for good."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 17,
+    "summary": "The key now uses only the lowercased host, dropping the scheme, port and path. Two different feeds on one host, or the http and https variants of one feed, get identical keys, and one feed's items are silently skipped as duplicates of the other's.",
+    "failure_scenario": "Feed A 'https://blog.example.com/a.xml' and feed B 'https://blog.example.com/b.xml' both publish guid '1'. After A is imported, key 'blog.example.com|1' is in `seen`, so B's item is skipped and never stored. mark_read on B's guid would also flip A's row. Before this change the full feed URL kept the two feeds apart."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 20,
+    "summary": "label() treats every style other than 1 as the new format, and bumping LABEL_STYLE to 2 gives the same listing two label formats with no migration. Stored rows' label_style is never validated or upgraded.",
+    "failure_scenario": "A list file has old rows with label_style 1 ('host-0007') and new rows with label_style 2 ('host#8'). `listing` mixes both formats, so one feed reads 'host-0007', 'host#8', and so on. A row with a corrupt or future label_style (3, None) is silently rendered with the style-2 format instead of failing, which hides bad data. This violates P0F.2/REL.3: a wrong shape should take a named error, not a silent fallthrough."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 22,
+    "summary": "label() branches on `label_style == 1` with an unconditional second return where an explicit `else` or a style table would be clearer. The check for the old style is hardcoded as a magic number, separate from LABEL_STYLE.",
+    "failure_scenario": "Adding a style 3 means finding every `== 1` and fall-through site by hand. Nothing links the literal 1 to LABEL_STYLE's history, so a later bump to 3 mislabels style-2 rows with the style-2 format only by accident. This is minor readability debt under P1.3."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 12,
+    "summary": "feed_host is copy-pasted verbatim from reading_list.py (identical code, identical behavior), and both copies are now the key basis. The URL parsing is hand-rolled and does not strip userinfo or port.",
+    "failure_scenario": "The two copies must stay in sync, or the same feed gets different identities in the two stores. The hand-rolled parser returns 'user:pw@host:8080' as the host, so keys embed credentials and ports, and 'ex.com' and 'ex.com:443' never match. Use one shared helper built on urllib.parse.urlsplit(...).hostname (P2.2: the logic is now repeated)."
+  }
+]
+```

@@ -1,0 +1,34 @@
+```json
+[
+  {
+    "file": "code/payment_events.py",
+    "line": 6,
+    "summary": "Changing the key format from `provider:id` to `account/provider/id` orphans every existing row in the persisted `events` table, and no migration is included.",
+    "failure_scenario": "A ledger file already holds the row `stripe:ch_1`. After deploy, a replayed webhook for `ch_1` computes `acct/stripe/ch_1`, which isn't in the table, so `INSERT OR IGNORE` inserts it and `record_charge` returns True. The charge is now counted twice in `net_cents`. A refund for a pre-deploy charge looks up the new key, matches nothing, and returns False. The old row stays `refunded = 0`, so net revenue is overstated. The deduplication guarantee silently stops covering all historical data."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 12,
+    "summary": "`invoice_label` is computed from the row on every call, so changing its format from `INV-000012` to `2026/0012` relabels every previously issued invoice.",
+    "failure_scenario": "Invoice 12 was sent to a customer as `INV-000012`. After this change, `outstanding()` and any later lookup show it as `2026/0012`. Payments, support tickets and accounting entries that reference the old label no longer match any invoice. The label also isn't stored, so the old identifier can't be recovered. The `04d` padding also overflows silently at number 10000, which gives labels of different widths."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 12,
+    "summary": "The label looks like a per-year sequence (`YYYY/NNNN`), but `number` comes from a global `MAX(number)+1` that never resets by year.",
+    "failure_scenario": "The first invoice of 2027 gets the label `2027/0873`, not `2027/0001`. Anyone who reads the format as a per-year sequence, such as accounting or an auditor, will think invoices are missing. The `MAX+1` allocation in `issue` also has no UNIQUE constraint on `number`. Two writers on separate connections can read the same MAX and issue duplicate labels."
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 19,
+    "summary": "`account` is inserted as a new positional `str` parameter before `provider`, and the `/` delimiter is unescaped, so mixed-up arguments or slashes in values produce wrong or colliding keys without any error.",
+    "failure_scenario": "A caller migrated incompletely, or one that swaps `account` and `provider`, still type-checks and gets a different key. A charge lands under the wrong key and its refund never matches. Separately, `account='a/b', provider='c'` and `account='a', provider='b/c'` both produce `a/b/c/<id>`, so two accounts can collide and one event is dropped as a duplicate. `account` is also not normalized the way `provider` and `event_id` are, so case or whitespace differences create separate keys. The rest of the key is normalized, which makes this inconsistent. Making the new arguments keyword-only and rejecting or encoding the delimiter would prevent all of this."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 49,
+    "summary": "The `outstanding()` output format now includes `order_ref` between the label and the amount, which changes the string contract for existing consumers.",
+    "failure_scenario": "Any consumer that parses `\"<label> <amount>\"`, for example with `split()` or `rsplit(' ', 1)`, now reads the `order_ref` as the amount, or breaks outright if `order_ref` contains spaces. The raw order reference is also newly exposed in this output, which may reach customer-facing or logged output that never showed it before."
+  }
+]
+```

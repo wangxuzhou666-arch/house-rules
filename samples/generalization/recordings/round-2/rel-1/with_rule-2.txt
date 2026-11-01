@@ -1,0 +1,58 @@
+```json
+[
+  {
+    "file": "code/site_publisher.py",
+    "line": 8,
+    "summary": "publish() deletes the live directory before any page is rendered, so a render failure leaves the live site empty or half-written (REL.1).",
+    "failure_scenario": "Pages {'index.html': ok, 'about.html': raises}. The old live_dir is already gone and index.html is the only file written. The exception propagates and the site now serves a partial or empty tree, and the previous good version cannot be restored. Not a rebuildable cache, so the REL.1 exemption does not apply. Fix: render into a sibling temp dir and swap it in (rename) only after all pages succeed."
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 12,
+    "summary": "Page names are joined to live_dir without containment checks, so '..' or absolute names write outside live_dir. read_page has the same flaw.",
+    "failure_scenario": "A key like '../../etc/cron.d/x' or an absolute path '/tmp/evil' makes `live_dir / name` resolve outside live_dir, and write_text overwrites an arbitrary file. read_page(live_dir, '../secret') reads arbitrary files. An empty name or one ending in '/' resolves to live_dir itself and raises IsADirectoryError after the old tree was already deleted. Fix: resolve the target and require it to be inside live_dir, or reject such names at the boundary."
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 14,
+    "summary": "Pages are written non-atomically with write_text directly into the live directory, so readers can see truncated files while publishing.",
+    "failure_scenario": "A concurrent read_page or web server request during publish sees a missing or half-written page (the tree is deleted first, then filled file by file). A crash mid-write leaves a truncated page. Fix: build in a staging dir and swap, or write each file to a temp name and rename it."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 25,
+    "summary": "rebuild() deletes the whole cache before re-rendering. If any render raises, the cache is left empty or partial and the earlier cached entries are lost.",
+    "failure_scenario": "rebuild(['a','b','c']) where render('b') raises: the cache is wiped, only 'a' is regenerated, and the exception escapes. Concurrent get() calls see missing files and each pays a full render. Because this is a rebuildable cache, the REL.1 exemption applies, so this is a robustness issue rather than a rule violation. A staging dir swapped in after success avoids it."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 16,
+    "summary": "get() builds the file path from an unvalidated name, so names containing separators or '..' escape the cache root or crash.",
+    "failure_scenario": "get('../../x') writes and reads `<root>/../../x.png` outside the cache. get('a/b') fails with FileNotFoundError at part.write_bytes because only self.root is created, not the nested parent. Fix: validate the name at the boundary, or create path.parent and check containment."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 19,
+    "summary": "The temp file path is deterministic and shared per name, so two concurrent get() calls for the same uncached name race on the same .part file.",
+    "failure_scenario": "Threads A and B both see no cache entry and both write `<name>.part`. A's replace() moves the file, then B's replace() raises FileNotFoundError. Or B's write_bytes truncates the file while A is renaming it, publishing a partial PNG. A .part file left by a crash is never cleaned up. Fix: use a unique temp name per call (tempfile / pid+uuid) and tolerate the lost race."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 21,
+    "summary": "The exists() check and the final read_bytes() are not atomic with rebuild()'s rmtree, so a concurrent rebuild can delete the file between them.",
+    "failure_scenario": "Thread 1 in get() passes `path.exists()`, or just renamed the part file. Thread 2's rebuild() rmtree's the root. Thread 1's read_bytes() raises FileNotFoundError even though the render succeeded. Fix: return the rendered bytes directly on a miss instead of re-reading from disk."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 19,
+    "summary": "Whatever render() returns is cached without validation, including empty bytes, so a bad render is permanently served as a hit.",
+    "failure_scenario": "render returns b'' on a transient upstream problem. An empty .png is written and every later get() returns the empty image until someone calls rebuild(). Fix: reject empty or invalid output before replace(), or let render raise."
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 27,
+    "summary": "page_names() returns str(relative_to(...)), which uses the OS path separator. Names from publish() keep their original form, so the two can disagree on Windows.",
+    "failure_scenario": "On Windows, publish returns 'blog/post.html' while page_names returns 'blog\\post.html'. Comparing the two lists, or feeding page_names output back to read_page / as site URLs, mismatches. Use `.as_posix()`. Low severity on macOS or Linux."
+  }
+]
+```

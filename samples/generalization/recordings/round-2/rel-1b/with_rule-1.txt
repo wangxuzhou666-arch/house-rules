@@ -1,0 +1,84 @@
+```json
+[
+  {
+    "file": "code/mail_routes.py",
+    "line": 20,
+    "summary": "apply_routes opens the live routes file with 'w' (truncating it) and then validates and writes route by route. A RouteError partway through leaves a truncated file, and a crash or concurrent reader sees a partial one.",
+    "failure_scenario": "The routes file holds 50 good routes. apply_routes is called with 10 good routes and then one with an invalid domain. The file is truncated on open, 10 routes are written, then render_route raises. The file now holds only 10 routes and the other 40 are gone, so folder_for sends their mail to 'inbox'. Fix: validate and render all lines first, write to a temp file in the same directory, then os.replace (REL.1, P0F.2).",
+    "category": "reliability",
+    "verdict": "CONFIRMED"
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 13,
+    "summary": "rebuild() overwrites the existing index in place with open(..., 'w'). The old valid index is destroyed before the new one is complete, and the end-marker is only a detector, not an atomic swap.",
+    "failure_scenario": "Process A is rebuilding when process B calls folder_for. B reads the half-written file, finds no end marker, and starts its own rebuild, so two writers truncate and write the same path at once. Interleaved writes can leave a file whose trailer matches the line count but whose contents are garbled. A crash or disk-full mid-write also leaves no usable index. Fix: write to a temp file and os.replace (REL.1).",
+    "category": "reliability",
+    "verdict": "CONFIRMED"
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 36,
+    "summary": "The index is rebuilt only when it is missing or corrupt. If it parses cleanly, folder_for never re-reads read_routes, and apply_routes in mail_routes.py never invalidates or rebuilds it.",
+    "failure_scenario": "The index is built with route a.com->Work. apply_routes then rewrites the routes file to a.com->Archive and adds b.com->News. SenderIndex.folder_for('x@a.com') keeps returning 'Work' and 'x@b.com' returns 'inbox' indefinitely, because the cached file is still structurally valid. The stored-key contract has no version or staleness check (REL.2).",
+    "category": "reliability",
+    "verdict": "CONFIRMED"
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 15,
+    "summary": "rebuild() writes domain and folder with no validation, although the format is tab/newline delimited and uses a line-count trailer. A folder containing a newline, a CR, or a Unicode line separator (U+2028, U+0085) corrupts the format.",
+    "failure_scenario": "A route has folder 'Work\\nTeam' (or 'a\\u2028b', which splitlines also splits on). The file gets one extra physical line. _load sees the trailer count != len(lines)-1 and returns None. Every folder_for call then triggers a full rebuild and rewrite, which never validates, so the index is never usable. A domain containing a tab, or an empty folder, round-trips wrongly too: '' is returned instead of 'inbox'.",
+    "category": "correctness",
+    "verdict": "CONFIRMED"
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 13,
+    "summary": "render_route rejects only '\\t' and '\\n' in the folder and does not check the domain for tab or newline. load_routes uses splitlines(), which also splits on '\\r', '\\x0b', '\\x0c', '\\x1c'-'\\x1e', '\\x85' and '\\u2028/9'. Validation is narrower than what the reader treats as a separator.",
+    "failure_scenario": "A folder 'a\\rb' passes validation and is written as one line, but splitlines() reads it back as two lines: 'x.com\\ta' and 'b'. The second is dropped because it has no tab, so the route silently becomes folder 'a'. A domain like 'a.com\\tevil' passes the '.', '@' and ' ' checks. Written as 'a.com\\tevil\\tfolder', it loads as domain 'a.com' with folder 'evil\\tfolder', so routing is misdirected.",
+    "category": "correctness",
+    "verdict": "CONFIRMED"
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 32,
+    "summary": "load_routes silently skips any line without a tab or with an empty folder, and does not log or fail on a malformed shape.",
+    "failure_scenario": "A hand-edited or partially written routes file has a mangled line such as 'corp.example.com Work' with a space instead of a tab. That domain is dropped, and mail for corp.example.com is routed to 'inbox' with no error or log. Compare SenderIndex._load, which treats the same malformation as invalid. Fix: raise a named error or log the skipped line (P0F.2, REL.3).",
+    "category": "p0f-2",
+    "verdict": "PLAUSIBLE"
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 39,
+    "summary": "folder_for re-reads and re-parses the whole routes file on every lookup, with no cache.",
+    "failure_scenario": "Delivering 10,000 messages does 10,000 file reads and full parses of the same table. This is O(messages x routes) I/O on a hot path, which is the cost sender_index.py was apparently written to avoid.",
+    "category": "efficiency",
+    "verdict": "PLAUSIBLE"
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 6,
+    "summary": "SenderIndex re-implements the TSV 'domain<TAB>folder' serialization and the address-to-domain lookup that mail_routes.py already has (load_routes, folder_for, and the domain normalisation). The two copies already disagree on empty folders, duplicate handling and validation.",
+    "failure_scenario": "A format or normalisation change (for example IDNA handling or a different delimiter) made in mail_routes.py is missed in sender_index.py. The same address then resolves to different folders depending on which module is called. A single parser with a cache wrapper would remove the duplication.",
+    "category": "reuse",
+    "verdict": "CONFIRMED"
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 22,
+    "summary": "_load swallows OSError and UnicodeDecodeError and returns None with no log. The caller then rebuilds, so a permission or disk fault and a missing file look identical. The rebuild path also has no fallback if read_routes or the write fails, and the exception propagates out of folder_for.",
+    "failure_scenario": "The index directory becomes unreadable (EACCES). Every folder_for call silently falls into rebuild, which fails on write with an unhandled OSError. A lookup that previously worked now raises instead of degrading to a logged fallback (P0F.2, P0E.2).",
+    "category": "p0f-2",
+    "verdict": "PLAUSIBLE"
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 16,
+    "summary": "The 'end\\t<count>' trailer format and the decision that an invalid index triggers a rebuild are undocumented, and the trailer shares a namespace with domain entries.",
+    "failure_scenario": "A future maintainer changes the delimiter or writes a domain literally named 'end'. Nothing in the code explains why the last line is special, so the integrity check breaks without warning (P3.2).",
+    "category": "p3-2",
+    "verdict": "PLAUSIBLE"
+  }
+]
+```

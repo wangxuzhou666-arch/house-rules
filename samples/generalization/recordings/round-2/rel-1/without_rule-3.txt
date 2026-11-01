@@ -1,0 +1,58 @@
+```json
+[
+  {
+    "file": "code/site_publisher.py",
+    "line": 7,
+    "summary": "publish() deletes the live directory before any page is rendered, and writes pages into it in place. The swap is not atomic.",
+    "failure_scenario": "A page's render() raises on the 3rd of 10 pages, or the process is killed mid-publish. The old site is already gone and live_dir holds only a partial set of new pages, so readers get FileNotFoundError or a half-updated site. Readers also see an empty or partial directory for the whole publish. The fix is to render everything into a sibling temp dir, then swap it in with a rename (or rename the old dir aside, rename the new one in, then delete the old one)."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 25,
+    "summary": "rebuild() removes the whole cache before re-rendering, so one failing render leaves the cache wiped or partial. The method returns len(names) rather than a count of what was actually rendered.",
+    "failure_scenario": "rebuild(['a','b','c']) removes the root, renders a, then render('b') raises. The previously good cache for every other name is lost and only 'a' exists. Concurrent get() callers see the cache vanish and trigger a render for every name at once. The fix is to render into a new temp dir and swap it in only after all renders succeed, or to overwrite entries individually."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 19,
+    "summary": "get() uses a single fixed '.part' filename per name, and the exists() check followed by the write is not synchronized.",
+    "failure_scenario": "Two threads or processes call get('x') on a cold cache. Both pass the exists() check and both open x.part with write_bytes, so their bytes interleave or truncate each other. One replace() then publishes a corrupt PNG, or the second replace() raises FileNotFoundError because the first already moved the file. The fix is a unique temp name (tempfile.NamedTemporaryFile in the same dir, or a pid/uuid suffix), plus tolerating a concurrent winner."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 12,
+    "summary": "The cache name is joined into a path with no validation. Names containing '/', '..' or an absolute path escape the cache root.",
+    "failure_scenario": "get('../../etc/foo') writes ../../etc/foo.png outside root. rebuild() only deletes root, so such files are orphaned. A name like 'a/b' creates a nested file, and cached_names() (non-recursive glob) never lists it. The fix is to reject names that are not a plain filename at the boundary."
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 11,
+    "summary": "Page names are used as relative paths with no containment check, so a name with '..' or an absolute path writes outside live_dir. read_page() has the same hole on the read side.",
+    "failure_scenario": "pages={'../index.html': ...} writes outside live_dir. pages={'/abs/path': ...} makes live_dir / name resolve to the absolute path, because pathlib discards the left side. read_page(live_dir, '../../secret') reads any file the process can read. The fix is to resolve the target and verify it is under live_dir."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 22,
+    "summary": "get() is the only freshness check, and it only tests whether the file exists. There is no invalidation, and a crash can leave a corrupt or empty PNG that is then served forever.",
+    "failure_scenario": "If the source of 'x' changes, get('x') returns the stale PNG until a full rebuild(). The replace() call has no fsync before it, so a power loss can leave a zero-length x.png on some filesystems. exists() then treats it as valid and keeps serving it."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 28,
+    "summary": "rebuild() calls get() for every name only to warm the cache, which re-reads each PNG from disk right after writing it.",
+    "failure_scenario": "Rebuilding N previews does N extra read_bytes calls, and each read allocates a bytes object that is immediately discarded. A private helper that renders and writes without reading back avoids this."
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 27,
+    "summary": "page_names() builds names with str(Path), which uses the OS separator, while publish() takes the keys as given. On Windows the names it lists don't round-trip with the keys that were passed to publish().",
+    "failure_scenario": "publish(d, {'blog/post.html': ...}) followed by page_names(d) returns 'blog\\post.html' on Windows. A caller comparing the two lists, or using the name as a URL path, gets a mismatch. Using .as_posix() fixes this."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 18,
+    "summary": "The tmp-file-then-replace sequence and the rmtree-based rebuild carry non-obvious atomicity and ordering constraints, but nothing documents them (P3.2). The generic names 'render' and 'root' are also ambiguous (P2.4).",
+    "failure_scenario": "A later maintainer sees the '.part' dance as noise and simplifies it to write_bytes straight to the final path. A crash then leaves a truncated PNG that exists() treats as a valid cache hit. A short comment stating why the write goes through '.part' would prevent that."
+  }
+]
+```

@@ -1,0 +1,40 @@
+```json
+[
+  {
+    "file": "code/item_index.py",
+    "line": 17,
+    "summary": "The stored dedup key changed from `feed_url|guid` to `host|guid` and `KEY_VERSION` went to 2, but v1 rows are simply ignored instead of migrated or read compatibly (REL.2). Both `import_items` (line 40) and `mark_read` (line 57) filter on `key_version == KEY_VERSION`.",
+    "failure_scenario": "An existing index file holds v1 rows with key `https://a.com/feed|g1`. The next `import_items` for the same feed builds `a.com|g1`, finds nothing in `seen`, and appends a second v2 row. Every item already stored is duplicated and shows up unread again. `mark_read` only matches the v2 copy, so the original v1 row stays `read=False` forever. `unread_titles` then lists the item twice and never clears the old copy."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 17,
+    "summary": "Identity is reduced to the host, so different feeds on one host now share a key namespace. Items in the second feed that reuse a guid are treated as already seen and dropped.",
+    "failure_scenario": "`https://example.com/blog/rss` has guid `1` and `https://example.com/news/rss` also has guid `1` (numeric or sequential guids are common). Before the change these were distinct keys. Now both map to `example.com|1`. Importing the second feed silently skips its item, and `mark_read` on one feed marks the other feed's item read."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 12,
+    "summary": "`feed_host` is a naive string split that does not handle userinfo, ports, `www.` prefixes or scheme-less URLs consistently. The key is built from its output, so a small difference in URL form changes the stored identity.",
+    "failure_scenario": "`https://user@Example.com:443/feed` gives host `user@example.com:443`, while `https://example.com/feed` gives `example.com`. The same feed gets two different key prefixes, so every item is re-imported as new."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 12,
+    "summary": "`feed_host` is copied verbatim into `reading_list.py`, so the identity logic exists twice. The two copies can drift apart (P2.2 / reuse).",
+    "failure_scenario": "A later fix to host normalisation, such as stripping the port, lands in one file only. The two modules then derive different identities for the same feed. A shared helper would avoid this."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 21,
+    "summary": "`label()` treats every `label_style` other than 1 as the new style, with no check that the value is known. Rows written by an older or newer version silently get a `#` label that does not match their stored style. The new `LABEL_STYLE = 2` also gives the same row two different labels depending on its stored style, with no migration.",
+    "failure_scenario": "A row with `label_style: 3`, or a corrupt value such as `None` or `\"1\"`, falls through to the `feed#number` form instead of raising a named error. Old v1 rows keep `feed-0001` while new rows show `feed#7`, so `listing` mixes two formats in one view."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 21,
+    "summary": "The branch returns in both arms, but the second `return` is not in an `else`. Under P1.3 this is acceptable only if the `if` counts as a guard clause. The `label_style` dispatch is also hard-coded, with no table of known styles.",
+    "failure_scenario": "A third style would need yet another `if` before the fallthrough. An unknown style is silently rendered as style 2."
+  }
+]
+```

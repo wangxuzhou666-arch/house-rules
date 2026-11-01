@@ -1,0 +1,58 @@
+```json
+[
+  {
+    "file": "code/payment_events.py",
+    "line": 6,
+    "summary": "The event key format changed from `provider:id` to `account/provider/id` with no migration or fallback. Every key already stored in `events` is orphaned.",
+    "failure_scenario": "An existing ledger row has key `stripe:ch_1`. After deploy, `record_refund(conn, 'acme', 'stripe', 'ch_1')` looks up `acme/stripe/ch_1`, matches nothing, and returns False. The refund is silently lost, so `net_cents` stays overstated. A webhook replay of the same charge via `record_charge` inserts a second row under the new key, which double-counts it. Idempotency across the deploy boundary is broken in both directions."
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 6,
+    "summary": "The key is built with an unescaped `/` separator, and `account` and `provider` are free-form. Distinct (account, provider, event_id) tuples can produce the same key.",
+    "failure_scenario": "Account `a/b` with provider `c` and event `x` gives `a/b/c/x`. Account `a` with provider `B/C` (lowercased to `b/c`) and event `x` gives `a/b/c/x`. `INSERT OR IGNORE` then drops the second tenant's charge as a duplicate (returns False), and a refund for one tenant can flip the other's row. In a multi-account ledger this is cross-tenant data corruption."
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 6,
+    "summary": "`account` is not normalized, while `provider` is lowercased and `event_id` is stripped. The new key component is inconsistent with its siblings.",
+    "failure_scenario": "The same webhook arrives once with account `acme` and once with `acme ` (trailing space) or `Acme`. They produce different keys, so the dedupe in `record_charge` is bypassed and the charge is counted twice. A refund sent with the other spelling misses the row."
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 19,
+    "summary": "`account` was inserted as a new required positional parameter ahead of the existing ones in `record_charge` and `record_refund`. Callers outside this diff are not updated and the parameter has no default.",
+    "failure_scenario": "A caller using the old shape `record_refund(conn, 'stripe', 'ch_1')` now raises TypeError. A caller using the old `record_charge(conn, 'stripe', 'evt', 500)` fails or mis-binds, because `provider` receives `'evt'` and `event_id` receives `500`. In the 5-argument case `event_id` is an int and `.strip()` raises AttributeError. The webhook handler crashes instead of degrading explicitly, which also touches P0F.2."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 12,
+    "summary": "The invoice label format changed from `INV-000123` to `YYYY/NNNN`. Labels are derived at read time, so every already-issued invoice is silently relabelled. Customers and accounting keep the old identifiers.",
+    "failure_scenario": "Invoice 123 was sent to a customer as `INV-000123`. After deploy, `outstanding()` and any reissue lookup show `2025/0123`. Reconciliation against bank memos, PDFs or customer references no longer matches, and nothing in the code maps old labels to new ones."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 12,
+    "summary": "The year in the label comes from the caller-supplied `issued_on`, but `number` is a global `MAX(number)+1` counter. The label looks like a per-year sequence and does not behave like one.",
+    "failure_scenario": "Invoice 10 is issued with a backdated `issued_on` of 2024-12-30 and invoice 9 is dated 2025-01-02. Labels `2025/0009` and `2024/0010` then appear out of order within and across years, which breaks the continuous-per-year numbering that a `YYYY/NNNN` label implies. `{:04d}` also stops being fixed-width past 9999, so labels become uneven."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 49,
+    "summary": "`outstanding()` now interpolates `order_ref` into the middle of each output line. This changes the line format that consumers parse and exposes an internal reference.",
+    "failure_scenario": "A consumer that does `label, amount = line.split(' ')` or `line.rsplit(' ', 1)` now gets a wrong field. `order_ref` is only stripped, so it can contain spaces (e.g. `PO 77`), which makes the line unparseable and shifts the amount column. Internal order refs also leak into any output that previously showed only label and amount."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 30,
+    "summary": "`issue()` reads `MAX(number)+1` and inserts in separate statements with no transaction or UNIQUE constraint on `number`. The label is now the only customer-facing identifier, which makes this worse.",
+    "failure_scenario": "Two connections or processes issue invoices at the same time. Both read MAX=41 and both insert number 42 under different uids. Two different invoices then share the label `2025/0042`, because the schema has no uniqueness on `number`. This bug was already present, but the diff makes the number the visible key."
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 28,
+    "summary": "The diff changes ledger and register identifiers and behaviour but adds no tests. There is no check that the key and label formats stay stable or that old data still resolves.",
+    "failure_scenario": "Nothing guards the key and label formats. The collision and migration issues above would ship unnoticed, and a future change to `event_key` could again silently orphan stored rows."
+  }
+]
+```

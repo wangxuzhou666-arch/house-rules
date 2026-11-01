@@ -1,0 +1,64 @@
+```json
+[
+  {
+    "file": "code/sender_index.py",
+    "line": 33,
+    "summary": "The cached index is only checked for corruption, never for staleness. Once a valid file exists, `rebuild()` is never called again, so later route changes are ignored.",
+    "failure_scenario": "The index is built once, then a route is added or changed through `apply_routes` or the routes source. `_load()` still returns a well-formed table because its trailer matches, so `folder_for` keeps returning the old folder, or \"inbox\" for a new domain, indefinitely. Mail is misrouted until someone deletes the file or corrupts it by hand."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 20,
+    "summary": "`apply_routes` opens the file with \"w\" (truncating it) and validates each route while writing. A `RouteError` on any route leaves the routes file truncated or half-written.",
+    "failure_scenario": "`apply_routes(path, [good1, good2, {'domain': 'bad', ...}, good4])` truncates the old table, writes good1 and good2, then raises on the third. The file now holds a partial table, so every later `folder_for` call sends mail from the missing domains to \"inbox\". The prior valid table is lost. Concurrent `load_routes` calls can also read a half-written file. Validate all routes first, then write to a temp file and `os.replace`."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 12,
+    "summary": "`render_route` rejects tabs and newlines in the folder but not in the domain. It also doesn't reject other line-break characters that `splitlines()` splits on (\\r, \\x0b, \\x0c, \\u2028).",
+    "failure_scenario": "A route with domain 'evil\\t.com' or 'a.com\\rb.com' passes the checks. `load_routes` then splits on the embedded tab or line break and parses it as domain 'evil' with folder '.com\\tfolder', or as two records. The real domain never matches, and a bogus domain can be mapped to an attacker-chosen folder. The domain check should use an allowlist regex, and the folder check should cover everything `splitlines` splits on."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 12,
+    "summary": "`rebuild` writes routes from `read_routes()` straight into the TSV with no validation. It also writes non-atomically with \"w\", straight over the live index.",
+    "failure_scenario": "A folder containing '\\n' or a domain containing '\\t' corrupts the line count or field split. `_load` then fails the trailer check and `folder_for` rebuilds on every call, or it mis-parses. Separately, a reader calling `_load` while another process is mid-`rebuild` sees a truncated file, gets None, and starts its own rebuild. Two concurrent writers truncating the same file can interleave and leave a bad file. Write to a temp file and `os.replace` it."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 36,
+    "summary": "If `rebuild()` fails inside `folder_for` (read-only or full disk, or `read_routes` raising), the exception goes to the caller. The in-memory routes just read are discarded instead of being used as a logged fallback.",
+    "failure_scenario": "The index directory is unwritable or the disk is full. `rebuild` builds the routes list and then fails at `open('w')`. Every `folder_for(address)` call raises OSError, so mail classification stops, even though the correct table was in memory. Per P0F.2, log the failure and return the routes already read."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 1,
+    "summary": "This duplicates the domain-to-folder TSV format and normalization already in `mail_routes.py`, with different strictness. `SenderIndex` can't read the file `apply_routes` writes, and the two disagree on malformed input.",
+    "failure_scenario": "`mail_routes.apply_routes` writes `domain\\tfolder` lines with no `end` trailer. Pointed at that file, `SenderIndex._load` rejects it and overwrites it with its own format. Meanwhile `load_routes` silently skips malformed lines and `_load` treats them as corruption. Any change to the format or normalization has to be made in two places. `SenderIndex` should reuse `load_routes` and `render_route`, or the two modules should share one parser."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 38,
+    "summary": "`folder_for` re-reads and re-parses the whole routes file on every lookup. Addresses without '@' are treated as a domain.",
+    "failure_scenario": "Classifying N messages does N full file reads and parses. For an address with no '@', such as 'foo.com' or garbage, `rsplit('@', 1)[-1]` returns the whole string. That string can accidentally match a route domain, or it is routed silently to \"inbox\" with no validation or log."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 29,
+    "summary": "`load_routes` silently skips malformed lines (`if domain and folder`) and lets duplicate domains overwrite each other. A hand-edited or corrupted file degrades with no signal.",
+    "failure_scenario": "A line with a missing tab or an empty folder is dropped, so that domain falls back to \"inbox\" with nothing logged. Two lines for the same domain silently keep the last one. A corrupted file can lose most of the table and no one is told. This violates P0F.2 (degrade explicitly, log it, name the fallback)."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 14,
+    "summary": "The folder is not validated beyond emptiness, tabs and newlines. Path separators and '..' pass through to whatever uses the returned folder name.",
+    "failure_scenario": "A route with folder '../../etc' or '/abs/path' is accepted. If the folder name is later joined to a mailbox root, mail is delivered outside the mailbox tree."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 24,
+    "summary": "The trailer-based integrity check is undocumented and weak. The `end\\t<count>` marker is parsed as a record, and `_load` accepts empty domains and doesn't compare unique domains against the count.",
+    "failure_scenario": "The format comment is missing (P3.2), so a maintainer is likely to break the ordering constraint that the `end` line must be written last. Lines containing characters that `splitlines` splits on shift the count and cause an endless rebuild on every call."
+  }
+]
+```

@@ -1,0 +1,58 @@
+```json
+[
+  {
+    "file": "code/access_tail.py",
+    "line": 12,
+    "summary": "load_position only handles FileNotFoundError and JSONDecodeError. Valid JSON with the wrong shape, or a non-UTF-8 position file, crashes the reader.",
+    "failure_scenario": "The position file holds `{}`, `[]`, `null`, or `{\"offset\": \"12\"}`, or a truncated write left invalid UTF-8 bytes. json.loads succeeds on the first four, then `position[\"offset\"]` raises KeyError or TypeError. A string offset makes `handle.seek` raise TypeError, and a negative offset makes it raise OSError. A UnicodeDecodeError from read_text is not a JSONDecodeError, so it also escapes. The reader then fails on every run until someone deletes the file by hand. `batch_log_reader.load_checkpoint` already validates all of this, so the two sibling modules disagree."
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 28,
+    "summary": "The file is stat()ed by path and then opened by path, so a rotation between the two calls pairs one file's inode with another file's contents.",
+    "failure_scenario": "logrotate swaps the file after `log_path.stat()` and before `log_path.open()`. The old inode matches the saved one, so the old offset is used on the new file and its first bytes are skipped. The code then saves the old inode with an offset that belongs to the new file. The next run sees a different inode, resets to 0, and re-reads the whole file, producing duplicates. Calling `os.fstat(handle.fileno())` after opening removes the race."
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 37,
+    "summary": "The position is saved before the caller has processed the returned lines, so a caller crash loses those lines for good.",
+    "failure_scenario": "read_new_lines commits the new offset and inode, then returns the decoded lines. If the caller dies while parsing or inserting them, the next run starts past those bytes and the lines are never seen again. The same pattern is in `batch_log_reader.save_checkpoint` at line 43. This is a commit-before-use ordering problem. The fix is to return the new position, or accept a commit callback, and persist it only after processing succeeds."
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 38,
+    "summary": "The checkpoint is a bare line count with no inode or identity check. After rotation, or any replacement of the file, lines are silently skipped when the new file is longer than the old count.",
+    "failure_scenario": "Run 1 reads a 1000-line log and saves `lines=1000`. The log rotates and the new file has 1500 lines. `done > len(rows)` is false, so the first 1000 lines of the new file are never returned. Only a shorter file triggers the reset. access_tail.py avoids this by storing the inode."
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 35,
+    "summary": "read_new_lines reads the entire log into memory with readlines() on every call, just to skip `done` lines.",
+    "failure_scenario": "On a multi-GB access log that is polled regularly, each run allocates and decodes the whole file even if only a few lines were appended, so memory and time grow with the file size. Storing a byte offset (as access_tail does), or iterating the file and slicing with itertools.islice, would avoid it."
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 40,
+    "summary": "The checkpoint is reset to 0 silently when it exceeds the file length. A complete final line with no trailing newline is also dropped and never emitted.",
+    "failure_scenario": "A truncated or rotated log makes `done > len(rows)` true, and the code resets to 0 and re-emits the whole file with no log message. This breaks P0F.2, which requires logging the fallback. Separately, `rows.pop()` drops the last line whenever the file does not end in a newline. If the writer finished that line without a newline (a batch or exported log), the line is never returned. access_tail.py has the same defect through `rfind(b\"\\n\")`."
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 30,
+    "summary": "A shrunk file or a changed inode is handled silently, and there is no check for same-inode truncation followed by regrowth.",
+    "failure_scenario": "A truncate-in-place rotation (copytruncate) keeps the inode, and the file then grows past the saved offset before the next poll. `start > info.st_size` is false, so the code seeks into the middle of the new content and skips the lines before that point. When it does reset (new inode, or size below the offset), it does so with no log line, unlike the JSON-corruption path, so data loss or re-reading goes unnoticed."
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 37,
+    "summary": "str.splitlines() splits on characters other than newline (\\x0b, \\x0c, \\x1c-\\x1e, \\x85, \\u2028, \\u2029), so one log record can come back as several lines.",
+    "failure_scenario": "An access-log line has a user-agent or query string containing U+2028, \\x0c or \\x85. After the bytes are decoded, splitlines() breaks that one record into two fragments, and the downstream parser sees two malformed lines. Splitting on \"\\n\" (`text.split(\"\\n\")` after trimming the trailing empty element) keeps the byte-level line boundary the rest of the function relies on."
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 1,
+    "summary": "The new module is a near copy of access_tail.py: same save-then-os.replace pattern, same `.part` temp name, and a second function named read_new_lines. The two disagree on validation and rotation handling.",
+    "failure_scenario": "Two checkpoint implementations will drift further apart. This diff already shows it: one validates the file shape and the other doesn't, and one tracks the inode and the other doesn't. A fix to the atomic-write path or the partial-line handling in one copy gets missed in the other. A shared checkpoint helper would give both modules one persistence path. Also, `with_suffix(\".part\")` silently collides when the state path is itself named `*.part`."
+  }
+]
+```

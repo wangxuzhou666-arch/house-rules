@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "round": 2,
+  "digest_sha256": "a57942f0ac6711b48b8a05c778fc6c77f480df551c3c0b972299690dd890a870",
+  "cases": [
+    "rel-1",
+    "rel-1b",
+    "rel-2",
+    "rel-2b",
+    "rel-3b",
+    "rel-4"
+  ]
+}

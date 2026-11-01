@@ -1,0 +1,40 @@
+```json
+[
+  {
+    "file": "code/payment_events.py",
+    "line": 6,
+    "summary": "The stored dedup key changed from `provider:event_id` to `account/provider/event_id` with no migration or compatibility read (REL.2). Rows already in `events` keep the old-format key.",
+    "failure_scenario": "A ledger already holds key `stripe:ch_1`. After deploy, `record_refund(conn, 'acme', 'stripe', 'ch_1')` looks up `acme/stripe/ch_1`, matches nothing, and returns False. The refund is never applied and `net_cents` stays overstated. A redelivered charge webhook for `ch_1` also inserts a second row under the new key, because the old row's key no longer collides, so the charge is counted twice."
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 6,
+    "summary": "`account` goes into the key raw, while `provider` is lowercased and `event_id` is stripped. The `/` delimiter is also not escaped.",
+    "failure_scenario": "One caller sends account 'Acme' and another sends 'acme ' or 'acme'. These give distinct keys, so the same charge is recorded twice and double-counted in `net_cents`. Separately, account 'a/b' with provider 'c' and account 'a' with provider 'b/c' build the same key, so one event is silently dropped by INSERT OR IGNORE."
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 19,
+    "summary": "A new positional `account` parameter is inserted at position 2 of `record_charge` and `record_refund`, so existing positional callers shift their arguments.",
+    "failure_scenario": "A caller still using `record_refund(conn, 'stripe', 'ch_1')` binds account='stripe', provider='ch_1', and then fails with TypeError for the missing `charge_id`. For `record_charge(conn, provider, event_id, cents)`, event_id=cents hits `.strip()` on an int and raises AttributeError. The failures are loud rather than silent, but they happen at runtime. Making `account` keyword-only, or a migration plan for callers, would avoid the break."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 12,
+    "summary": "The invoice label format changed from `INV-000123` to `YYYY/NNNN`. Labels already issued and printed on invoices now render differently (REL.2).",
+    "failure_scenario": "A customer quotes `INV-000012` from an invoice issued earlier. After deploy, `outstanding()` lists that invoice as `2025/0012`, so lookup by printed label and reconciliation against external records fail. Existing label strings are never preserved or mapped."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 12,
+    "summary": "The label implies a per-year sequence, but `number` is a global MAX+1 counter that never resets per year. `:04d` also overflows past 9999, and the year comes from the caller-supplied `issued_on`, not from issue order.",
+    "failure_scenario": "The first invoice issued in 2027 is numbered 0137 and labelled `2027/0137`, where a reader expects `2027/0001`. Backdated issuance (`issued_on='2024-01-01'` after number 500) produces `2024/0501`, which looks out of sequence and can read as a gap or fraud on an audit. At number 10000 the label becomes `2026/10000`, breaking the fixed width."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 49,
+    "summary": "`outstanding()` now includes the raw `order_ref` in the output string, which changes the output shape. Unescaped free text goes into a space-delimited line.",
+    "failure_scenario": "Consumers that parse `<label> <amount>` now get an extra token. An `order_ref` such as 'PO 77 rush' makes the line `2026/0003 PO 77 rush 12.00`, so splitting on whitespace to recover the amount breaks. The internal order reference also now appears in every outstanding report."
+  }
+]
+```

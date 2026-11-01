@@ -1,0 +1,52 @@
+```json
+[
+  {
+    "file": "code/sms_codes.py",
+    "line": 24,
+    "summary": "The limit check (read `used`) and the counter write (`self.sent[phone] = used + 1`) are not atomic and there is no lock. The sibling `CodeMailer` does take a lock.",
+    "failure_scenario": "With per_phone_limit=3, a client fires 20 concurrent send_code(phone) requests. Every thread reads used=0 before any thread writes, so all 20 pass the check and 20 SMS messages go out. Each thread then writes sent[phone]=1, so the final count is 1. The per-phone daily limit is bypassed and SMS cost is unbounded. A concurrent `sent.clear()` during rollover can also drop counts."
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 28,
+    "summary": "The count is incremented only after `gateway.deliver` returns, so the check and the increment are separated by a slow network call. This widens the race window to the full delivery latency.",
+    "failure_scenario": "The gateway takes 500 ms per call. Any number of requests arriving within that window all see used < limit and all send. Reserving the slot before the call, as `CodeMailer._reserve` does, would close the window. Separately, if deliver() raises after the provider has already sent the message, nothing is counted and the user can retry without limit."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 30,
+    "summary": "The slot is reserved before `transport.send`, and a failed send is never rolled back. A transport error therefore consumes the user's quota without any code being delivered.",
+    "failure_scenario": "The SMTP transport is down or times out. Each of the user's 3 attempts raises from send() but still increments sent[address]. After 3 failures the user gets TooManyRequests for the rest of the day and has received no code. A caller's retry loop can exhaust the quota the same way."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 24,
+    "summary": "The rate-limit key is the raw `address` string with no normalization, so trivially different spellings of the same mailbox each get their own counter. The SMS version has the same problem with phone formats.",
+    "failure_scenario": "An attacker sends 3 codes to 'Bob@x.com', 3 to 'bob@x.com', and 3 to 'bob+1@x.com' (same inbox), and gets unlimited codes to one mailbox. The same happens with '+8613800000000' versus '13800000000' in sms_codes. This defeats the per-address limit used to stop code spam and abuse."
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 5,
+    "summary": "`TooManyRequests`, the daily-rollover logic and the code generation are copy-pasted across the two new files. Two distinct exception classes now share one name, and the two copies have already diverged: one is locked and reserves first, the other is neither.",
+    "failure_scenario": "A caller that does `except mail_codes.TooManyRequests` does not catch the `sms_codes.TooManyRequests` raised in the same handler, so a rate-limit error becomes a 500. A fix to the rollover or the limit check in one file does not reach the other, and the race fix is already missing from sms_codes.py. A single shared limiter (a daily-counter class plus one exception) would remove the duplication."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 21,
+    "summary": "`self.today()` is called twice in the rollover branch, once to compare and once to assign. The two calls can return different dates if midnight passes between them. The sms version has the same pattern.",
+    "failure_scenario": "The first call returns day N, which differs from self.day (N-1), so the branch is entered. The second call, just after midnight, returns N+1, so self.day = N+1 and the counters are cleared. The next call at N+1 matches, so nothing is reset again. It is harmless in practice but nondeterministic. Calling today() once into a local fixes it."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 16,
+    "summary": "The `sent` dict only resets on the first call after a day change, and holds one entry per address ever seen that day. There is no cap or eviction.",
+    "failure_scenario": "A bot sends requests for millions of distinct random addresses in one day. Each adds a permanent dict entry until the next rollover, which only happens when another call arrives. This is memory growth driven by attacker-controlled keys. There is a related issue: the code is never stored here, so `send_code` hands back the OTP and the caller has to keep it for verification. Any caller that logs the return value leaks the secret."
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 26,
+    "summary": "The exception message embeds the full phone number or email address, and the rate-limit count. The mail version does the same at line 26.",
+    "failure_scenario": "A global error handler or logger records str(exception). Users' phone numbers and email addresses (PII) then land in application logs and error trackers. The message is built from the identifier rather than from a masked form."
+  }
+]
+```

@@ -1,0 +1,58 @@
+```json
+[
+  {
+    "file": "code/sms_codes.py",
+    "line": 29,
+    "summary": "The per-phone cap is counted only after `gateway.deliver` succeeds (REL.4, should-fix). A failed delivery never uses up quota.",
+    "failure_scenario": "A client keeps requesting codes for a phone number while the gateway raises (timeout, or a provider error after the message was already queued and billed). `self.sent[phone]` is never incremented, so `used` stays 0 and the limit never trips. An attacker gets unlimited attempts, SMS-pumping cost and spam. The mail version counts before sending, which is the correct pattern."
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 24,
+    "summary": "Check-then-act on `self.sent` with no lock (the mail version has one). `_used` reads the count, and `send_code` writes it back only after the slow network call.",
+    "failure_scenario": "Under a threaded server, five concurrent `send_code('+1555...')` calls all read `used=0`, all pass the check, all send an SMS, and each then writes `sent[phone]=1`. Five codes go out against a limit of 3. The write-back also overwrites concurrent increments, so the count under-reports. `_used` can also call `self.sent.clear()` while another thread is mid-update."
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 17,
+    "summary": "`_used` is named like a read-only getter but also does the daily rollover (resets `self.day` and clears `self.sent`). `send_code` then writes `used + 1` computed from that earlier read.",
+    "failure_scenario": "The name hides the side effect, so a future caller that uses `_used` just to display remaining quota resets everyone's counters at midnight. The stale `used` also lets one thread's clear and another thread's `used + 1` interleave to a wrong count. The rollover belongs with the reservation step, as in `CodeMailer._reserve`."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 27,
+    "summary": "The limit is keyed on the raw `address` string with no normalization.",
+    "failure_scenario": "`Alice@x.com`, `alice@x.com` and ` alice@x.com ` are separate keys, as are plus-aliases. An attacker gets 3 codes per variant and can flood one real mailbox, or use the mailer for spam or code guessing. The same applies to `phone` in `sms_codes.py` for formats like `+1 555...` and `1555...`."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 6,
+    "summary": "`TooManyRequests` is defined separately in both `mail_codes.py` and `sms_codes.py`, giving two unrelated exception classes with the same name.",
+    "failure_scenario": "A shared handler that does `from sms_codes import TooManyRequests` and wraps a call to `CodeMailer.send_code` will not catch the mail one, so the request returns a 500 instead of a 429. The two classes also need to be kept in sync. They should be one shared module-level class, and ideally the day-bucket rate limiter should be shared too (both files repeat the same rollover logic)."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 33,
+    "summary": "`send_code` generates a code and returns it to the caller but stores nothing, so there is nothing to verify against. Because the code is returned, any caller can hand it back in an HTTP response. The same applies to `sms_codes.py` line 30.",
+    "failure_scenario": "A handler writes `return {'code': mailer.send_code(addr)}`, which leaks the OTP to whoever requested it and defeats the verification. A later `verify_code` has no stored hash or expiry to check, so each caller has to invent its own storage (and its own bugs)."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 26,
+    "summary": "The exception message embeds the full email address and quota usage.",
+    "failure_scenario": "`TooManyRequests(f\"{address} already received {used} codes today\")` puts PII in the exception text, so generic handlers, Sentry and request logs capture it. It also tells the caller the exact count. `sms_codes.py` line 26 has the same problem with phone numbers."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 30,
+    "summary": "The ordering rule (reserve quota before sending, and keep it on failure) is non-obvious and has no comment (P3.2, nice). Quota is consumed even when `transport.send` raises, and nothing says that is deliberate.",
+    "failure_scenario": "A maintainer sees that a failed send still burns one of the 3 daily attempts and 'fixes' it by moving the increment after `send`. That recreates the success-only counting bug in `sms_codes.py` (REL.4). A real user hit by a transient transport outage is also locked out after 3 failures, with no refund path or note explaining why."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 22,
+    "summary": "`self.today()` is called twice in the rollover (once for the comparison, once for the assignment). In `sms_codes.py` the same pattern is unsynchronized.",
+    "failure_scenario": "If the clock crosses midnight between the two calls, `self.day` is set to a later date than the one that was compared. This is harmless but needless. Taking a single `now = self.today()` is simpler and removes the window. The counters also live in process memory, so a restart or multiple workers each get a fresh quota, and the cap is multiplied by the number of workers."
+  }
+]
+```

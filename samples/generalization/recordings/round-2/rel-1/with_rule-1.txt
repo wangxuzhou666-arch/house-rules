@@ -1,0 +1,64 @@
+```json
+[
+  {
+    "file": "code/site_publisher.py",
+    "line": 8,
+    "summary": "publish() deletes the live directory before any page is rendered, so a failing render leaves the live site destroyed (REL.1, p0e/REL family).",
+    "failure_scenario": "live_dir holds a working site. publish() calls shutil.rmtree(live_dir) and mkdir, then the third page's render() raises. The exception propagates, and live_dir now holds only the first two pages, or nothing. The previous good version is gone and the new one is incomplete. Fix: render all pages into a sibling temp directory, validate, then swap it in with os.replace/rename. Keep or restore the old directory if anything fails."
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 8,
+    "summary": "There is a window between rmtree and the last write in which readers see a missing or partial site, and the rmtree-then-rewrite pattern is not atomic (REL.1).",
+    "failure_scenario": "While publish() runs, a concurrent read_page(live_dir, 'index.html') or page_names(live_dir) hits FileNotFoundError or sees a half-populated site. Build in a staging directory and swap it in so readers only ever see a complete old or new tree."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 24,
+    "summary": "rebuild() wipes the whole cache with rmtree before any replacement is rendered. A render failure midway loses every cached preview (REL.1).",
+    "failure_scenario": "The cache holds 500 valid PNGs. rebuild(names) removes them all, then render() raises on the 3rd name (a bad input or a renderer outage). The remaining entries are gone, and every later get() has to re-render, which may keep failing. Fix: render into a new directory and swap it in after all names succeed. Or overwrite entries in place through the atomic .part replace and remove only the stale ones at the end."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 17,
+    "summary": "A fixed '.part' temp name per entry is shared by all concurrent writers, so two get() calls for the same name can clobber each other. A crash can also leave stale .part files.",
+    "failure_scenario": "Two threads or processes call get('a') on a cold cache. Both write 'a.part'. One replaces it into 'a.png' while the other is still writing, or the other's replace raises FileNotFoundError because the file has already been moved. Use a unique temp name (tempfile.NamedTemporaryFile in the same directory, or a pid/uuid suffix), and catch or tolerate the lost race."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 12,
+    "summary": "The cache key is used unsanitized in the file path, so a name containing '/', '..' or an absolute path escapes the cache root.",
+    "failure_scenario": "get('../../etc/foo') makes _path return root/../../etc/foo.png. The renderer's bytes are written outside the cache directory, and the .part file lands there too. A name like 'a/b' fails because the parent 'root/a' does not exist (mkdir only creates root). Validate that name is a plain filename (no separators, resolved path stays under root)."
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 12,
+    "summary": "Page names are joined to live_dir without validation, so '..' segments or an absolute name write outside live_dir.",
+    "failure_scenario": "pages = {'../config.yml': ...} writes to the parent of live_dir. An absolute name like '/etc/cron.d/x' makes live_dir / name resolve to that absolute path, because pathlib discards the left side. Reject names whose resolved target is not inside live_dir."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 20,
+    "summary": "get() re-reads the file it just wrote, doing a redundant disk read and exposing a race with rebuild() or other writers.",
+    "failure_scenario": "On a miss, the bytes returned by render() are written to disk and then read straight back. A concurrent rebuild() can rmtree the root between replace() and read_bytes(), so get() raises FileNotFoundError even though the render succeeded. Keep the rendered bytes in a local variable and return them on the miss path."
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 28,
+    "summary": "The is_dir() empty-check is redundant (P0F.4). Path.rglob on a missing path already yields nothing. The same pattern appears in PreviewCache.cached_names.",
+    "failure_scenario": "No behavior changes if the guard is removed. The extra branch is defensive code for a case the library call already handles, and it is duplicated in both files, which adds noise and maintenance cost."
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 9,
+    "summary": "The destructive rmtree-and-rebuild directory-swap logic is duplicated between publish() and PreviewCache.rebuild(), with no shared safe-replace helper.",
+    "failure_scenario": "Both modules carry the same unsafe 'delete the directory, then regenerate' flow. Fixing the atomicity bug in one leaves the other broken. A single helper (build in a staging dir, then swap) would remove the duplication and fix both."
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 10,
+    "summary": "The names list is derivable state. It duplicates list(pages) and only grows if all renders succeed, and the per-page mkdir is repeated for every page.",
+    "failure_scenario": "The loop maintains a parallel list that always equals list(pages) on success. Returning list(pages) after the loop avoids it, and the partial-failure case raises anyway. Minor maintainability and clarity cost."
+  }
+]
+```

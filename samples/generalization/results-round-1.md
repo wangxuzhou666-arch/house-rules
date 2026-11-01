@@ -22,3 +22,10 @@ Round 1, with_rule digest `f85fe1df1803`. Level `high`, 3 runs per condition. PA
 PASS 1, FAIL 6, INCOMPLETE 0.
 
 Run slots that needed a repeat after a failed first attempt (both attempts are kept): 0.
+
+Notes:
+
+- rel-1: the rules changed since recording: the REL.1 line of the digest now differs from the recorded one; the scores describe the recorded digests
+- rel-1b: the rules changed since recording: the REL.1 line of the digest now differs from the recorded one; the scores describe the recorded digests
+- rel-2: the rules changed since recording: the REL.2 line of the digest now differs from the recorded one; the scores describe the recorded digests
+- rel-2b: the rules changed since recording: the REL.2 line of the digest now differs from the recorded one; the scores describe the recorded digests

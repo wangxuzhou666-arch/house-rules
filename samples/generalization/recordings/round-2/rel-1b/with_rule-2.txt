@@ -1,0 +1,64 @@
+```json
+[
+  {
+    "file": "code/mail_routes.py",
+    "line": 21,
+    "summary": "apply_routes opens the live routes file with 'w' (truncating it) and validates each route inside the write loop. One invalid route leaves a truncated, half-written file, and the exception propagates.",
+    "failure_scenario": "Routes [good1, good2, {domain:'bad'}, good4] are passed in. The file is truncated, good1 and good2 are written, render_route raises RouteError on the third entry, and good4 is never written. The previously working routes file is lost. Every later folder_for call sees only 2 routes, and mail for the rest silently goes to 'inbox'. The fix is to render all lines first (validate), write to a temp file, then os.replace it onto the target (REL.1)."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 29,
+    "summary": "load_routes does not validate the shape of the state file. It silently drops lines that have no tab or an empty part. UnicodeDecodeError from read_text is not handled, and a truncated file looks valid.",
+    "failure_scenario": "The routes file is partly written (see apply_routes), contains non-UTF-8 bytes, or has a malformed line. A bad line is skipped without a log, so that domain routes to 'inbox'. Invalid bytes make read_text raise UnicodeDecodeError, so every folder_for call fails with no fallback and one bad file breaks every run. Two guard-less steps also race (exists() then read_text()). Validate the shape and fall back with a named error or log, as parse failures do (REL.3, P0F.2)."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 12,
+    "summary": "render_route's checks do not cover everything the on-disk format needs. Domain can contain an embedded tab or newline. Folder is only checked for '\\t' and '\\n', but str.splitlines also splits on \\r, \\x0b, \\x0c, \\x1c-\\x1e, \\x85, \\u2028 and \\u2029.",
+    "failure_scenario": "A route with domain 'a\\tb.com' is written as 'a\\tb.com\\tfolder', and load_routes reads it back as domain 'a' with folder 'b.com\\tfolder'. A folder named 'Work\\rArchive' or 'x\\u2028y' is split into two lines on load. The route is corrupted or lost, and the domain is mapped to a wrong folder or to 'inbox'."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 10,
+    "summary": "str(route.get(...)) coerces a missing or None value to the string 'None'. A None folder passes the 'not folder' check and is written as the literal folder name 'None'.",
+    "failure_scenario": "A route {'domain': 'acme.com', 'folder': None} (or one where an upstream bug left folder as None) is accepted. 'acme.com\\tNone' is written and all of that sender's mail is filed into a folder called 'None' with no error. Programmer or input errors should fail fast at the boundary (P0F.1) instead of being stringified."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 44,
+    "summary": "folder_for rebuilds the index on the read path, and any OSError from rebuild (read-only dir, disk full, permission) propagates. A failed cache write loses a result that was already computed. _load also swallows OSError and UnicodeDecodeError with no log and no named fallback.",
+    "failure_scenario": "The index directory is read-only or the disk is full. _load returns None silently, rebuild() computes the routes but raises on open/write, and folder_for raises instead of returning table.get(domain, 'inbox'). Mail routing crashes where it could have degraded to the in-memory table. A corrupt index is also replaced with no trace of why (P0F.2, P0E.3)."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 12,
+    "summary": "rebuild writes the index in place with 'w' (truncate then write) and is triggered by every reader that finds the file invalid. Concurrent readers and writers can interleave, and a crash leaves a truncated file.",
+    "failure_scenario": "Two processes call folder_for while the index is missing or stale. Both open 'w', truncate, and write at the same time, so the file can end up with interleaved lines. The footer count may then match a corrupted body, which _load accepts as valid, so the wrong folder is returned. Even with one writer, a crash after truncation destroys the last good index before the new one is ready. Write to a temp file and os.replace it (REL.1)."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 12,
+    "summary": "rebuild does not validate folder (or domain) for tabs and newlines. A value containing '\\n' makes the footer count mismatch, so _load returns None forever. A domain containing '\\t' round-trips to a different key than the one rebuild returns.",
+    "failure_scenario": "A folder named 'a\\nb' is written, which adds an extra physical line. The file's line count no longer equals the footer total, _load rejects it, and the index is rebuilt and rewritten on every folder_for call. That makes every lookup an O(n) disk write, with a different result path from rebuild's own return value. A domain of 'x\\ty' is returned as 'x\\ty' by rebuild() but read back as 'x' by _load."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 38,
+    "summary": "The index has no invalidation. Once a file with a valid footer exists it is trusted forever, even after the routes it was built from change. Nothing in the diff connects SenderIndex to apply_routes.",
+    "failure_scenario": "apply_routes updates the routes (a new domain or a changed folder). SenderIndex.folder_for keeps returning the old mapping because the old index still passes the 'end' count check. Mail for the new or changed domain goes to 'inbox' or the old folder until someone deletes the index file by hand."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 8,
+    "summary": "SenderIndex duplicates mail_routes. It repeats the same 'domain\\tfolder' file format, the address-to-domain parsing, and the folder_for lookup with an 'inbox' default.",
+    "failure_scenario": "The address parsing and normalization rules (rsplit('@'), strip, lower) and the default folder now live in two places, and the two will drift when one is changed. The two files also share a format. If both point at the same path, load_routes reads SenderIndex's footer line as a route mapping domain 'end' to the count string. Reuse mail_routes' folder_for and its parsing, or share one helper."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 37,
+    "summary": "folder_for re-reads and re-parses the whole routes file on every lookup, and the SenderIndex stat/read happens on every call too.",
+    "failure_scenario": "Classifying a mailbox of N messages with M routes costs N full file reads and parses (O(N*M)). Parse the table once and reuse it, or cache it keyed on the file's mtime."
+  }
+]
+```

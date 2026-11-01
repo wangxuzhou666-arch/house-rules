@@ -1,0 +1,46 @@
+```json
+[
+  {
+    "file": "code/item_index.py",
+    "line": 40,
+    "summary": "The key format changed (URL to host) and KEY_VERSION went to 2, but nothing migrates or reads existing version-1 rows. `import_items` ignores them when building `seen`, and `mark_read` ignores them when matching.",
+    "failure_scenario": "A stored index holds v1 rows such as {key: 'https://ex.com/feed.xml|g1', read: True}. After upgrade, `import_items` for the same feed finds `seen` empty. It appends a v2 row {key: 'ex.com|g1', read: False} for every item, and those items are all unread again. The user's read state is lost. `unread_titles` also lists any v1 item that was unread, so those appear twice. `mark_read` on a v1 item returns False because only v2 rows match, so the old unread row can never be cleared. The fix is to migrate v1 rows on load by recomputing the key from their stored data, or to add a compatibility read that maps v1 keys to v2 keys and carries `read` over."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 13,
+    "summary": "Keying items by host only merges different feeds on the same host. Two feeds that share a host and reuse a guid collapse to one key.",
+    "failure_scenario": "Feeds 'https://blog.example.com/a.xml' and 'https://blog.example.com/b.xml' both publish a guid of '1' or '42', which is common for sequential or numeric guids. Both produce the key 'blog.example.com|1'. `import_items` for feed B treats those items as already seen and silently drops them. `mark_read` for feed A also marks feed B's item as read. Previously the full feed URL kept the two feeds apart."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 13,
+    "summary": "`feed_host` is a hand-rolled URL parser. It leaves the userinfo, port, query and fragment in the 'host', and it is copy-pasted verbatim from reading_list.py.",
+    "failure_scenario": "'https://user@Ex.com:8080/feed' gives 'user@ex.com:8080', and 'https://ex.com?x=1' gives 'ex.com?x=1'. The same feed then gets different keys depending on how its URL is written, so items are duplicated. Python's `urllib.parse.urlsplit(url).hostname` handles these cases. The duplicated helper in the two modules can also drift apart. It should live in one shared place, or both should call `urlsplit`."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 40,
+    "summary": "The `key_version == KEY_VERSION` filters in `import_items` and `mark_read` are redundant. A v1 key (full URL, containing '//') can never equal a v2 key, so the filter does not enable any migration. It only hides v1 rows and leaves stale data in the file.",
+    "failure_scenario": "The filter adds a second condition to every lookup without changing which rows match. It also gives the impression that versioned rows are handled, when they are really orphaned. Because of this, v1 rows stay in the file indefinitely and appear in `unread_titles`."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 21,
+    "summary": "`label` only special-cases style 1 and treats every other `label_style` value as the new format. A row with an unknown or newer style, or a corrupt one, is silently rendered with the '#N' style. The file check in `load_rows` only requires the key to exist, not that its value is valid.",
+    "failure_scenario": "A row with label_style 3 (written by a newer version), 0, or None passes `load_rows` and is then labelled 'feed#N'. Nothing is logged and no error is raised. Labels shown to the user can differ from what the row's own style means, and the mismatch is hard to trace. The code should handle each known style explicitly and raise a named error for an unknown one."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 21,
+    "summary": "The branch for style 1 returns, and the other style falls through to a second return with no `else`. This breaks the rule that a branch that returns needs an `else`.",
+    "failure_scenario": "CODING-STYLE.digest.md P1.3: 'A branch that assigns or returns needs an `else`, except a guard clause'. The `if row[\"label_style\"] == 1:` branch is not a guard clause. It is one of two equal-weight formats, and the second format is the fall-through. A third style added later would be easy to get wrong because it would silently take the fall-through."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 4,
+    "summary": "`LABEL_STYLE` is bumped to 2 while existing stored rows keep style 1. `add_items` numbers new rows with `max(number)` over all rows for the host, whatever their style.",
+    "failure_scenario": "A host has rows 1..5 in style 1, shown as 'ex.com-0005'. New items are then numbered 6, 7 and so on in style 2, shown as 'ex.com#6'. The listing now mixes two label formats for one feed. This may be intended, but a user who looks up 'ex.com-0006' will not find the item. No migration or note covers this."
+  }
+]
+```

@@ -1,0 +1,30 @@
+{
+  "v": 1,
+  "case": "rel-4",
+  "condition": "without_rule",
+  "run": 3,
+  "attempt": 1,
+  "level": "high",
+  "date_utc": "2026-11-01T01:09:43Z",
+  "command": [
+    "claude",
+    "-p",
+    "/code-review high cc81e56d59892f308a404f729729c5fd1a66e43d..5bbf73df405122564e02e9ad09349b3e5090057f"
+  ],
+  "range": "cc81e56d59892f308a404f729729c5fd1a66e43d..5bbf73df405122564e02e9ad09349b3e5090057f",
+  "reviewer_version": "2.1.284 (Claude Code)",
+  "reviewer_version_error": null,
+  "code_sha256": {
+    "code/sms_codes.py": "c9555a629a63900e9e9b51134ae296c581627c7646be1f639dcbf1572dbfb018",
+    "code/mail_codes.py": "6f6f0d63858ae509ad699e303a6319350d7697d5bed595dd2b17e7943b1e7e99"
+  },
+  "base_sha256": {},
+  "digest_sha256": "8af67345cd3bbee79b929c5c5839043aae6ba300e3834b609b1ab5e02e0d1849",
+  "clause_removed": "REL.4",
+  "exit_code": 0,
+  "error": null,
+  "model_id": null,
+  "raw_sha256": "1b3c5a672446d05b6961a1338a12d6dd982f414af51fe087cf4910cd93317df1",
+  "status": "ok",
+  "failure": null
+}

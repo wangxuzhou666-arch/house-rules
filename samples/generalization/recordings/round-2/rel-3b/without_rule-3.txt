@@ -1,0 +1,64 @@
+```json
+[
+  {
+    "file": "code/access_tail.py",
+    "line": 12,
+    "summary": "load_position only handles FileNotFoundError and JSONDecodeError. Valid JSON with the wrong shape, invalid UTF-8, or deep nesting crashes the reader instead of falling back to the start.",
+    "failure_scenario": "The position file contains `null`, `[]`, `{}` or `{\"inode\": 5}`, or it holds a binary or half-written byte sequence. `json.loads` returns a non-dict or a dict with missing keys, so `position[\"offset\"]` in read_new_lines raises TypeError or KeyError. Invalid UTF-8 makes `read_text` raise UnicodeDecodeError, which is a ValueError but not a JSONDecodeError, so it escapes. Deeply nested JSON raises RecursionError. A negative or non-int offset (`-5`, `\"7\"`) makes `handle.seek` raise OSError or the `start > info.st_size` comparison raise TypeError. The sibling batch_log_reader.load_checkpoint validates all of these, so this file regresses the same pattern. The tailer then fails on every run until someone deletes the position file by hand."
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 28,
+    "summary": "The file is stat()'d by path and later opened by path, and the inode is saved from that earlier stat. A rotation between the two calls pairs the old inode with an offset measured in the new file.",
+    "failure_scenario": "`log_path.stat()` returns inode A. logrotate then replaces the file, so `log_path.open` opens the new inode B and reads B's content. `save_position` records (inode A, offset into B). On the next run the current inode is B, which does not match A, so start resets to 0 and all of B is re-read and delivered twice. Use `os.fstat(handle.fileno())` on the open handle so the inode and the bytes come from the same file."
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 36,
+    "summary": "The position is saved before the caller has processed the returned lines (at-most-once delivery), and it is written even when nothing new was read.",
+    "failure_scenario": "read_new_lines commits the new offset, then returns the lines. If the consumer crashes or raises while handling them (parse error, DB down, OOM), the next run starts after those lines and they are lost for good. The write is also not fsynced, so a power loss can leave an empty or stale position file. The caller needs a separate commit step after processing, or the function should return the new position for the caller to save."
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 38,
+    "summary": "The line-count checkpoint has no file identity, so rotation or truncate-and-regrow silently skips lines. When done > len(rows) it resets to 0 with no log, and the whole file is reprocessed.",
+    "failure_scenario": "The checkpoint says 1000 lines done. The log is rotated and the new file already has 1500 lines. `done > len(rows)` is false, so `rows[1000:]` is returned and the first 1000 lines of the new file are never seen. If instead the new file is shorter, `done` is reset to 0 and all rows are re-emitted with no warning, which is a silent fallback with no log line. The same silent reset exists in access_tail.read_new_lines (`start > info.st_size`, and an inode change falling back to 0). The load_* functions log their fallbacks; these do not."
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 34,
+    "summary": "Every call reads the entire log into memory with readlines(), only to slice off the already-processed prefix.",
+    "failure_scenario": "A multi-GB access log polled every few seconds loads every line into a Python list each time. That costs memory proportional to file size and O(n) time to return a handful of new lines. It could instead stream with `itertools.islice(handle, done, None)` and count as it goes, or keep a byte offset as access_tail does."
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 36,
+    "summary": "Opening in text mode with universal newlines makes a lone `\\r` count as a line break. The checkpoint is also committed before the caller consumes the lines.",
+    "failure_scenario": "A log line containing an embedded `\\r` (for example a user-agent or a Windows-style tool writing `\\r\\n` mixed with `\\r`) is split into extra rows. A line count taken over such a file diverges from the writer's line count, and the dropped-trailing-line logic acts on the wrong row. `save_checkpoint(len(rows))` runs before the return, so any failure in the consumer loses those lines permanently, the same at-most-once problem as access_tail."
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 37,
+    "summary": "str.splitlines() splits on many separators beyond `\\n` (`\\x0b`, `\\x0c`, `\\x1c`-`\\x1e`, `\\x85`, `\\u2028`, `\\u2029`, lone `\\r`). The offset was computed by `\\n` boundaries, so a single log record can be returned as several lines.",
+    "failure_scenario": "An access-log request path or user agent containing U+2028 or `\\x0c` is returned as two or more lines. Downstream parsers see broken fragments, and the line count differs from the batch_log_reader behaviour. Use `decoded.split(\"\\n\")` after trimming the trailing empty element."
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 19,
+    "summary": "The temp file name comes from `path.with_suffix(\".part\")`, which replaces the suffix. Different state files that share a stem collide on the same temp file, and the write is not durable.",
+    "failure_scenario": "Position files `access.json` and `access.txt`, or a position path named `x.part`, map to the same `x.part`. Two concurrent writers overwrite each other's temp content before `os.replace`, so one gets the other's state. With no flush or fsync before the replace, a crash can leave an empty position file. The same pattern is in batch_log_reader.save_checkpoint. Use `path.with_name(path.name + \".part\")`, or tempfile in the same directory, and fsync."
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 27,
+    "summary": "The generic name `info` for the stat result violates P2.4. The same applies to `data` in batch_log_reader.load_checkpoint.",
+    "failure_scenario": "CODING-STYLE P2.4 requires qualified names instead of `data`, `result`, `info`, `tmp` and the like. `info = log_path.stat()` in access_tail.py and `data = json.loads(raw)` in batch_log_reader.py should be `log_stat` and `checkpoint_json` (or similar), so the reader does not have to trace what each holds."
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 29,
+    "summary": "Near-identical state-file code is copy-pasted into the two modules (the atomic save, the load-with-fallback, and a same-named read_new_lines). They have already diverged in how much input validation they do.",
+    "failure_scenario": "batch_log_reader.load_checkpoint validates shape, encoding and recursion, while access_tail.load_position does not. A fix to one (such as the temp-name collision or durability fixes above) has to be repeated in the other and will drift. Two sibling modules with the same public name `read_new_lines` and different semantics (byte offset plus inode versus line count) also invite importing the wrong one. Consider one shared atomic-JSON-state helper."
+  }
+]
+```

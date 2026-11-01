@@ -1,0 +1,46 @@
+```json
+[
+  {
+    "file": "code/payment_events.py",
+    "line": 6,
+    "summary": "The `event_key` format changed from `provider:event_id` to `account/provider/event_id` with no migration, so every key already stored in `events` becomes unreachable.",
+    "failure_scenario": "A ledger already holds the key `stripe:evt_1`. After deploy, a provider retry of `evt_1` is keyed as `acct/stripe/evt_1`. `INSERT OR IGNORE` finds no conflict, and the charge is counted a second time, so `net_cents` is double-counted. `record_refund` for a charge recorded before the deploy looks up the new key, matches no row, and returns False. The refund is lost and the charge stays in `net_cents`. Fix: migrate or rewrite existing keys, or keep a legacy-key fallback lookup."
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 6,
+    "summary": "`account` is neither normalized nor escaped, while `provider` is lowercased and `event_id` is stripped. `/` is also used as the separator, so the key can be ambiguous.",
+    "failure_scenario": "`event_key('a/b', 'c', 'x')` and `event_key('a', 'b/c', 'x')` both give `a/b/c/x`, so two distinct events collide and the second charge is silently ignored. Separately, `'Acct1'` versus `'acct1'`, or a trailing space in `account`, produces different keys for the same account, so idempotency fails for those retries. Normalize `account` the same way as the other parts, or use a delimiter that cannot appear in the parts."
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 19,
+    "summary": "`record_charge` and `record_refund` gain a required positional `account` parameter inserted before `provider`. Callers outside this diff are not updated.",
+    "failure_scenario": "Nothing else in this repo calls these functions, so any caller elsewhere still passing `(conn, provider, event_id, cents)` breaks. The old call `record_refund(conn, 'stripe', 'ch_1')` fails with a TypeError. A 4-argument call has a different failure: `record_charge(conn, 'stripe', 'evt_1', 500)` binds 500 to `event_id`, so `event_id.strip()` raises an AttributeError. The positional shift is easy to get wrong. Make `account` keyword-only or default it, and update the callers in the same change."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 12,
+    "summary": "`invoice_label` changes from `INV-000123` to `YYYY/NNNN`, but `number` is a global counter (`MAX(number)+1` over all invoices), not a per-year sequence.",
+    "failure_scenario": "The year prefix implies a per-year sequence, but the first invoice of 2027 is still numbered 10432 and is labelled `2027/10432`. The `:04d` width is also too short for the global counter, so labels are no longer fixed-width. Invoice labels already issued and printed (`INV-000123`) no longer match what `outstanding()` reports for the same row, so reconciliation against previously sent invoices breaks. Either make the numbering per-year to match the label, or keep the old label format."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 49,
+    "summary": "`outstanding()` now inserts `order_ref` between the label and the amount, which changes the output string format and exposes internal order references.",
+    "failure_scenario": "A consumer that parses `\"<label> <amount>\"`, for example by splitting on a space and taking the last field or the second field, now gets the order reference in the wrong place. An `order_ref` that contains spaces makes the line unparseable. If this list is shown to customers or sent in dunning emails, internal order identifiers leak. Return structured rows, or keep the old format and add the field only where it is needed."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 12,
+    "summary": "The new label is built from `issued_on[:4]`, which assumes a well-formed ISO date string in the stored column. Rows that predate the `date.fromisoformat` normalization are not guaranteed to have one.",
+    "failure_scenario": "A legacy row inserted before `issue()` normalized dates, with `issued_on` like `'3/5/2026'` or `'05-03-2026'`, yields a nonsense prefix such as `3/5/` or `05-0`. `outstanding()` then emits a wrong label and nothing raises. If `issued_on` is empty or NULL, `outstanding()` raises a TypeError or returns a garbled label for the whole list. Parse with `date.fromisoformat` or fail fast instead of slicing."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 33,
+    "summary": "`issue()` computes `MAX(number)+1` and then inserts, with no transaction or UNIQUE constraint on `number`. The label now carries `number`, so the weakness is more visible.",
+    "failure_scenario": "Two connections issue invoices concurrently. Both read the same `MAX(number)` and both insert with the same `number` under different uids, because `number` is not UNIQUE. Two different invoices then share the label `2026/0007`, which is a duplicate legal invoice number. Fix: add a UNIQUE index on `number` and take `BEGIN IMMEDIATE` around the read and insert."
+  }
+]
+```

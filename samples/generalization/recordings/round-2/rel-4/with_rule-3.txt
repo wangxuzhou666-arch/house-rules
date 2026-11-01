@@ -1,0 +1,52 @@
+```json
+[
+  {
+    "file": "code/sms_codes.py",
+    "line": 29,
+    "summary": "The per-phone cap is counted only after `gateway.deliver` succeeds, so failed attempts are never counted (REL.4).",
+    "failure_scenario": "The gateway raises on every call, for example a timeout after the provider has already accepted and billed the message, or a flaky 5xx. `self.sent[phone] = used + 1` is never reached. A caller can retry without limit and the cap never trips, which defeats the cost/abuse protection. `mail_codes.py` reserves the slot before sending, which is the correct pattern."
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 24,
+    "summary": "The read-check-send-write sequence on `self.sent` and `self.day` has no lock, so concurrent requests all pass the limit check and race on the update.",
+    "failure_scenario": "With limit=3 and used=2, five threads or requests for the same phone all read used=2 and all pass `used >= limit`. All five send an SMS and each writes `sent[phone] = 3`, so five messages go out under a limit of 3. Because `deliver` is a slow network call, the window is wide. A concurrent day rollover can also have one thread `clear()` the dict while another is mid-update. `CodeMailer` uses a lock for exactly this reason and this class does not."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 24,
+    "summary": "The counter key is the raw address string, with no normalization, so case or whitespace variants each get their own quota.",
+    "failure_scenario": "A caller sends codes to `Bob@x.com`, `bob@x.com`, ` bob@x.com` and `BOB@X.COM`. Each is a separate dict key with its own limit of 3, so the mailbox that receives them all (Gmail ignores case) gets 12+ emails per day. The same applies to `sms_codes.py` with phone formats such as `+1 555...`, `+1555...` and `555...`."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 30,
+    "summary": "There is no boundary validation of `address` or `phone` (P0F.1), and the limiter state lives only in process memory.",
+    "failure_scenario": "`send_code('')` or `send_code(None)` is accepted, counted under that key and passed to the transport. The counters are per-instance and per-process, so with N workers or after a restart or deploy the effective daily limit becomes N×limit or resets to zero. An attacker can trigger a restart or hit several workers to bypass the cap. Shared storage, such as a Redis key with a TTL, would fix this."
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 1,
+    "summary": "The two new files copy the same logic: `TooManyRequests`, the daily-reset counter, code generation and the limit check.",
+    "failure_scenario": "The two modules define separate `TooManyRequests` classes with the same name. A caller that catches `mail_codes.TooManyRequests` will not catch the SMS one. The two copies have already drifted: one is locked and reserves before sending, the other is unlocked and counts after. Every future fix (normalization, TTL, storage) must be made twice and will drift again. A shared `DailyLimiter` and `new_code()` would remove the duplication and let one correct implementation serve both."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 21,
+    "summary": "`self.today()` is called twice (compare, then assign), so the two reads can return different dates at midnight.",
+    "failure_scenario": "The first call returns day D, so the condition is true when compared with `self.day`. The second call, a moment later, returns D+1. `self.day` is then set to D+1 and the dict is cleared, which is benign. In the reverse ordering, a clock or injected `today` that returns inconsistent values leaves `self.day` out of sync with the comparison. Calling it once into a local variable is safer. The same pattern appears in `sms_codes.py` lines 18-19."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 26,
+    "summary": "The exception message embeds the full address or phone number and the count.",
+    "failure_scenario": "Callers or frameworks that log or return `str(exc)` write the user's email or phone number (PII) into logs and error responses. They also tell an attacker the exact quota state. The same applies to `sms_codes.py` line 26."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 33,
+    "summary": "`send_code` returns the plaintext code and nothing stores or expires it, so the module has no way to verify a code.",
+    "failure_scenario": "A handler that returns the result of `send_code` in its HTTP response, or logs it, leaks the OTP to the requester, who can then verify without owning the address. The message also states no expiry. The same applies to `sms_codes.py` line 30."
+  }
+]
+```

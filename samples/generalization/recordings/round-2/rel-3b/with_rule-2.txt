@@ -1,0 +1,64 @@
+```json
+[
+  {
+    "file": "code/access_tail.py",
+    "line": 17,
+    "summary": "load_position only handles FileNotFoundError and JSONDecodeError. Valid JSON with the wrong shape, or a file that is not valid UTF-8, crashes the reader instead of taking the fresh-start fallback (REL.3, P0F.2).",
+    "failure_scenario": "The position file contains `[]`, `null`, `{}`, `{\"inode\":1}`, or `{\"offset\":\"x\"}`, or has been truncated or corrupted into non-UTF-8 bytes. `json.loads` succeeds, or `read_text` raises UnicodeDecodeError, which is not a JSONDecodeError. `read_new_lines` then raises KeyError, TypeError or UnicodeDecodeError at `position[\"offset\"]`, at `start > info.st_size`, or at `seek(start)`. The same bad file fails every run. The sibling `batch_log_reader.load_checkpoint` already validates shape and decoding; this module does not."
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 28,
+    "summary": "The inode and size come from `log_path.stat()`, but the data is read from a separate `open()`. The two can refer to different files if rotation happens in between.",
+    "failure_scenario": "Rotation (rename plus create) happens between `stat()` and `open()`. The inode and offset come from the old file, but the bytes are read from the new file. `save_position` records the old inode with an offset computed from the new file's content. The next run sees a different inode, resets to 0, and re-emits the whole new file (duplicates). Or the saved offset skips lines. Use `os.fstat(handle.fileno())` after opening instead."
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 29,
+    "summary": "Truncation or rotation is detected only by 'same inode and offset <= size'. A file truncated in place (copytruncate) that regrows past the saved offset between two runs is not detected.",
+    "failure_scenario": "The saved offset is 10000. The log is truncated by copytruncate, so the inode is unchanged, and it grows to 12000 before the next poll. `start` stays at 10000, so the first 10000 bytes of the new content are never read. The seek also lands mid-line and yields a garbled first line. The saved position carries no content fingerprint or head check to catch this."
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 36,
+    "summary": "The position is committed before the caller has processed the returned lines (at-most-once delivery). It is also written without fsync, and the `.part` name is derived with `with_suffix`.",
+    "failure_scenario": "`read_new_lines` saves the new offset, then returns. If the caller crashes while handling the batch, the next run starts past those lines and they are lost permanently. Separately, a power loss after `os.replace` but before the data is flushed can leave an empty or garbage position file. `with_suffix('.part')` also maps `pos.json` and `pos.txt` in the same directory to the same temp file."
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 41,
+    "summary": "A shrunken log is detected only when `done > len(rows)`. A rotated or truncated log that regrows to at least the previous line count is treated as the same file, and its leading lines are skipped.",
+    "failure_scenario": "Checkpoint `lines=1000`. The log is rotated and the new file has 1500 lines by the next run. `rows[1000:]` returns only the last 500 lines and silently drops the first 1000 lines of the new file. There is no inode or head check. On the opposite side, a rotation that leaves fewer than `done` lines resets to 0 and re-reads everything."
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 43,
+    "summary": "The checkpoint is advanced to `len(rows)` before the caller processes the returned lines. It is also saved on every call even when nothing is new.",
+    "failure_scenario": "The caller crashes or fails while processing the batch returned at line 44. The checkpoint already covers those rows, so on restart they are never re-read and are lost. The checkpoint should be committed after successful processing, or the function should return the new count so the caller can save it."
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 37,
+    "summary": "The whole log is loaded into memory with `readlines()` on every call, only to slice off `rows[done:]`.",
+    "failure_scenario": "A multi-GB access log polled every few seconds costs O(file size) in I/O and memory each run, even when 3 lines are new. The tail reader in `access_tail.py` seeks to the saved byte offset instead. Storing a byte offset (or skipping `done` lines via an iterator) bounds the cost to the new data."
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 29,
+    "summary": "`load_checkpoint`, `save_checkpoint` and `read_new_lines` re-implement `access_tail.py`'s `load_position`, `save_position` and `read_new_lines` almost line for line. The two copies have already diverged on validation and rotation handling.",
+    "failure_scenario": "The atomic write-then-replace pattern, the 'incomplete trailing line' handling and the fallback logic exist twice with different guarantees. `access_tail` lacks shape validation and `batch_log_reader` lacks inode tracking. A fix applied to one copy will not reach the other. Extract one shared state-file helper."
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 37,
+    "summary": "`bytes.decode(...).splitlines()` splits on more than `\\n`. It also splits on `\\r`, `\\x0b`, `\\x0c`, `\\x1c`-`\\x1e`, `\\x85`, `\\u2028` and `\\u2029`. The offset bookkeeping is newline-based, so the returned lines can disagree with it.",
+    "failure_scenario": "A request log line contains an embedded `\\x0b`, `\\x0c` or `\\u2028` (for example in a user-agent or URL), or a lone `\\r`. `splitlines()` breaks it into two or more entries, so downstream parsers see truncated fragments. Splitting on `b'\\n'` before decoding keeps the lines aligned with the byte offsets."
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 28,
+    "summary": "Generic names `info`, `chunk` and `fresh` (P2.4). `data` and `raw` in `batch_log_reader` are the same problem.",
+    "failure_scenario": "`info` holds a `stat_result`, and `chunk` holds the unread tail bytes. The generic names hide what they hold, so a reader must trace each assignment to find out. Descriptive names such as `log_stat` and `unread_bytes` would remove that lookup."
+  }
+]
+```

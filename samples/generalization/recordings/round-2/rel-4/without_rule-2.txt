@@ -1,0 +1,64 @@
+```json
+[
+  {
+    "file": "code/sms_codes.py",
+    "line": 24,
+    "summary": "send_code reads the count, delivers, then writes `used + 1` with no lock, so concurrent requests for one phone all pass the limit check, and `used + 1` can overwrite a concurrent increment.",
+    "failure_scenario": "The limit is 3 and the phone has used 2. Ten threads call send_code at once. Each reads used=2 and passes the check. All ten deliver an SMS, and sent[phone] ends at 3. An attacker can bypass the per-phone limit and run up SMS gateway costs. The sibling mail_codes.py serialises this same check with a lock, so the two implementations disagree."
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 28,
+    "summary": "The counter is incremented only after gateway.deliver returns. The window between check and increment is wide, because it spans a network call.",
+    "failure_scenario": "While one slow deliver() is in flight, any number of other requests see the old count and also send. If deliver() succeeds on the provider side but raises a timeout on the client side, the quota is never consumed and the caller can retry without limit. The count should be reserved before the call and rolled back only on a definite failure."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 32,
+    "summary": "_reserve consumes the quota before transport.send runs and never releases it when send raises.",
+    "failure_scenario": "The SMTP transport raises a transient error on three consecutive calls. The user receives no email, yet the address is locked out with TooManyRequests for the rest of the day. It is also inconsistent with sms_codes.py, which does not consume quota on a failed delivery (REL.1 style: state lost on failure)."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 33,
+    "summary": "The generated code is returned to the caller and never stored or hashed for later verification, and no expiry or attempt limit exists.",
+    "failure_scenario": "The caller must keep the code itself. A handler that returns the code in an HTTP response, or logs it, discloses the secret to the requester and defeats the verification. There is also no tie between a code and its address. The same applies to the identical return in sms_codes.py:30."
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 17,
+    "summary": "_used is named like a read-only getter but also rolls the day and clears the whole table. This is a hidden side effect, and the rollover is not synchronised.",
+    "failure_scenario": "A maintainer calls _used for a read-only check and unexpectedly resets everyone's counters. Two threads crossing midnight can each clear `sent`, wiping increments the other just wrote. mail_codes.py puts the same logic inside _reserve under the lock."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 21,
+    "summary": "The day rollover calls self.today() twice, so `self.day` can be set to a different date than the one compared.",
+    "failure_scenario": "A call lands exactly at midnight. The first today() returns day N, which differs from self.day (N-1). The second today() returns N+1, so self.day is set to N+1 and the table is cleared. The injected clock can also return inconsistent values in tests. Bind `now = self.today()` once and reuse it (the same pattern is in sms_codes.py:18-19)."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 22,
+    "summary": "The rate-limit key is the raw address string, with no normalisation, so the per-address limit is trivially bypassed.",
+    "failure_scenario": "`User@x.com`, `user@x.com` and `user+1@x.com` are counted separately, so one mailbox can receive an unlimited number of codes. The same applies to phone formats such as `+1555...` versus `1555...` or `555-...` in sms_codes.py:21."
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 6,
+    "summary": "The two new modules copy the same day-bucketed rate limiter and each defines its own `TooManyRequests` class.",
+    "failure_scenario": "A caller that handles both channels with `except TooManyRequests` catches only the one class it imported. The other propagates as a 500. The limiter fixes (lock, rollover) must be made twice, and the two copies have already diverged: one has a lock, one doesn't. Extract a shared DailyLimiter and a single exception type."
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 18,
+    "summary": "The `sent` dict is only cleared at the day rollover and has no size bound, so it grows with every distinct address.",
+    "failure_scenario": "An attacker requests codes for millions of unique addresses within a day. Each creates a dict entry that is held until midnight, which causes memory growth. The same applies to sms_codes.py:15."
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 11,
+    "summary": "Neither new module has tests or any comment documenting the concurrency, rollover, or failure semantics.",
+    "failure_scenario": "The behaviours that differ between the two copies (locking, quota burn on failure, midnight reset) are not pinned. A later refactor can regress them silently, and there is no clue about which semantics are intended."
+  }
+]
+```

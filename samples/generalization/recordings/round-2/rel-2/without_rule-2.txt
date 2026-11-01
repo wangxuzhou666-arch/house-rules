@@ -1,0 +1,52 @@
+```json
+[
+  {
+    "file": "code/item_index.py",
+    "line": 40,
+    "summary": "The key format and KEY_VERSION changed, but nothing migrates existing v1 rows. `import_items` now ignores them when building `seen`, so every already-imported item is appended again as a v2 row.",
+    "failure_scenario": "The file holds a v1 row {key:'https://a.com/feed|g1', key_version:1, read:True}. Re-importing the same feed builds `seen` from v2 rows only, which is empty. A second row {key:'a.com|g1', key_version:2, read:False} is appended and reported as newly added. The file now has two rows per item, and the user's read history is silently not carried over."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 57,
+    "summary": "`mark_read` now matches only rows with `key_version == KEY_VERSION`. Legacy v1 rows can never be marked read, and the function returns False for items that exist.",
+    "failure_scenario": "A user has v1 rows from before the upgrade and calls `mark_read(path, 'https://a.com/feed', 'g1')`. The computed key is 'a.com|g1', and the stored row has key 'https://a.com/feed|g1' and version 1. No row matches, so it returns False and the item stays unread. `unread_titles` does not filter by version, so the v1 row is still listed as unread permanently."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 65,
+    "summary": "`unread_titles` does not account for the version split, so one logical item can appear twice after a re-import (a stale v1 row plus a new v2 row). Reads are only recorded on the v2 row.",
+    "failure_scenario": "After a re-import, v1 'Post A' (unread) and v2 'Post A' (unread) both exist. The user marks the item read, which flips only the v2 row. `unread_titles` still returns 'Post A' from the v1 row, so the item can never be cleared."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 17,
+    "summary": "The new key uses only the host and drops the feed path. Two different feeds on the same host that share a guid now collide, and the second feed's items are silently skipped as duplicates.",
+    "failure_scenario": "Importing 'https://example.com/blog/rss' and 'https://example.com/podcast/rss' with a guid of '1' in each. Both produce the key 'example.com|1'. The podcast item is skipped in `import_items`, and `mark_read` on one feed marks the other feed's item. The v1 key included the full URL, so this is a regression."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 13,
+    "summary": "`feed_host` is naive. It does not strip userinfo (`user@host`), keeps the port, and treats a scheme-less URL with `//`-free input as a host plus path. The same feed can therefore get different keys depending on URL spelling.",
+    "failure_scenario": "'https://a.com:443/feed' gives 'a.com:443' and 'https://a.com/feed' gives 'a.com'. The same feed produces two different keys, so items are re-imported as new. 'https://u:p@a.com/feed' leaks credentials into the stored key as 'u:p@a.com'. `urllib.parse.urlsplit(...).hostname` would handle all of these."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 12,
+    "summary": "`feed_host` is copy-pasted identically in `code/reading_list.py` instead of being shared. The two copies can drift, and any fix has to be made twice.",
+    "failure_scenario": "A fix such as port or userinfo handling is applied to one module's `feed_host` but not the other. The two stores then derive different identities for the same feed. This is only the second repetition, so it is a nice-to-have against P2.2 rather than a hard violation."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 21,
+    "summary": "`label` treats every `label_style` other than 1 as the new style, with no check for unknown values. Rows written by a newer version with a different style are silently rendered in style-2 format. Style-1 rows keep the old format, so one listing mixes two label formats.",
+    "failure_scenario": "A row with `label_style` 3 from a future writer renders as 'host#5', which may be wrong with no error. After the upgrade, `listing` shows 'a.com-0001' for old rows and 'a.com#7' for new rows in the same output, so the list looks inconsistent and the old labels never migrate."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 40,
+    "summary": "The version check indexes `row['key_version']` directly. `load_rows` only checks that the key exists, not its type. Rows with a non-int or null `key_version` are silently dropped from dedup instead of raising `IndexFileError`.",
+    "failure_scenario": "A hand-edited file contains {\"key_version\": \"2\", ...} as a string. `\"2\" == 2` is False, so the row is ignored for dedup and `mark_read`, and the item is re-added on every import. No error is raised."
+  }
+]
+```
