@@ -306,17 +306,37 @@ changes, and how to undo it: [docs/ONBOARDING.md](docs/ONBOARDING.md).
 
 ## Make it yours
 
-| What you swap in | How | Details |
-|---|---|---|
-| **Rules file** | Point `init --rules-file` or `rules_files` in `.house-rules.json` at your own `CODING-STYLE.md`. You do not need to adopt the author's rules. Use your own family names; a clause is a line that starts with `**[ID]**`, with a severity tag or a family table. | [Customization](docs/CUSTOMIZATION.md), [rule writing](docs/RULE-WRITING.md), [template](templates/CODING-STYLE.template.md) |
-| **Config keys** | `.house-rules.json`. Every key is optional and an unknown key is an error: `rules_files`, `clause_id_pattern`, `digest_max_bytes`, `max_review_rounds`, `wrapup_auto_max_per_day`, `wrapup_min_changed_lines`, and more. | [Config table with defaults](docs/LEDGER.md#config-house-rulesjson) |
-| **Finding format** | What a reviewer must print: a JSON array, or text with a fenced `json` block, one object per defect with `file`, `line`, `summary`, `failure_scenario`, `category` (a clause ID in kebab-case, or `unmapped`) and `severity` (`blocker`, `should-fix`, `nice`). Other field names need your own adapter; there is no mapping setting. | [Your review output](docs/CUSTOMIZATION.md#your-review-output), [stored form](schemas/finding.v1.schema.json), [reviewer prompt](samples/config-replacement/reviewer-prompt.md) |
-| **Reviewer** | Run any reviewer elsewhere and import its output with `house-rules review --from-file out.txt --run ID`, or `wrapup --from-file` (thresholds still apply). The built-in route runs `claude -p "/code-review high"`. Only that one has been exercised. | [Review output from elsewhere](docs/INTEGRATION.md#review-output-from-elsewhere), [carrying the loop to another reviewer](docs/METHOD.md#5-carrying-the-loop-to-another-reviewer) |
+Almost everything here is yours to change. What stays fixed is the minimum the loop needs:
+stable clause IDs, the fields of a finding, and a person's decision on every rule change. The
+edges in detail: [docs/CUSTOMIZATION.md](docs/CUSTOMIZATION.md).
 
-How the question is put to you is changed through your repository instructions or a customized
-maintenance skill ([sample](samples/config-replacement/maintenance-prompt.md),
-[layout](docs/DECISION-CARDS.md)); there is no layout setting. The edges of what can be
-customized: [docs/CUSTOMIZATION.md](docs/CUSTOMIZATION.md).
+### The structure of your coding style
+
+| What | How you change it |
+|---|---|
+| Rule files | Point `init --rules-file` or `rules_files` in `.house-rules.json` at your own `CODING-STYLE.md`; you do not need to adopt the author's rules. Several files add distinct IDs, and a file outside the repository is a shared, read-only layer ([outer layers](docs/COMPILE.md#outer-layers)). |
+| Families and IDs | Your own family names, such as `DATA.1` or `API.1`. A clause is a line that starts with `**[ID]**`, and `clause_id_pattern` sets the ID format. A retired ID is never reused. |
+| Severity | Per clause, or one table per family: `blocker`, `should-fix` or `nice`. Reviewer guidance can stay untagged. |
+| Thresholds, exemptions, tool codes | Edit them in the clause text. The [template](templates/CODING-STYLE.template.md) marks every knob with `ADJUST`. |
+| What goes into the digest | The first sentence of each clause, or your own line with `<!-- digest: ... -->` ([short rule](docs/COMPILE.md#short-rule)). |
+| How big the digest may get | `digest_max_bytes` (4096 by default) and `digest_max_chars` (90 per line). |
+| Where the rules are read | An `@import` in `CLAUDE.md`, or `inject_targets`: any file with a marker pair, such as `AGENTS.md` or an agent prompt, with the sections you pick ([injection](docs/COMPILE.md#injection)). |
+
+How to write clauses that a reviewer applies well: [rule writing](docs/RULE-WRITING.md).
+
+### The structured output of the agents
+
+| Who | What you can change | What stays fixed |
+|---|---|---|
+| **Reviewer**, finds the problems | Which reviewer: run any reviewer elsewhere and import its output with `house-rules review --from-file out.txt --run ID`, or `wrapup --from-file` (only Claude Code's `/code-review` has been exercised). Its prompt, explanation style and extra analysis ([sample prompt](samples/config-replacement/reviewer-prompt.md)). Lint codes recorded as clauses (`tool_rule_map`), and a default failure scenario per clause (`scenarios`). | A JSON array, alone or in a fenced `json` block, one object per defect: `file`, `line`, `summary`, `failure_scenario`, `category` (a clause ID in kebab-case, or `unmapped`) and `severity`. Other field names need your own adapter, and extra fields are not stored in the ledger ([your review output](docs/CUSTOMIZATION.md#your-review-output), [stored form](schemas/finding.v1.schema.json)). |
+| **Maintainer**, drafts rule changes | How it is prompted, and how a proposal is put to you: wording, order, length, language. Change both through your repository instructions or your own copy of the maintain skill ([sample](samples/config-replacement/maintenance-prompt.md), [layout](docs/DECISION-CARDS.md#native-human-decisions)). | For each finding, one of six outcomes (covered, keep, add, rewrite, merge, retire) with the complete clause text, in a JSON object the tool checks ([assessment](docs/DECISION-CARDS.md#reusable-assessment-prompt)). The evidence and the exact proposed text are shown before you decide. |
+| **You**, decide | Your answer, in your words. | Accept, adjust, reject or defer, recorded with what you said. No rule changes without it. |
+
+### The workflow and its cost
+
+The thresholds, the round cap, the daily cap, automatic reviews on or off, the review level
+(`--level`) and the base of a wrap-up (`--base`) are each a key in `.house-rules.json` or a flag:
+see [Cost controls](#cost-controls) and the [config table with defaults](docs/LEDGER.md#config-house-rulesjson).
 
 ## Cost controls
 

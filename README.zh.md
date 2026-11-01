@@ -274,15 +274,35 @@ cp /path/to/house-rules/templates/CODING-STYLE.template.zh.md CODING-STYLE.md
 
 ## 定制成你自己的
 
-| 你换上的 | 怎么换 | 详情 |
-|---|---|---|
-| **规则文件** | 用 `init --rules-file`，或在 `.house-rules.json` 里设置 `rules_files`，指向你自己的 `CODING-STYLE.md`。不需要采用作者的规则。条款家族名用你自己的；一条条款是以 `**[ID]**` 开头的一行，带严重度标记或家族严重度表。 | [定制](docs/CUSTOMIZATION.md)、[规则编写](docs/RULE-WRITING.zh.md)、[模板](templates/CODING-STYLE.template.zh.md) |
-| **配置项** | `.house-rules.json`。每一项都是可选的，出现未知的项会报错：`rules_files`、`clause_id_pattern`、`digest_max_bytes`、`max_review_rounds`、`wrapup_auto_max_per_day`、`wrapup_min_changed_lines` 等。 | [带默认值的配置表](docs/LEDGER.md#config-house-rulesjson) |
-| **发现的格式** | reviewer 必须打印的内容：一个 JSON 数组，或带 `json` 围栏代码块的文本，每个缺陷一个对象，含 `file`、`line`、`summary`、`failure_scenario`、`category`（kebab-case 的条款 ID，或 `unmapped`）和 `severity`（`blocker`、`should-fix`、`nice`）。别的字段名需要你自己写适配器；没有字段映射的配置项。 | [你的 review 输出](docs/CUSTOMIZATION.md#your-review-output)、[落库后的形态](schemas/finding.v1.schema.json)、[reviewer 提示词](samples/config-replacement/reviewer-prompt.md) |
-| **Reviewer** | 在别处跑任意 reviewer，再用 `house-rules review --from-file out.txt --run ID`（或 `wrapup --from-file`，阈值仍然适用）导入它的输出。内置的路线运行 `claude -p "/code-review high"`，目前只试过这一种。 | [别处产生的 review 输出](docs/INTEGRATION.md#review-output-from-elsewhere)、[把循环搬到别的 reviewer](docs/METHOD.zh.md#5-把循环搬到别的-reviewer) |
+这里几乎所有东西都可以换成你自己的。固定下来的只是这个循环离不开的最少部分：稳定的条款 ID、
+一条发现的字段，以及每次规则改动都要有人拍板。边界的细节见 [docs/CUSTOMIZATION.md](docs/CUSTOMIZATION.md)。
 
-人被问的那个问题怎么呈现，通过你仓库里的指令文件或定制的 maintenance skill 来改（[示例](samples/config-replacement/maintenance-prompt.md)、
-[布局](docs/DECISION-CARDS.md)）；没有布局配置项。能定制到什么程度、边界在哪：[docs/CUSTOMIZATION.md](docs/CUSTOMIZATION.md)。
+### 你的 coding style 怎么搭
+
+| 什么 | 怎么改 |
+|---|---|
+| 规则文件 | 用 `init --rules-file`，或在 `.house-rules.json` 里设置 `rules_files`，指向你自己的 `CODING-STYLE.md`；不需要采用作者的规则。多个文件各自贡献不重复的 ID；仓库外的文件是一层共享的只读规则（[外层](docs/COMPILE.md#outer-layers)）。 |
+| 家族和 ID | 家族名用你自己的，比如 `DATA.1`、`API.1`。一条条款是以 `**[ID]**` 开头的一行，ID 的格式由 `clause_id_pattern` 决定。退役的 ID 不会再被复用。 |
+| 严重度 | 逐条标，或者每个家族一张表：`blocker`、`should-fix` 或 `nice`。给 reviewer 的指引可以不标。 |
+| 阈值、例外、工具代码 | 直接改条款文字。[模板](templates/CODING-STYLE.template.zh.md)里每个可调的地方都标了 `ADJUST`。 |
+| 什么进 digest | 默认取每条条款的第一句，也可以用 `<!-- digest: ... -->` 自己写这一行（[短规则](docs/COMPILE.md#short-rule)）。 |
+| digest 能有多大 | `digest_max_bytes`（默认 4096 字节）和 `digest_max_chars`（每行 90 个字符）。 |
+| 规则在哪里被读到 | `CLAUDE.md` 里的 `@import`，或者 `inject_targets`：任何带一对标记的文件，比如 `AGENTS.md` 或某个 agent 的提示词，还可以挑选放哪几段（[注入](docs/COMPILE.md#injection)）。 |
+
+怎么写出 reviewer 用得准的条款：[规则编写](docs/RULE-WRITING.zh.md)。
+
+### agent 的结构化输出
+
+| 谁 | 你能改什么 | 固定的是什么 |
+|---|---|---|
+| **Reviewer**：找问题 | 用哪个 reviewer：在别处跑任意 reviewer，再用 `house-rules review --from-file out.txt --run ID` 或 `wrapup --from-file` 导入它的输出（目前只试过 Claude Code 的 `/code-review`）。它的提示词、讲解风格和额外分析（[提示词示例](samples/config-replacement/reviewer-prompt.md)）。把 lint 代码记成条款（`tool_rule_map`），给每条条款设默认的失败场景（`scenarios`）。 | 一个 JSON 数组（单独给出，或放在 `json` 围栏代码块里），每个缺陷一个对象：`file`、`line`、`summary`、`failure_scenario`、`category`（kebab-case 的条款 ID，或 `unmapped`）和 `severity`。别的字段名需要你自己写适配器，多出来的字段不会进 ledger（[你的 review 输出](docs/CUSTOMIZATION.md#your-review-output)、[落库后的形态](schemas/finding.v1.schema.json)）。 |
+| **Maintainer**：起草规则改动 | 怎么提示它，以及提案怎么呈现给你：措辞、顺序、长短、语言。都通过你仓库里的指令文件，或你自己那份 maintain skill 来改（[示例](samples/config-replacement/maintenance-prompt.md)、[布局](docs/DECISION-CARDS.md#native-human-decisions)）。 | 每条发现给出六种结论之一（covered、keep、add、rewrite、merge、retire），附完整的条款原文，装在一个工具会校验的 JSON 对象里（[评估](docs/DECISION-CARDS.md#reusable-assessment-prompt)）。你拍板之前，证据和要改的原文都摆在你面前。 |
+| **你**：拍板 | 你的回答，用你自己的话。 | 通过、修改、拒绝或暂缓，连同你的原话一起记下。没有这一步，规则不会变。 |
+
+### 流程和成本
+
+阈值、轮次上限、每日上限、自动 review 开或关、review 级别（`--level`）和收口的起点（`--base`），每一项都是
+`.house-rules.json` 里的一个键或一个参数：见[成本控制](#成本控制)和[带默认值的配置表](docs/LEDGER.md#config-house-rulesjson)。
 
 ## 成本控制
 
