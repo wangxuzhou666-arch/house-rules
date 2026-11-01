@@ -319,7 +319,7 @@ To give Claude Code's built-in `/code-review` the rules by hand instead of `init
 @CODING-STYLE.digest.md
 ```
 
-Tests: `python3 -m unittest discover -s tests` (over 2,000 tests). Mutation self-test (applies one deliberate bug at a time to a temp copy and checks the suite goes red; `--full` lists every test that caught each one, `--jobs N` runs N at once): `python3 tests/mutation_check.py [--full] [--jobs N]`. Over 1,500 mutants are defined, and a full run can take hours.
+Tests: `python3 -m unittest discover -s tests` (over 2,000 tests). Mutation self-test (applies one deliberate bug at a time to a temp copy and checks the suite goes red; `--full` lists every test that caught each one, `--jobs N` runs N at once): `python3 tests/mutation_check.py [--full] [--jobs N]`. Over 1,500 mutants are defined, and a full run can take more than a day.
 
 ## Prior art, and the name
 

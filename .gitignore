@@ -7,3 +7,6 @@ __pycache__/
 .house-rules-label-batch.json
 .house-rules/
 samples/generalization/recordings/**/*.stderr.txt
+
+# A gate's skips file, when the config names it this way (`skips_file`); house-rules only reads it, and it lists finding ids
+.gate-skips.jsonl

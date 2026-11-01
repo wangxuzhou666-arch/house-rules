@@ -91,7 +91,7 @@ Review 要花钱，也要花注意力，所以默认值都很小，且都是配�
 
 - **发生了什么。** 在第二个仓库里，`init` 把它的 pre-commit 检查追加到了已有 hook 的 `exit 0` 之后：这是死代码，却被报告为成功，重跑时还显示「already ok」。
 - **为什么。** 「从未触发」和「没有可抓的东西」看起来一模一样。
-- **防线。** 这个代码块放在 shebang 的正下方。安装之后，`init` 用 `HOUSE_RULES_HOOK_PROBE=1` 把每个 hook 各运行一次；这个块必须在你的任何代码运行之前就作出应答，否则这一步失败（没有跳过开关）。每个 gate 还需要一次变异检查（R.7，[第 4 节](#4-规则何时升级为机械-gate)）：`tests/mutation_check.py` 每次植入一个刻意的 bug，并要求测试套件变红。它定义了 1500 多个变异。最近一次完整运行在 2026-10-28，当时存在的 328 个全部抓到了（[ACCEPTANCE.md](ACCEPTANCE.md)）；此后新增的每个变异都做过定向运行，不是完整运行，首次发布前计划再做一次完整运行。这检验的是工具自己的代码，不是这个循环的效果。（[ONBOARDING.md](ONBOARDING.md#where-the-block-goes-and-the-live-check)）
+- **防线。** 这个代码块放在 shebang 的正下方。安装之后，`init` 用 `HOUSE_RULES_HOOK_PROBE=1` 把每个 hook 各运行一次；这个块必须在你的任何代码运行之前就作出应答，否则这一步失败（没有跳过开关）。每个 gate 还需要一次变异检查（R.7，[第 4 节](#4-规则何时升级为机械-gate)）：`tests/mutation_check.py` 每次植入一个刻意的 bug，并要求测试套件变红。它定义了 1500 多个变异。最近一次完整运行在 2026-10-28，当时存在的 328 个全部抓到了；此后新增的每个变异都在加入时做过定向运行。首次发布前启动过一次全部变异的完整运行，后来停掉了，因为在一台 8 核笔记本上预计要跑约 40 小时（[ACCEPTANCE.md](ACCEPTANCE.md#v1-checks-2026-11-01)）。这检验的是工具自己的代码，不是这个循环的效果。（[ONBOARDING.md](ONBOARDING.md#where-the-block-goes-and-the-live-check)）
 
 ### 只看 precision 会偏向沉默
 

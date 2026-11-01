@@ -287,7 +287,7 @@ bin/house-rules auto {note|stop}                                               #
 @CODING-STYLE.digest.md
 ```
 
-测试：`python3 -m unittest discover -s tests`（2000 多个测试）。变异自测（每次对一份临时副本植入一个刻意的 bug，检查测试套件是否变红；`--full` 会列出抓到每个变异的全部测试，`--jobs N` 同时运行 N 个）：`python3 tests/mutation_check.py [--full] [--jobs N]`。已定义 1500 多个变异，完整跑一遍可能要几个小时。
+测试：`python3 -m unittest discover -s tests`（2000 多个测试）。变异自测（每次对一份临时副本植入一个刻意的 bug，检查测试套件是否变红；`--full` 会列出抓到每个变异的全部测试，`--jobs N` 同时运行 N 个）：`python3 tests/mutation_check.py [--full] [--jobs N]`。已定义 1500 多个变异，完整跑一遍可能要一天以上。
 
 ## 相关工作与名字
 

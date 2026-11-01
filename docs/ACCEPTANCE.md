@@ -1,9 +1,60 @@
-# Acceptance record — 2026-10-28
+# Acceptance records
 
-The following separates deterministic checks, actual model review and actual human
-decisions. It is an engineering acceptance record, not a quality benchmark.
+These records separate deterministic checks, actual model review and actual human
+decisions. They are engineering acceptance records, not a quality benchmark.
 
-## The rule feedback loop
+## v1 checks (2026-11-01)
+
+Run on the revision prepared for the first public release. The record of 2026-10-28
+follows unchanged.
+
+| Check | Result |
+|---|---|
+| Unit and integration suite | 2,097 tests passed |
+| Offline acceptance script ([Clean installation](#clean-installation)) | passed |
+| Mutation definitions | 1,533 defined; each matches exactly one place in its file |
+| Full mutation run | not completed for this release (below) |
+| `claude plugin validate` | passes with two warnings; `--strict` fails on one of them (below) |
+| Generalization check | three rounds recorded; the replay is offline and reproduces the committed results |
+| Automatic wrap-up | exercised live twice: headless with a stand-in reviewer, and in an editor session with the real reviewer (below) |
+| Remote marketplace install | not checked yet; it needs the first push |
+
+**Mutation.** The last complete run is the one of 2026-10-28 below: 328 of 328
+caught. Mutants were added in groups with the code they guard, and each group was
+run against the suite when it was added: a targeted run, not a full one. A full run
+of all 1,533 was started for this release with eight workers and stopped after about
+9.5 hours, near the 350th mutant; at that rate the whole run would have taken about
+40 hours on the 8-core laptop it ran on. The runner prints its results only when it
+finishes, so the stopped run left no result, and none is claimed here.
+
+**Plugin validation.** `claude plugin validate .` (Claude Code 2.1.316) passes with
+two warnings. The first says that `CLAUDE.md` at the plugin root is not loaded as
+project context. That file is not meant as plugin context: it is this repository's
+own import of its digest, so that reviews of this repository use its rules.
+`--strict` turns this warning into an error, so strict validation fails. The second,
+a missing icon, is a plugin-directory check that does not change the result.
+
+**Generalization check.** [samples/generalization](../samples/generalization/README.md)
+holds 7 cases recorded in three rounds, 114 reviewer calls with Claude Code 2.1.284:
+round 1 PASS 1 / FAIL 6, round 2 PASS 0 / FAIL 6, round 3 PASS 1 / FAIL 5. The rule
+wording was then restored to round 1's. Replaying the recordings costs nothing, and a
+test pins the round-1 scores. What the results mean is in
+[METHOD.md](METHOD.md#does-a-rule-generalize).
+
+**Automatic wrap-up, live.** These are the author's observations of 2026-10-30 and
+2026-10-31, made under the project's earlier name; the sessions are not published.
+In a headless `claude -p` session (Claude Code 2.1.312) with the plugin loaded through
+`--plugin-dir` and a stand-in reviewer, Claude committed over 200 lines into a linked
+worktree with `git -C`. The Stop hook continued the turn, Claude invoked the wrap-up
+skill in automatic mode, the review ran in the background, and the ledger gained one
+review run. In an editor session with the real built-in `/code-review`, commits
+triggered three automatic wrap-ups in turn, the three review rounds of one branch
+(9, 8 and 6 findings). No review started another, and each left one review run in
+the ledger.
+
+## v0 record (2026-10-28)
+
+### The rule feedback loop
 
 An isolated synthetic repository began with ERR.1 and reviewer guidance. Native
 review identified swallowed parsing errors and delete-before-write loss of usable
@@ -39,7 +90,7 @@ fingerprint). Published examples include the later correction, so do not describ
 exact current bytes as the ones reviewed in that run. Once published, the transfer pair is a regression sample,
 not a hidden test set. No accuracy percentage follows from these few observations.
 
-## Clean installation
+### Clean installation
 
 The offline acceptance script was run from a new output directory. It copied the
 distribution to a separate location and created new git repositories. It checked:
@@ -77,7 +128,7 @@ is not: this working revision has not been pushed. The actual native-review path
 tested here is Claude Code; other hosts' import paths are supported but their native
 UI integrations have not been exercised by this acceptance.
 
-## Remaining scope
+### Remaining scope
 
 Final local checks: all 328 mutation definitions were executed and caught. The
 818-test unit/integration suite passed before mutation and again after restoring

@@ -78,7 +78,7 @@ The unit tests are the everyday check. Run them before every PR.
 The mutation self-test applies one deliberate bug at a time to a temporary copy of the
 repo (your checkout is never touched) and fails if the suite stays green. **It has no
 `--help` and does no argument parsing: any invocation starts a full run, and a full run
-(hundreds of mutants, each running the suite) can take hours.** `--jobs N` runs N mutants
+(over 1,500 mutants, each running the suite) can take more than a day.** `--jobs N` runs N mutants
 at once; `--full` runs the whole suite per mutant and lists every test that caught it. Run it when
 you added or changed a gate, a parser or a check, not for a docs or typo change. It
 first checks that every `Mutant` still matches exactly one place in its file and stops
