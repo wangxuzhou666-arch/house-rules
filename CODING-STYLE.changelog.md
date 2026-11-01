@@ -350,3 +350,52 @@ Why: in the first 24 runs of the generalization check (`samples/generalization/`
 The Labeling rewording recorded in the "Labeling note — 2026-10-31" above is reverted in the generator (`house_rules/digest.py`): the compiled Labeling section is again the one used before that note, byte for byte. Like the note it reverts, this changes no clause and has no revision number.
 
 Why: in round 2 of the generalization check (`samples/generalization/`), recorded with the reworded section, 17 of 18 `with_rule` runs carried no `category` on any finding, against 7 of 21 in round 1 with the earlier section. Revision 4 above shortened the REL.2 digest line first so that the restored section fits the byte budget; the digest is 4092 of 4096 bytes. Numbering still continues from the highest Revision heading, so the next batch is Revision 5.
+
+## Revision 5 — 2026-10-31 (batch e74102c6ba722cd1bf3d83e8ad2a9ac6be6271cf6359216dc17e85ec4f55768f)
+
+### rewrite REL.1
+
+- Before:
+  ```markdown
+  1. **[REL.1]** When replacing a usable artifact, preserve its only usable copy until the replacement is prepared and validated; a failed replacement must leave or restore a usable state. (should-fix) <!-- digest: Exempt: a cache or build output rebuilt on demand. Otherwise keep usable state until replacement is ready and validated; retain or restore it on failure -->
+     This applies to installed tools, configuration and deployment artifacts with existing usable state. A cache or build output rebuilt on demand is exempt, however many entries it holds. Choose a replacement and recovery strategy appropriate to the artifact; this rule does not assume a single rename makes a multi-file operation atomic.
+     **Why added (proposal C, accepted 2026-10-28):** Reporting a copy failure does not preserve the previous working installation. Existing error-handling clauses do not state the required preservation of usable state.
+     **Finding source:** `review-ratchet:l1:r1:r1-4`.
+     **Examples:** Violates: deleting the old installation before copying its replacement, then losing both on a copy failure. Complies: preparing and validating the replacement before switching, with the old state retained or recoverable if the switch fails.
+  ```
+- After:
+  ```markdown
+  1. **[REL.1]** When replacing a usable artifact, preserve its only usable copy until the replacement is prepared and validated; a failed replacement must leave or restore a usable state. (should-fix) <!-- digest: Keep usable state until replacement is ready and validated; retain or restore it on failure; disposable rebuildable temporary artifacts are exempt -->
+     This applies to installed tools, configuration and deployment artifacts with existing usable state. Disposable temporary artifacts that can be discarded and rebuilt are exempt. Choose a replacement and recovery strategy appropriate to the artifact; this rule does not assume a single rename makes a multi-file operation atomic.
+     **Why added (proposal C, accepted 2026-10-28):** Reporting a copy failure does not preserve the previous working installation. Existing error-handling clauses do not state the required preservation of usable state.
+     **Finding source:** `review-ratchet:l1:r1:r1-4`.
+     **Examples:** Violates: deleting the old installation before copying its replacement, then losing both on a copy failure. Complies: preparing and validating the replacement before switching, with the old state retained or recoverable if the switch fails.
+  ```
+- Why: Round 3 (digest differing from round 1 only in these lines) showed no improvement: exempt controls labeled as often as in round 1 (rel-1 3/3, rel-1b 2/3); restore the round-1 wording.
+- Evidence: `house-rules:l2:g1-rel1-w1:g1-rel1-w1-2` — `samples/generalization/cases/rel-1/code/preview_cache.py:23` — rebuild() removes the whole cache before re-rendering anything, so a render failure leaves the cache empty or partial.
+- Evidence: `house-rules:l2:g1-rel1-w2:g1-rel1-w2-2` — `samples/generalization/cases/rel-1/code/preview_cache.py:25` — rebuild() deletes the whole cache before re-rendering, so any render error leaves the cache partially or fully empty and the previous usable previews are lost (REL.1).
+- Evidence: `house-rules:l2:g1-rel1-w3:g1-rel1-w3-2` — `samples/generalization/cases/rel-1/code/preview_cache.py:24` — rebuild() deletes the whole cache directory before re-rendering anything, so a mid-rebuild failure loses every cached preview.
+- Decision: accept by Colar — "回滚到第一轮措辞 (Recommended)"
+
+### rewrite REL.2
+
+- Before:
+  ```markdown
+  2. **[REL.2]** Changes to the generation of persistent IDs used for deduplication, linking or closing records require compatible reads or a migration, with verification that old records still identify the same objects. (should-fix) <!-- digest: Exempt: a new label or format over the same stored key. Otherwise a stored-ID change needs compatible reads or migration and old-identity checks -->
+     A new label or display format over the same stored key and fields is exempt.
+     **Why added (proposal D, accepted 2026-10-28):** An ID-format change can create duplicate records and break existing links even when both formats look valid. This is a persistence contract, distinct from naming style and from PRJ.1's distinction between replay and new execution.
+     **Finding source:** `review-ratchet:l1:r1:r1-5`.
+     **Examples:** Violates: replacing stored `r1-001` with `r1-1` so replay inserts a second record. Complies: compatible lookup or a migration that preserves the object's identity and references, or changing only its displayed label.
+  ```
+- After:
+  ```markdown
+  2. **[REL.2]** Changes to the generation of persistent IDs used for deduplication, linking or closing records require compatible reads or a migration, with verification that old records still identify the same objects. (should-fix) <!-- digest: Persistent ID changes need compatible reads or migration and old-identity checks; display-only changes preserving stored identity are exempt -->
+     A display-format change that does not change persistent identity is exempt.
+     **Why added (proposal D, accepted 2026-10-28):** An ID-format change can create duplicate records and break existing links even when both formats look valid. This is a persistence contract, distinct from naming style and from PRJ.1's distinction between replay and new execution.
+     **Finding source:** `review-ratchet:l1:r1:r1-5`.
+     **Examples:** Violates: replacing stored `r1-001` with `r1-1` so replay inserts a second record. Complies: compatible lookup or a migration that preserves the object's identity and references, or changing only its displayed label.
+  ```
+- Why: Round 3 (digest differing from round 1 only in these lines) showed no clear gain: exempt controls labeled in 1 of 6 runs vs 2 of 6 in round 1, violations in 1 of 6 vs 3 of 6; restore the round-1 wording.
+- Evidence: `house-rules:l2:g1-rel2-w1:g1-rel2-w1-6` — `samples/generalization/cases/rel-2/code/reading_list.py:20` — Bumping LABEL_STYLE to 2 leaves old rows displaying in a different format from new rows, so one feed mixes `host-0001` and `host#2` labels.
+- Evidence: `house-rules:l2:g1-rel2-w2:g1-rel2-w2-7` — `samples/generalization/cases/rel-2/code/reading_list.py:4` — `LABEL_STYLE` is bumped to 2 but old rows are not migrated, and the label text changes from zero-padded `host-0001` to `host#1`.
+- Decision: accept by Colar — "回滚到第一轮措辞 (Recommended)"
