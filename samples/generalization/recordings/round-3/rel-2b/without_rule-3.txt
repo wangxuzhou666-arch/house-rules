@@ -1,0 +1,40 @@
+```json
+[
+  {
+    "file": "code/payment_events.py",
+    "line": 6,
+    "summary": "The `event_key` format changed from `provider:event_id` to `account/provider/event_id` with no migration of the existing `events` table.",
+    "failure_scenario": "A persisted ledger already holds rows keyed like `stripe:evt_1`. After this change, a webhook retry of `evt_1` builds the key `acct/stripe/evt_1`, which does not match, so `INSERT OR IGNORE` inserts it again and `record_charge` returns True. `net_cents` then double-counts the charge. `record_refund` for a charge recorded before the change builds the new key, matches 0 rows, and returns False, so the refund is never applied. Idempotency breaks for all historical data."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 12,
+    "summary": "`invoice_label` changes the label of every existing invoice from `INV-000042` to `2026/0042`, and the number is still a global counter, not per-year.",
+    "failure_scenario": "Invoices already sent or reconciled under `INV-000042` now show as `2026/0042` in `outstanding()` and in later lookups, so external references stop matching. `issue()` uses `MAX(number)+1` across all years, so the first 2027 invoice is labelled `2027/0457` instead of `2027/0001`, which looks like a per-year sequence but is not. After 9999 invoices `:04d` overflows to 5 digits, so labels no longer sort or align."
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 6,
+    "summary": "`event_key` strips and lowercases `provider` and `event_id` but passes `account` through raw, and uses `/` as a delimiter without escaping.",
+    "failure_scenario": "`'acme '` and `'acme'` produce different keys, so the same event is recorded twice (a duplicate charge). A `'/'` inside a field makes distinct tuples collide, for example account `'a/b'` with provider `'c'` against account `'a'` with provider `'b/c'`. That either silently drops a legitimate charge as a duplicate or lets a refund hit the wrong row."
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 19,
+    "summary": "`account` is inserted before `provider` as a positional `str` in `record_charge`, `record_refund` and `event_key`, which silently breaks any caller still passing the old argument shape.",
+    "failure_scenario": "An existing caller written for the old shape `record_charge(conn, 'stripe', 'evt_1', 500)` now binds `account='stripe'`, `provider='evt_1'`, `event_id=500`, `cents` missing. This usually raises TypeError. An old refund call `record_refund(conn, 'stripe', 'ch_1')` now raises TypeError because `charge_id` is missing. A caller that passes the new arguments in the wrong order (provider before account) produces a valid but wrong key with no error, so refunds never match. Keyword-only parameters or a typed key object would prevent this."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 49,
+    "summary": "`outstanding()` now includes the raw `order_ref` in each line, changing the output format and putting free-form text into a space-delimited string.",
+    "failure_scenario": "Any consumer that parsed `'<label> <amount>'` now reads the order_ref as the amount, or fails when the order_ref contains spaces, such as `'PO 123'`. The line `2026/0007 PO 123 10.00` cannot be split unambiguously. It also exposes the internal order reference in every outstanding listing, which may be shown to customers."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 28,
+    "summary": "`issue()` computes `number` with a separate `SELECT MAX(number)+1` before the insert, and the `number` column has no UNIQUE constraint.",
+    "failure_scenario": "Two writers on the same sqlite file both read `MAX=41` and both insert number 42 for different orders. Both succeed, giving two invoices labelled `2026/0042`. The label change makes this more visible, because the label is now the only human-facing identifier and is assumed to be unique."
+  }
+]
+```

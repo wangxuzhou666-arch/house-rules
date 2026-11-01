@@ -1,0 +1,64 @@
+```json
+[
+  {
+    "file": "code/sender_index.py",
+    "line": 36,
+    "summary": "The cached index is never checked against its source. `_load` accepts any structurally valid file, so `folder_for` serves stale data forever after the routes change.",
+    "failure_scenario": "The index is built once. `apply_routes` then adds, removes or changes a domain, for example `shop.com` moving from `inbox` to `orders`. `_load` still sees a well-formed file with a correct `end` count and returns the old table, so mail keeps going to the old folder. Nothing calls `rebuild` after an update, and nothing compares mtime or a source version. A transient empty `read_routes()` result is also cached as `end\\t0`, so every address goes to `inbox` until the file is deleted."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 20,
+    "summary": "`apply_routes` opens the target with `'w'` (truncating it) and validates each route inside the write loop. One invalid route leaves a truncated, partially written routes file.",
+    "failure_scenario": "The live routes file has 50 entries. `apply_routes` is called with 30 valid routes followed by one bad route, such as a domain without a dot. The file is already truncated and holds 30 lines when `RouteError` is raised, so 20 existing routes are lost. A crash or a concurrent `load_routes` during the write sees a partial file with no marker. Validate everything first, then write a temp file and `os.replace` it."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 13,
+    "summary": "Validation misses characters that break the line-based TSV format. The domain is not checked for `\\t` or `\\n`, and the folder is not checked for `\\r`, `\\x0b`, `\\x0c`, `\\u2028` or `\\x85`. `load_routes` parses with `splitlines()` and `partition('\\t')`.",
+    "failure_scenario": "A route with `domain='a\\tb.com'` passes (it has a dot and no space) and is written as `a\\tb.com\\tfolder`. `load_routes` reads it back as domain `a` with folder `b.com\\tfolder`. A folder containing `\\r` or `\\u2028` is split into two lines on read, and the remainder is dropped or mis-parsed. The route is silently lost or sends mail to the wrong folder."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 14,
+    "summary": "`rebuild` writes domains and folders with no validation, so a folder containing a tab, newline or other `splitlines` separator corrupts the index. Every later `folder_for` call then fails `_load` and rewrites the file.",
+    "failure_scenario": "`read_routes` yields `('x.com', 'a\\nb')`. The file gets an extra line, so the `end` count no longer equals `len(lines) - 1`. Every `folder_for` call sees an invalid index and rebuilds. Each lookup does a full source read and a file rewrite, which defeats the cache. Concurrent callers also race on the same file. `mail_routes.render_route` already has these checks, but this path does not reuse them."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 37,
+    "summary": "`folder_for` depends on `rebuild` succeeding at the filesystem level, even though the in-memory table is already available. Any `OSError` from `mkdir` or `open('w')` propagates out of a read-only lookup.",
+    "failure_scenario": "The index directory is read-only, the disk is full, or permissions are wrong. `_load` returns None, `rebuild` computes the routes and then raises `PermissionError` while writing. `folder_for` crashes instead of returning the folder from the data it just read. A cache that cannot be written should degrade explicitly (log it, use the in-memory table), not fail the lookup (P0F.2)."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 13,
+    "summary": "The index is rewritten in place with `open('w')`, which is not atomic. Concurrent readers and writers can see or produce torn files, and the trailer count does not catch every torn case.",
+    "failure_scenario": "Process A rebuilds while process B's `_load` fails and B also rebuilds. Both open with truncate and write at offset 0. If A's content is longer, the file ends up with B's prefix and A's tail. That can pass the `end` and count check with mixed or wrong rows. Write to a temp file and `os.replace` it."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 11,
+    "summary": "`SenderIndex` re-implements the routes TSV format and `folder_for` domain extraction from `mail_routes.py` (`render_route`, `load_routes`, `folder_for`) instead of reusing them. The two copies can drift.",
+    "failure_scenario": "Both files hand-roll `f\"{domain}\\t{folder}\\n\"`, `.partition('\\t')` and `address.rsplit('@', 1)[-1].strip().lower()`. A fix to validation or address parsing in one file, such as handling `Name <a@b.com>` or the control-character checks above, is missed in the other. The two lookups then route the same address differently. The `read_routes` callable also has only this one use, with no second real implementation (P2.1)."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 10,
+    "summary": "`str(route.get('folder', ''))` turns a missing or None folder into the literal string `'None'`, which passes `if not folder`. A non-dict route raises `AttributeError` instead of `RouteError`.",
+    "failure_scenario": "A route `{'domain': 'a.com', 'folder': None}` (for example from JSON null) is written as `a.com\\tNone`, so mail for a.com is silently filed in a folder named 'None'. `apply_routes(path, ['a.com'])` raises `AttributeError` from `route.get`, not the `RouteError` that callers expect."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 32,
+    "summary": "`load_routes` silently drops malformed lines (no tab or empty folder) with no log. Duplicate domains in `apply_routes` input silently overwrite each other, last one wins.",
+    "failure_scenario": "A hand-edited or damaged routes file with a line like `shop.com` (no tab) or `shop.com\\t` is skipped without a trace, and `folder_for` returns `'inbox'` with no explanation. Two routes for `shop.com` pointing to different folders are both written, and the later one silently wins. The loader also does not lowercase domains, so a hand-edited `Shop.com` can never match, because `folder_for` lowercases the lookup key. This breaks P0F.2 (degrade explicitly) and REL.3 (a wrong-shaped file should take a named error or fallback)."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 37,
+    "summary": "`folder_for` re-reads and re-parses the whole routes file on every lookup. `load_routes` returns a dict while `SenderIndex` expects `Iterable[tuple]`, so the two modules do not connect without an adapter.",
+    "failure_scenario": "Classifying a batch of N messages does N full file reads and parses, which is O(N × routes). The `SenderIndex.read_routes` callback cannot be `lambda: load_routes(p)` as written; it needs `.items()`. Nothing in the diff wires `apply_routes` to invalidate or rebuild the index, which is why the staleness bug above exists."
+  }
+]
+```

@@ -1,0 +1,64 @@
+```json
+[
+  {
+    "file": "code/access_tail.py",
+    "line": 28,
+    "summary": "The code calls `log_path.stat()` by path and then opens the path separately. The inode that gets saved can belong to a different file than the one that was read.",
+    "failure_scenario": "The log is rotated between `stat()` (line 28) and `open()` (line 32). `start` was chosen from the old inode A's saved offset X. `open` now returns the new file B, so the first X bytes of B are skipped and those lines are lost. `save_position` then stores inode A with an offset that belongs to B. The next run sees inode B != A, resets to 0, and re-reads all of B, producing duplicates. Fix: open first, then use `os.fstat(handle.fileno())` for the inode and size."
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 12,
+    "summary": "`load_position` only handles FileNotFoundError and JSONDecodeError. Other bad position files crash the reader, although `batch_log_reader.load_checkpoint` handles the same cases.",
+    "failure_scenario": "The position file holds invalid UTF-8, so `read_text` raises UnicodeDecodeError (a ValueError, not a JSONDecodeError). Or it holds valid JSON of the wrong shape: `null`, `[]`, `{}`, or `{\"offset\": \"5\"}` or `-1`. Then `position[\"offset\"]` raises TypeError or KeyError, `start > info.st_size` raises TypeError, and `handle.seek(-1)` raises OSError. The tailer fails on every run until someone deletes the file by hand. The file is not validated at the point where it is read, and that is the boundary where it should be (P0F.1)."
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 40,
+    "summary": "The checkpoint is a bare line count with no file identity check. A rotated or replaced log that already has at least `done` lines silently skips its new lines.",
+    "failure_scenario": "The checkpoint says 1000 lines were done. The log is rotated and the new file reaches 1500 lines before the next poll. `done > len(rows)` is false, so the first 1000 lines of the new file are never returned. The same happens when the log is truncated and regrown past the old count. `access_tail` stores an inode for exactly this reason, and this module has no equivalent."
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 30,
+    "summary": "Rotation with copytruncate (same inode, file truncated and regrown) is detected only when the file is currently smaller than the saved offset.",
+    "failure_scenario": "The saved offset is 10_000 and the file is truncated in place. By the next poll it has grown to 12_000 bytes, so `start > st_size` is false. Reading resumes at byte 10_000, which is mid-line in new content. The first 10_000 bytes of new data are lost and the first returned line is a fragment."
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 43,
+    "summary": "The checkpoint is saved before the caller has received or processed the lines (the same ordering is in `access_tail.py` line 36). Delivery is at-most-once.",
+    "failure_scenario": "`save_checkpoint(len(rows))` succeeds and then the caller crashes while handling the returned list, or an exception is raised during slicing or return. On restart the checkpoint is already past those lines, so they are never delivered. The checkpoint should be committed only after the caller confirms processing, or the function should return the new offset for the caller to commit. Alternatively the at-most-once behaviour should be documented."
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 37,
+    "summary": "`splitlines()` on the decoded string also splits on \\x0b, \\x0c, \\x1c-\\x1e, \\x85, \\u2028 and \\u2029. One access-log record can become several.",
+    "failure_scenario": "A request line or User-Agent contains raw U+2028, U+0085 or a form feed. The offset accounting is by `\\n` bytes, so it treats the record as one line. `splitlines()` returns two or more partial records, and the parser downstream sees malformed rows. Use `decoded.split(\"\\n\")` after trimming the trailing newline, or split on bytes first. The same type of mismatch exists in `batch_log_reader.py` line 37, where text-mode universal newlines turn a lone `\\r` into a row break and a partial last line ending in `\\r` looks complete."
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 37,
+    "summary": "`readlines()` loads the whole log into memory and reparses it from the start on every call, even though only the tail past the checkpoint is needed.",
+    "failure_scenario": "With a multi-GB access log polled every few seconds, each poll reads and allocates the full file just to return a handful of new lines. Memory and IO grow linearly with log size. Storing a byte offset (as `access_tail.py` does), seeking to it and reading only the tail makes the cost proportional to the new data."
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 16,
+    "summary": "Handlers log with `log.warning(\"...%s\", exc)`, which drops the traceback. The same pattern is at `batch_log_reader.py` lines 15, 20 and 24.",
+    "failure_scenario": "A corrupt position or checkpoint file produces only a one-line message with the exception text. There is no stack, so it is harder to see where the failure came from, for example the encoding versus the JSON parse. P0E.5 requires a call that keeps the stack trace, such as `log.warning(..., exc_info=True)` or `log.exception`. Rule: P0E.5 (blocker)."
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 18,
+    "summary": "The variable `data` is a generic name that P2.4 asks to qualify.",
+    "failure_scenario": "`data` holds the parsed checkpoint JSON. A name such as `checkpoint_json` or `parsed` says what it is. Rule: P2.4 (should-fix)."
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 29,
+    "summary": "The two modules duplicate the atomic-save routine (`save_checkpoint` and `save_position`) and both define a `read_new_lines` with the same name but different semantics. Neither writes a comment explaining the ordering constraints.",
+    "failure_scenario": "Both modules write `.part` and then `os.replace`, so a fix to one, such as adding fsync, will be missed in the other. `with_suffix(\".part\")` also makes `a.json` and `a.pos` share the temp file `a.part`. Nothing explains why the incomplete trailing line is dropped before the position is saved. Both modules would benefit from a shared helper and a comment on the ordering (P3.2)."
+  }
+]
+```

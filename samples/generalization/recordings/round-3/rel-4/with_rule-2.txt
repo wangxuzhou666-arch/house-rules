@@ -1,0 +1,76 @@
+```json
+[
+  {
+    "file": "code/sms_codes.py",
+    "line": 27,
+    "summary": "The per-phone limit is checked before the SMS is sent but incremented only after `gateway.deliver` succeeds. Concurrent calls can all pass the check, and failed attempts are never counted.",
+    "failure_scenario": "Two threads call send_code('+15551234') together. Both read used=2 (limit 3) and both pass the check. Both deliver an SMS, and both write sent[phone]=3, so 4 codes go out against a limit of 3. Separately, if the gateway raises or times out (attempts that may still have been billed or delivered), `self.sent` is never incremented. An attacker or a retry loop can then trigger unlimited gateway calls (SMS pumping cost). The mail module avoids both problems by reserving under a lock before sending. This is the REL.4 pattern: count each attempt as it starts, not at the end on success only. A lock around check-and-increment (or reserving first) fixes it.",
+    "category": "rel-4",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 19,
+    "summary": "`_used` mutates shared state (`self.day`, `self.sent.clear()`) with no lock, and `send_code` does an unsynchronized read-modify-write on `self.sent`.",
+    "failure_scenario": "At midnight one thread clears `sent` inside `_used`. Another thread, which read `used` earlier, then writes `self.sent[phone] = used + 1` from a stale value. The counter is corrupted and the daily reset is partly lost. In the sibling `mail_codes.py`, `_reserve` does the same logic under `self.lock`. This version is unsafe in any threaded server.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 32,
+    "summary": "`send_code` returns the plaintext verification code to its caller, and neither module stores, hashes or expires the code or has a verify path.",
+    "failure_scenario": "A request handler that returns `send_code(...)`'s result in the HTTP response, or logs it, hands the OTP to whoever requested it. That defeats ownership verification of the address or phone. The same applies to `sms_codes.py` line 29. Because nothing is stored here, the caller must persist the code itself, with no expiry or attempt-limit guidance in this API. Return None, or return an opaque token or hash, and keep the code server-side with a TTL.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 25,
+    "summary": "The rate-limit slot is consumed in `_reserve` before `transport.send`, and it is never released when the send fails.",
+    "failure_scenario": "The SMTP transport throws three times in a row (outage, timeout). The user's address now hits TooManyRequests for the rest of the day without receiving a single code. Reserving first is right for the cap (REL.4), but the failure path neither logs the lost slot nor refunds it where nothing was sent. Decide this explicitly: refund on a definite not-sent failure, or document that a failed send is intentionally counted.",
+    "category": "rel-4",
+    "severity": "nice"
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 24,
+    "summary": "The limiter keys on the raw address string with no normalization, so trivial variants bypass the per-address limit.",
+    "failure_scenario": "'User@x.com', 'user@x.com' and ' user@x.com' (or 'user+1@x.com' for plus-addressing) each get their own counter of 3. A caller gets many codes sent to one mailbox, which allows mail-bombing. In `sms_codes.py` the same applies to phone formats ('+1 555 1234', '15551234', '+15551234'), which are three separate keys for one number. There is also no global or per-IP cap. Normalize the key (lowercase and strip, E.164 for phones) at the boundary.",
+    "category": "p0f-1",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 6,
+    "summary": "`TooManyRequests` is defined separately in both modules, and the two modules are near-copies of the same rate-limit logic.",
+    "failure_scenario": "A caller imports `TooManyRequests` from `mail_codes` and handles both channels. An exception raised from `sms_codes.CodeSender` is a different class and is not caught, so it becomes a 500 instead of a 429. The day-rollover and limit logic is also duplicated, and the two copies have already diverged (locked vs. unlocked, reserve-first vs. count-after-success). A shared limiter and a shared exception would remove the divergence.",
+    "category": "p2-2",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 21,
+    "summary": "`self.today()` is called twice (check, then assign), and `date.today` is naive local time.",
+    "failure_scenario": "If midnight passes between the comparison and the assignment, `self.day` is set to a date that was never compared. With local-time dates, DST or timezone changes and a server in a different zone from users make the 'daily' window reset at arbitrary moments. `sms_codes.py` line 20 has the same double call. Call `today()` once into a local variable, and consider UTC or a rolling window.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 32,
+    "summary": "`address` is passed to `transport.send` with no validation, and no error handling or logging records a failed send.",
+    "failure_scenario": "An address containing CRLF ('a@x.com\\r\\nBcc: victim@y.com') reaches the transport. A transport that builds raw headers would allow header injection and use of the service as a spam relay. Validating the address format at the boundary (P0F.1) prevents that.",
+    "category": "p0f-1",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 17,
+    "summary": "The `sent` dict is cleared only when a request arrives on a new day, and it grows with every distinct address.",
+    "failure_scenario": "A flood of unique addresses adds one entry each. Memory grows unbounded until the next day's first call clears it, and nothing caps the total number of keys. Combined with the lack of normalization, this is a cheap memory-exhaustion vector.",
+    "category": "unmapped",
+    "severity": "nice"
+  }
+]
+```

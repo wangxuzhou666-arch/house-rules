@@ -1,0 +1,84 @@
+```json
+[
+  {
+    "file": "code/site_publisher.py",
+    "line": 8,
+    "summary": "publish() deletes the live directory before any page is rendered, and it writes into the live directory in place. A failing render() therefore destroys the site and leaves it half-written.",
+    "failure_scenario": "The live site has 20 pages. publish() runs rmtree(live_dir), then writes pages in order. Page 7's render() raises. The exception propagates and the live dir holds 6 new pages, so the other 14 are gone and readers get 404 or FileNotFoundError until someone reruns a successful publish. Concurrent readers also see an empty or partial directory while the loop runs. Fix: render into a sibling temp dir, then swap it in with an atomic rename, and remove the old dir only after the swap succeeds.",
+    "category": "unmapped",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 12,
+    "summary": "A page name from the mapping is joined onto live_dir without checking that it stays inside live_dir. publish() and read_page() both do this. A name like '../x' or '/abs/path' escapes the directory.",
+    "failure_scenario": "pages = {'../../etc/cron.d/job': ...} makes target = live_dir/'../../etc/cron.d/job'. mkdir(parents=True) and write_text then write outside live_dir. An absolute name such as '/home/u/.ssh/authorized_keys' replaces live_dir entirely, because Path('/a') / '/b' is '/b'. read_page(live_dir, '../secret') reads arbitrary files. Fix: resolve the target and assert it is relative to live_dir.",
+    "category": "unmapped",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 25,
+    "summary": "rebuild() rmtree's the whole cache before re-rendering. A render failure partway leaves the cache empty or partial, and concurrent get() calls hit a vanishing directory.",
+    "failure_scenario": "The cache holds 500 previews and rebuild(names) is called. rmtree runs, then render('p42') raises. The 41 earlier previews exist, the other 459 are lost, and the exception propagates with no rollback. A concurrent get('p7') that passed exists() before rmtree now fails in read_bytes with FileNotFoundError. Fix: build into a temp dir and swap it in atomically, or invalidate and re-render per entry.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 18,
+    "summary": "The .part temp path is deterministic per name, so two concurrent get() calls for the same uncached name race on one file. The check-then-act around exists() is also not atomic.",
+    "failure_scenario": "Threads A and B both call get('x'), and exists() is False for both. Both write x.part. A calls part.replace(path) and succeeds. B then calls part.replace(path), but x.part is already gone, so B raises FileNotFoundError. Alternatively B truncates and rewrites x.part while A is renaming it, which can publish a partial PNG under the final name. Fix: use a unique temp name (tempfile.NamedTemporaryFile in root, or a pid/uuid suffix), and handle the lost race.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 12,
+    "summary": "The cache key becomes a file path with no validation. Names with a path separator or '..' escape the root, and names containing '/' break because mkdir only creates root.",
+    "failure_scenario": "get('../../tmp/evil') writes outside the cache root, and get('/abs') replaces the root with an absolute path. get('team/logo') calls root.mkdir but not the parent 'team', so write_bytes raises FileNotFoundError. cached_names() uses a non-recursive glob and would never list it anyway. Fix: validate name at the boundary against a safe pattern.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 13,
+    "summary": "Page names that conflict as file and directory (e.g. 'a' and 'a/b') are not detected. The failure comes after rmtree has already destroyed the old site.",
+    "failure_scenario": "pages = {'docs': ..., 'docs/intro.html': ...}. 'docs' is written as a file, then target.parent.mkdir for 'docs/intro.html' raises FileExistsError or NotADirectoryError. This happens after the old site was deleted, so the site is left broken. Validate the key set up front, or render into a temp dir.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 28,
+    "summary": "rebuild() returns len(names), which counts duplicates in the input. It is not the number of entries actually rebuilt.",
+    "failure_scenario": "rebuild(['a', 'a', 'b']) renders 'a' once, because the second get() is a cache hit. It returns 3 while only 2 files exist, so callers that report or assert the count are wrong.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 24,
+    "summary": "The 'wipe the directory, then repopulate' logic is copy-pasted from site_publisher.publish with the same unsafe ordering. Neither module has a shared safe-swap helper.",
+    "failure_scenario": "The destroy-before-build bug exists in two places, so any fix must be made twice and will drift. A single helper like replace_dir_atomically(target, build_fn) would serve both.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 16,
+    "summary": "The cache has no invalidation. An entry that exists is served forever, whatever the source content is now.",
+    "failure_scenario": "A page's source changes, but get('home') keeps returning the old PNG because exists() is True. Only a full rebuild() with every name refreshes it, and that opens the destructive window described above.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 24,
+    "summary": "page_names returns str(relative_to) of each file, which uses OS-specific separators. These do not round-trip with the '/'-style keys given to publish on Windows.",
+    "failure_scenario": "publish(..., {'a/b.html': ...}) followed by page_names() returns 'a\\b.html' on Windows. Comparing against the input keys fails. Use .as_posix().",
+    "category": "unmapped",
+    "severity": "nice"
+  }
+]
+```

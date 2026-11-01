@@ -1,0 +1,64 @@
+```json
+[
+  {
+    "file": "code/site_publisher.py",
+    "line": 8,
+    "summary": "publish() deletes the live site with rmtree before any page is rendered, so a render failure leaves the site gone or half-written.",
+    "failure_scenario": "live_dir holds a working site. publish() runs with pages={'index.html': ok, 'about.html': raises}. The old site is already deleted and only index.html is written before the exception escapes, so live_dir serves a partial site. Readers also see an empty or missing directory for the whole duration of the render loop. Fix: render into a sibling temp dir, then swap it in with os.replace or a rename, and delete the old tree only after the new one is complete. This is P0F.2 territory (an unnamed, unlogged degradation) and a REL-style atomicity problem."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 25,
+    "summary": "rebuild() wipes the whole cache before re-rendering, so a render failure partway through destroys the previously valid cache and leaves it partial.",
+    "failure_scenario": "The cache holds 100 valid PNGs. rebuild(names) runs and render raises on the 40th name. rmtree has already removed all 100 entries, so only 39 are left and the exception propagates. Concurrent get() calls during the rebuild also hit cold misses and re-render. Fix: rebuild into a temp dir and swap it in on success. Alternatively, overwrite entries individually and prune stale ones afterwards."
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 12,
+    "summary": "The page name is joined onto live_dir without validation, so '..' segments or an absolute path write outside live_dir.",
+    "failure_scenario": "pages={'../../etc/cron.d/x': lambda: '...'} gives target = live_dir/'../../etc/cron.d/x', and write_text writes outside the site root. An absolute name such as '/tmp/x' replaces the path entirely, because pathlib discards the left operand. read_page(live_dir, '../secret') has the same traversal when the name comes from a request. Fix: resolve the target and check it is_relative_to(live_dir), or reject absolute names and '..' parts, once at this boundary (P0F.1)."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 15,
+    "summary": "The name is used unvalidated in a file path (traversal), and a name containing '/' makes get() crash because only self.root is created.",
+    "failure_scenario": "get('../../etc/foo') reads or writes outside the cache root. get('team/logo') computes root/team/logo.png and the .part path in root/team/, but only self.root is mkdir'd, so write_bytes raises FileNotFoundError. cached_names() uses a non-recursive glob and would not list such entries anyway. Fix: validate that name is a single safe path component at the boundary, or mkdir path.parent and make cached_names recursive."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 18,
+    "summary": "The temp .part file path is the same for every caller of the same name, so concurrent get() calls race on it.",
+    "failure_scenario": "Two threads or processes call get('a') on a cold cache. Both write root/a.part. Thread 1 does replace(path) and moves the file away, then thread 2's replace(path) raises FileNotFoundError. Alternatively the two writes interleave and a corrupt PNG is promoted. Also, with_suffix('.part') replaces the last suffix, so names like 'a.v1' and 'a' both map to 'a.part'-style collisions when they share a stem. Fix: use a unique temp name (tempfile.NamedTemporaryFile in the same dir, or a pid/uuid suffix) before replace."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 16,
+    "summary": "A cache hit is decided by existence alone, so entries never go stale and an interrupted cache can serve bad data.",
+    "failure_scenario": "The source asset for 'hero' changes, but get('hero') keeps returning the old PNG forever unless someone calls rebuild() and wipes everything. A zero-byte or corrupt PNG left in the directory by an earlier crash outside the .part protocol is returned as valid. There is no per-name invalidation API either, so the only way to refresh one entry is rebuild() with every name."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 28,
+    "summary": "rebuild() returns len(names) rather than the number of entries actually built, so duplicate names inflate the count and the figure is not tied to anything rendered.",
+    "failure_scenario": "rebuild(['a','a','b']) renders 'a' once (the second get is a cache hit) and 'b' once, but returns 3, so a caller logging or asserting the rebuilt count reports the wrong number. Fix: dedupe names and return the number of distinct entries rendered."
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 7,
+    "summary": "publish() and rebuild() each hand-roll a destructive 'rmtree then regenerate' with different safety levels, and publish() skips the .part+replace write that preview_cache uses.",
+    "failure_scenario": "Both modules repeat the exists/rmtree/recreate pattern, and only PreviewCache.get uses atomic writes. A fix for the atomic-swap problem has to be made twice and can drift. A shared helper such as replace_dir_atomically(target, build_fn) would remove the duplication (P2.2 once there is a third use). Also, if live_dir is a symlink, rmtree raises OSError instead of replacing it."
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 27,
+    "summary": "page_names() uses str(relative_to) and so returns OS-specific separators, which may not match the '/'-style keys given to publish().",
+    "failure_scenario": "On Windows, publish() with the key 'blog/post.html' lists back as 'blog\\post.html'. A caller comparing page_names() against the pages mapping keys, or feeding the result to read_page, sees a mismatch. Fix: use path.relative_to(live_dir).as_posix()."
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 20,
+    "summary": "The ordering constraint behind the .part-then-replace write, and the lack of cleanup if the write fails, are undocumented.",
+    "failure_scenario": "If write_bytes fails midway (disk full), a stray .part file stays behind. Nothing cleans it up, and cached_names ignores it, so it is never reclaimed. The reason for write-to-.part-then-rename (so readers never see half a PNG) is the kind of non-obvious decision P3.2 asks to comment, and a maintainer could 'simplify' it to a direct write_bytes."
+  }
+]
+```

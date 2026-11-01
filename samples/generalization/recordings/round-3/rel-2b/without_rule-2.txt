@@ -1,0 +1,60 @@
+```json
+[
+  {
+    "file": "code/payment_events.py",
+    "line": 6,
+    "summary": "The event key format changed from `provider:event_id` to `account/provider/event_id`, with no migration or fallback for rows already in the `events` table.",
+    "failure_scenario": "An existing ledger holds the key `stripe:evt_1`. After deploy, a provider retries `evt_1` and `record_charge` builds `acct/stripe/evt_1`. `INSERT OR IGNORE` finds no conflict and inserts a second row, so `net_cents` counts the charge twice. A refund for a pre-deploy charge looks up the new-format key, matches nothing, and `record_refund` returns False, so the refund is never applied and `net_cents` stays overstated. The primary-key idempotency guarantee is broken for all historical data. Fix: migrate existing keys, or also look up the legacy key.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 6,
+    "summary": "`/` is used as the delimiter, but `account` and `event_id` are free-form strings and nothing escapes it, so distinct inputs can produce the same key.",
+    "failure_scenario": "`event_key('a', 'b', 'c/d')` and `event_key('a/b', 'c', 'd')` both return `a/b/c/d`. The second charge is silently dropped by `INSERT OR IGNORE` and returns False, so the ledger undercounts. A refund can also match and mark the wrong charge as refunded. Fix: hash the tuple, or use a delimiter that is rejected or escaped in each component.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 6,
+    "summary": "Normalization is applied unevenly: `provider` is lowercased and `event_id` is stripped, but the new `account` component is used raw.",
+    "failure_scenario": "The same account arrives as 'Acme' on the charge webhook and 'acme ' or 'ACME' on the refund path. The keys differ, so `record_charge` stores duplicate rows for retried events and `record_refund` returns False without applying the refund. Fix: normalize `account` the same way as the other components, or reject malformed values at the boundary.",
+    "category": "p0f-1",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 19,
+    "summary": "A new `account` string parameter was inserted before `provider`, a second string, in `record_charge` and `record_refund`, so the signature changed in a way that can silently misbind.",
+    "failure_scenario": "Any caller still using the old call `record_charge(conn, 'stripe', 'evt_1', 500)` now binds provider='evt_1', event_id=500 and `cents` is missing. A caller with five arguments that swaps account and provider type-checks fine and writes a key that no refund will ever match, so `record_refund` returns False. Fix: make `account` keyword-only, and update or verify all callers.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 12,
+    "summary": "The invoice label format changed from `INV-000123` to `<year>/<number:04d>`. Labels already issued to customers or in other systems change for the same row, and `number` is a global counter, not a per-year one.",
+    "failure_scenario": "An invoice already sent as `INV-000123` now prints as `2026/0123` in `outstanding()` and `issue()`, so lookups or reconciliation by label no longer match. The year prefix implies numbering restarts each year, but `issue` uses `MAX(number)+1` over the whole table. Once `number` passes 9999, `:04d` no longer pads and labels become 5 digits (`2026/10000`), which breaks fixed-width or sorted assumptions. Rows whose `issued_on` year differs from a customer's expectation also get different prefixes for adjacent numbers.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 49,
+    "summary": "`outstanding()` now puts `order_ref` between the label and the amount, which changes the output format that consumers parse. `order_ref` is free-form text that may contain spaces.",
+    "failure_scenario": "A downstream consumer that splits each line on whitespace into `label amount`, or takes the last field as the amount, now reads `order_ref` as the amount, or breaks outright when `order_ref` contains spaces. Fix: return structured rows, or keep the old format and add the new field in a parseable way.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 30,
+    "summary": "The invoice number is computed with `SELECT MAX(number)+1` and inserted afterwards, with no UNIQUE constraint on `number`. Labels are now the only customer-visible identity, and they rely on `number` being unique.",
+    "failure_scenario": "Two processes or connections issue invoices for different `order_ref` values at once. Both read the same MAX, both insert number N, and two invoices get the same `<year>/<N>` label. `outstanding` then lists duplicates that look identical, and `mark_paid` cannot be reconciled by label. Fix: add `UNIQUE(number)` and allocate the number inside one `BEGIN IMMEDIATE` transaction.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  }
+]
+```

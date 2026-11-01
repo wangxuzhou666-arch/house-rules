@@ -1,0 +1,76 @@
+```json
+[
+  {
+    "file": "code/sms_codes.py",
+    "line": 28,
+    "summary": "The per-phone cap is counted only after `gateway.deliver` succeeds, so attempts that fail or time out are never counted. This breaks REL.4, which says to count each attempt as it starts. `mail_codes.py` reserves the slot before sending, so the two modules disagree.",
+    "failure_scenario": "The SMS gateway times out after handing the message to the carrier, or raises on every call. `sent[phone]` is never incremented, so an attacker can call `send_code` without limit. Each call can still bill for an SMS (SMS pumping / toll fraud), and the per-phone limit never takes effect.",
+    "category": "rel-4",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 22,
+    "summary": "`send_code` checks the count, delivers, then writes `used + 1` back with no lock. It is a check-then-act race, and the write uses a stale `used`. The mail version guards the same logic with a lock.",
+    "failure_scenario": "Five concurrent requests for the same phone all read `used == 0` and pass the check. All five deliver a code, then each writes `sent[phone] = 1`. Five SMS go out under a limit of 3, and the counter ends at 1. `_used` also calls `sent.clear()` on day rollover while other threads read or write the dict.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 1,
+    "summary": "The module is a near copy-paste of `mail_codes.py`. It has the same quota and day-rollover logic, the same code generation, and a separately defined `TooManyRequests`. The two copies have already diverged: one locks and reserves first, the other does neither.",
+    "failure_scenario": "A caller handling both channels writes `except mail_codes.TooManyRequests` and misses `sms_codes.TooManyRequests`, which is a different class. The rate-limit error escapes as a 500. Any later fix to the quota logic has to be made twice, and the SMS copy has already missed the lock and ordering fix. A shared limiter or a single exception class would remove this.",
+    "category": "p2-2",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 33,
+    "summary": "`send_code` returns the plaintext verification code to its caller, and the same happens in `sms_codes.py`. The code is not stored, hashed or given an expiry, so there is nothing to verify against.",
+    "failure_scenario": "A handler returns `send_code(...)` in its HTTP response or logs it. Anyone who can call the endpoint then reads the code and verifies an address or phone they do not own. The code has no TTL or attempt limit, so the 6-digit code can also be brute-forced once someone does store it.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 21,
+    "summary": "The rate-limit key is the raw address string, with no normalization. The same problem exists for the phone string in `sms_codes.py`.",
+    "failure_scenario": "A user, or an attacker, requests codes for `Bob@x.com`, `bob@x.com` and ` bob@x.com `, or `+1 555 0100` and `+15550100`. Each variant gets its own quota of 3, so the per-address limit is bypassed and the real inbox is flooded.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 29,
+    "summary": "The quota slot is consumed before `transport.send`. If the send raises, the slot is not rolled back and nothing is logged. The caller sees a transport error with no hint that the quota has been used.",
+    "failure_scenario": "The SMTP backend is down for a minute. Three failed attempts exhaust the daily quota for a legitimate user. For the rest of the day they get `TooManyRequests` and cannot request a code, even though no code was ever delivered.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 22,
+    "summary": "The `TooManyRequests` message embeds the raw address, and the SMS version embeds the phone number. This puts PII into exception text that is usually logged or returned to clients.",
+    "failure_scenario": "A global error handler serialises `str(exc)` into the 429 response body or the logs. The address or phone number is exposed to the caller and to log storage. An attacker can also use it to confirm the quota state for a chosen address.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 18,
+    "summary": "The day-rollover branch calls `self.today()` twice, and `self.sent` grows without bound within a day. One entry is added per distinct address, and the dict is only cleared on rollover.",
+    "failure_scenario": "A flood of requests with random addresses fills `sent` with one entry each. The memory is not freed until the day rolls over. A request that arrives just as the date changes could also see two different values from the two `today()` calls, so `self.day` may not match the value that triggered the clear. The date is also taken in server-local time, so rollover moves with the host timezone or DST.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 17,
+    "summary": "`_used` is named like a read-only getter but mutates state: it resets `day` and clears `sent`.",
+    "failure_scenario": "A later maintainer calls `_used(phone)` to display remaining quota, or calls it from a second code path. The call silently wipes all counters on rollover, with no lock around it. The name hides the side effect.",
+    "category": "p2-4",
+    "severity": "nice"
+  }
+]
+```

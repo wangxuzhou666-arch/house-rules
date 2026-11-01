@@ -1,0 +1,84 @@
+```json
+[
+  {
+    "file": "code/sms_codes.py",
+    "line": 24,
+    "summary": "The rate limit is check-then-act with no lock. `_used` is read, then `deliver` runs, then `sent[phone] = used + 1` writes back a stale count. Concurrent requests can exceed the limit or lose counts.",
+    "failure_scenario": "Five concurrent send_code('+15551234') calls at used=0 all pass the `used >= limit` check and all send an SMS. Each then writes sent[phone]=1, so the recorded count is 1 instead of 5. The per-phone limit of 3 is bypassed, which allows SMS-pumping cost abuse. The slow gateway call widens the race window. A day rollover in another thread can also be undone by this stale write. CodeMailer in mail_codes.py has a lock for exactly this reason.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 30,
+    "summary": "The quota is reserved before the send and never released if `transport.send` raises. A transport failure permanently burns one of the address's daily attempts.",
+    "failure_scenario": "The mail transport has a 5-minute outage. A user clicks 'resend' three times and gets an exception each time, with no mail delivered. `_reserve` already incremented the count to 3, so every later request today raises TooManyRequests and the user is locked out of verification until midnight. The fix is to roll the reservation back in an `except` around the send, and re-raise.",
+    "category": "REL.1",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 28,
+    "summary": "The send count is recorded only after `deliver` succeeds. If the gateway sends the message but then raises (timeout or 5xx after acceptance), the attempt is never counted.",
+    "failure_scenario": "The gateway times out after queuing the SMS, so deliver() raises and `sent[phone]` is not updated. An attacker repeating the request gets unlimited real SMS sends to one number, because the failed attempts are never counted. The result is SMS-bombing and cost abuse. The count should be reserved before the send, with an explicit decision about rollback.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 27,
+    "summary": "The rate-limit key is the raw `address` string with no normalization, so case or whitespace variants count as separate recipients.",
+    "failure_scenario": "'User@x.com', 'user@x.com' and ' user@x.com' each get their own quota of 3, so one mailbox can be sent unlimited codes. The same applies to Gmail plus-addressing and dot variants. The limit protects nothing against a deliberate abuser.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 25,
+    "summary": "The raw `phone` string is used as the limit key with no normalization, so format variants bypass the per-phone limit.",
+    "failure_scenario": "'+8613800000000', '8613800000000', '+86 138 0000 0000' and '+86-138-0000-0000' are all the same handset but have separate counters. A caller can send more than 3 codes per day to one phone.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 5,
+    "summary": "The whole daily-quota mechanism (day rollover, per-key counter, TooManyRequests) is copied between the two files. `TooManyRequests` is defined twice as unrelated classes.",
+    "failure_scenario": "A caller that handles both channels with `except mail_codes.TooManyRequests` will not catch the `sms_codes` one, so it surfaces as a 500 instead of a 429. The rollover logic has already diverged: the mail version is locked and the SMS version is not, as the race finding above shows. Every future fix has to be made twice. The shared piece should be one `DailyQuota` class with one exception, used by both senders.",
+    "category": "P2.2",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 17,
+    "summary": "`_used` is named like a read-only getter but mutates state: it resets `day` and clears `sent`. This is the unsynchronized shared-state write inside a read path.",
+    "failure_scenario": "A reader sees `_used(phone)` and assumes it is side-effect free. In fact it wipes every phone's counter when the date changes. Calling it from a status or metrics endpoint would silently reset quotas. Its name also differs from the mail version's `_reserve`, so the two classes' symmetric roles are named asymmetrically.",
+    "category": "P2.5",
+    "severity": "nice"
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 33,
+    "summary": "`send_code` returns the plaintext verification code to its caller, and the code is neither stored nor hashed nor given an expiry anywhere in the class.",
+    "failure_scenario": "A handler that returns `mailer.send_code(addr)` in its API response hands the OTP to the requester, which defeats the verification. Because the code is not stored, a separate verify step needs its own storage and expiry. The code is also exposed to anyone who logs the return value.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 26,
+    "summary": "The TooManyRequests message embeds the raw email address or phone number (PII) in the exception text.",
+    "failure_scenario": "The exception message is logged by top-level handlers or error trackers, or returned in API error bodies. The user's email address or phone number then appears in logs and in responses to unauthenticated callers. The same applies to sms_codes.py line 26.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 16,
+    "summary": "`self.sent` grows by one entry per distinct address within a day, with no bound on its size.",
+    "failure_scenario": "An unauthenticated client sends requests with millions of unique random addresses or phones. Each request adds a dict entry that is only cleared at the next date rollover, so memory grows until the process runs out. The same applies to sms_codes.py line 15.",
+    "category": "unmapped",
+    "severity": "nice"
+  }
+]
+```

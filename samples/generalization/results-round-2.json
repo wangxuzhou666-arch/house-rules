@@ -411,7 +411,9 @@
       "label": "rel-2",
       "control_kind": "exempt",
       "verdict": "FAIL",
-      "notes": [],
+      "notes": [
+        "rel-2: the rules changed since recording: the REL.2 line of the digest now differs from the recorded one; the scores describe the recorded digests"
+      ],
       "conditions": {
         "with_rule": {
           "runs_ok": 3,
@@ -590,7 +592,9 @@
       "label": "rel-2",
       "control_kind": "exempt",
       "verdict": "FAIL",
-      "notes": [],
+      "notes": [
+        "rel-2b: the rules changed since recording: the REL.2 line of the digest now differs from the recorded one; the scores describe the recorded digests"
+      ],
       "conditions": {
         "with_rule": {
           "runs_ok": 3,

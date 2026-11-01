@@ -1,0 +1,52 @@
+```json
+[
+  {
+    "file": "code/item_index.py",
+    "line": 40,
+    "summary": "`import_items` builds `seen` only from rows whose key_version equals the current KEY_VERSION. Existing v1 rows are never counted as already imported, and no migration or key re-derivation replaces them.",
+    "failure_scenario": "An index file written before this change holds v1 rows with keys like 'https://a.com/feed|g1'. After the bump, re-importing the same feed gives seen = {}. Every item is appended again as a v2 row with key 'a.com|g1', and the same article is stored twice. Each later import and each version bump repeats this. This breaks the dedup that `import_items` exists to provide, and it is also an unmigrated format change (REL.1)."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 57,
+    "summary": "`mark_read` now ignores rows whose key_version is not the current one. A legacy v1 row can never be marked read, and the function returns False for an item that exists.",
+    "failure_scenario": "The user has an unread v1 row for (feed, g1). `mark_read(path, feed, 'g1')` looks for the v2 key 'a.com|g1', finds no match, and returns False without saving. The row stays unread forever, and `unread_titles` lists it on every call. If the item was re-imported as a v2 duplicate, only the duplicate can be marked read and the v1 copy still shows as unread."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 65,
+    "summary": "`unread_titles` has no version awareness. After the bump, a v1 row and its v2 re-import both show up as unread.",
+    "failure_scenario": "Because of the re-import caused by the line-40 change, the same title appears twice in the unread list. Marking the item read clears only the v2 copy, so the v1 copy keeps appearing."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 17,
+    "summary": "`item_key` now uses only the host of the feed URL and drops the path. Two different feeds on the same host that reuse a guid get the same key.",
+    "failure_scenario": "https://blog.example.com/rss/news.xml and https://blog.example.com/rss/podcast.xml both publish guid '1' or '42' (sequential ids are common). The second feed's item produces the same key 'blog.example.com|1' and is skipped as a duplicate, so it never gets imported. `mark_read` on one feed's item marks whichever row matched first, which may belong to the other feed. Before the change the key used the full feed URL and kept the feeds apart."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 13,
+    "summary": "`feed_host` does not normalise the authority. It keeps the port, any userinfo, and a default port, and it breaks on query strings or fragments that appear directly after the host.",
+    "failure_scenario": "'http://Example.com:80/feed', 'https://example.com/feed' and 'https://user@example.com/feed' give three different keys for the same host, so the same item is imported repeatedly. 'https://example.com?x=1' gives host 'example.com?x=1'. The collapse to host-only already merges feeds that should stay separate, and this adds inconsistent splitting on top."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 12,
+    "summary": "`feed_host` is copy-pasted unchanged into both item_index.py and reading_list.py. `item_key` and `make_uid` are also the same function, as are `load_rows` and `save_rows`.",
+    "failure_scenario": "The two copies are already out of step, because this diff gave `item_index` a version-filtering rule that `reading_list` does not have. A later fix to host parsing, for example the port or userinfo handling above, will land in one file and not the other. The two stores will then derive different ids for the same feed (P2.2, abstract on the repeat)."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 21,
+    "summary": "`label` branches on `row['label_style'] == 1` and sends every other value, including unknown future styles, to the v2 format. The rows' `label_style` field is also never validated.",
+    "failure_scenario": "A row with label_style 3, or a corrupt value, is silently rendered as '#N'. Old v1 rows keep the zero-padded form while new rows show '#7' with no padding, so listing output mixes two formats and lexicographic ordering of labels breaks. No migration or normalisation step exists, so the two styles coexist indefinitely."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 20,
+    "summary": "The `label` function has a branch that returns, followed by a fall-through return with no `else`. The `label_style` bump has no matching change to the stored rows.",
+    "failure_scenario": "`label` has two return branches written as `if ...: return` followed by a bare `return`. This is a guard-style construct, but the style value is a version tag, so it needs an explicit else or a dispatch table. Without one, adding style 3 requires another edit to this chain (P1.3)."
+  }
+]
+```

@@ -1,0 +1,52 @@
+```json
+[
+  {
+    "file": "code/item_index.py",
+    "line": 40,
+    "summary": "The key format changed and KEY_VERSION went from 1 to 2, but there is no migration. Existing v1 rows are ignored when building `seen`, so every already-imported item is re-added.",
+    "failure_scenario": "An index file holds v1 rows with keys like `https://a.com/feed|g1`. The next `import_items` call for the same feed finds `seen` empty and appends `a.com|g1` as a new unread v2 row. All previously imported items are duplicated, and items the user had already read come back as unread."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 57,
+    "summary": "`mark_read` only matches rows at the current key version, so legacy v1 rows can never be marked read. It returns False and leaves the row unread.",
+    "failure_scenario": "A pre-upgrade unread item still shows in `unread_titles`, because that function does not filter by version. Calling `mark_read(path, feed, guid)` on it returns False and the row stays unread forever. After the re-import above, the user sees two copies of each item: a v1 row that cannot be cleared and a v2 row that can."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 17,
+    "summary": "The item key now uses only the host and drops the feed path. Two different feeds on the same host that reuse a guid (e.g. `/a.xml` and `/b.xml`, both with guid `1`) now collide and the second feed's items are silently skipped.",
+    "failure_scenario": "`import_items(p, 'https://x.com/blog.xml', [('1','A')])` and then `import_items(p, 'https://x.com/news.xml', [('1','B')])`. The second call computes key `x.com|1`, finds it in `seen`, and drops B with no error and nothing in `added`. Previously the full feed_url kept the keys distinct."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 13,
+    "summary": "`feed_host` is a hand-rolled URL parser. It keeps userinfo and port, so `user@host` and `host:8080` produce different keys for the same site. It also ignores query-only URLs and splits only on `/`.",
+    "failure_scenario": "`https://user:pw@Example.com/feed` gives `user:pw@example.com`, so credentials end up in the persisted key. The same feed without credentials gives `example.com`, so the same items are imported twice. `urllib.parse.urlsplit(feed_url).hostname` handles all of this."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 12,
+    "summary": "`feed_host` is duplicated verbatim in item_index.py and reading_list.py, and `load_rows`/`save_rows` are copy-pasted between the two files as well. This change touches both copies, and any future fix has to be made twice.",
+    "failure_scenario": "A fix for port or userinfo handling is applied to one `feed_host` and not the other. The two modules then derive different keys for the same feed, which is exactly the drift this diff was trying to remove (P2.2: abstract on the third repetition)."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 20,
+    "summary": "`label` handles style 1 explicitly but sends every other value to the v2 format. An unknown `label_style` (for example 3 from a newer writer) is silently rendered as style 2. `add_items` also writes only the new label style, so numbering is shared across mixed-style rows with no check.",
+    "failure_scenario": "A row with `label_style` 3 or a corrupted value renders as `feed#N` with no error. This breaks the fail-fast rule (P0F.1/P0F.2) and the file-shape check (REL.3), because `load_rows` only checks that the key exists, not that its value is a known style."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 47,
+    "summary": "The uid is host-only, so two feeds on one host with the same guid collide and the second feed's item is skipped silently. `number` is also allocated per host, not per feed.",
+    "failure_scenario": "`add_items` for `https://x.com/a.xml` guid `1`, then for `https://x.com/b.xml` guid `1`. The second call sees `x.com|1` in `seen` and drops the item with no log. The returned `added` list omits it, so the caller believes the feed was fully imported."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 4,
+    "summary": "The key version is stored per row, but `load_rows` never validates its value. Rows with a stale or unknown `key_version` are kept and rewritten on every `save_rows`, so old rows build up with no way to remove them.",
+    "failure_scenario": "After the bump, every `mark_read` or `import_items` call rewrites the file with all v1 rows unchanged. They are never converted or pruned, and they keep appearing in `unread_titles`, so the file grows with dead duplicates over time."
+  }
+]
+```

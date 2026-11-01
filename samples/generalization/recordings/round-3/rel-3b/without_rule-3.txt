@@ -1,0 +1,64 @@
+```json
+[
+  {
+    "file": "code/access_tail.py",
+    "line": 28,
+    "summary": "The code stats the log path, then opens the same path by name. The inode saved to the position file can belong to a different file than the one that was read.",
+    "failure_scenario": "The log rotates between `log_path.stat()` (line 28) and `log_path.open()` (line 32). The old inode's offset is applied to the new file, or the new file is read and the old inode is saved with the new file's offset. On the next run the inode matches, so the reader resumes from a wrong offset. It skips or re-reads lines, and nothing logs it. The fix is to open first and call `os.fstat(handle.fileno())` on the handle you read from."
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 12,
+    "summary": "`load_position` returns whatever valid JSON it finds without checking its shape. It also only catches `JSONDecodeError`, so invalid UTF-8 escapes. `batch_log_reader.load_checkpoint` already validates both.",
+    "failure_scenario": "The position file holds `[]`, `null`, `{}` or `{\"inode\": 1, \"offset\": -5}`. Line 29 then raises `TypeError` or `KeyError`, or `handle.seek(-5)` raises `ValueError`. A string offset breaks the `start > info.st_size` comparison. A position file with invalid UTF-8 raises `UnicodeDecodeError` from `read_text`, which is a `ValueError` but not a `JSONDecodeError`. In each case the tailer crashes on every run until someone deletes the file by hand, instead of degrading to a logged restart from offset 0."
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 36,
+    "summary": "The position is saved before the caller has processed the returned lines. A crash after the save loses those lines permanently. The same problem is in `batch_log_reader.py` line 43.",
+    "failure_scenario": "`read_new_lines` saves the new offset and returns 1000 lines. The caller crashes or fails to write them downstream. On restart the saved offset is already past those lines, so they are never delivered. The state is advanced before the work it describes is done (REL.1: keep usable state until the replacement is ready and validated). The commit should happen after the caller succeeds, or the function should expose a separate commit step."
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 41,
+    "summary": "The checkpoint stores only a line count, with no file identity. A rotated or replaced log is only detected when it has fewer lines than the count.",
+    "failure_scenario": "The checkpoint says 10000 lines done. The log rotates and the new file already has 12000 lines by the next run. `done > len(rows)` is false, so the first 10000 lines of the new file are silently skipped. `access_tail.py` guards against this with an inode check; this module has no equivalent."
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 37,
+    "summary": "`readlines()` loads the whole log into memory on every call, even though only the lines after the checkpoint are needed.",
+    "failure_scenario": "A multi-GB access log is re-read and held in a list on each poll just to return the last few lines, so memory use and I/O grow with the log size. The module should skip the first `done` lines while streaming, or track a byte offset like `access_tail.py` does. Text mode with universal newlines also turns a lone `\\r` inside a line into a line break, so line counts can differ from what other tools see."
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 16,
+    "summary": "P0E.5: the handler logs the exception with `log.warning(..., exc)`, which formats the message but drops the stack trace. `batch_log_reader.py` lines 15, 20 and 24 do the same.",
+    "failure_scenario": "When the position or checkpoint file is corrupt, the log shows only the one-line decode message. It has no traceback and no exception type or location, which makes it harder to diagnose why the file is bad. Use `exc_info=True` or `log.exception`."
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 30,
+    "summary": "P1.3: the `if start > info.st_size: start = 0` branch assigns without an `else`. `batch_log_reader.py` lines 41 to 42 have the same pattern.",
+    "failure_scenario": "The assignment is conditional and has no explicit alternative path, which breaks the rule that a branch which assigns needs an `else`. It also makes `start` get set in two places (line 29 and line 31). A single expression or an explicit `else` would show both outcomes in one place. This is style only; behavior is correct."
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 28,
+    "summary": "P2.4: the generic name `info` is used for the `os.stat_result`. `data` in `batch_log_reader.py` line 18 and `chunk` and `handle` have the same problem.",
+    "failure_scenario": "`info` and `data` do not say what they hold. A reader has to trace the assignment to find out that `info` is the stat result and `data` is the parsed checkpoint. Names such as `log_stat` and `checkpoint_json` would say so."
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 29,
+    "summary": "`path.with_suffix(\".part\")` derives the temp file name by replacing the suffix. Two state files that differ only in suffix, or a state file already named `*.part`, collide or clobber each other. The same code is in `access_tail.py` line 21. `save_*` and `load_*` also duplicate each other across the two modules.",
+    "failure_scenario": "`state.json` and `state.txt` in the same directory both use `state.part`. Concurrent or interleaved saves overwrite each other's temp file before `os.replace`, so one checkpoint can contain the other's data. If the state file itself is `x.part`, `write_text` and `os.replace` act on the same path and the atomic-replace guarantee disappears. There is also no `fsync`, so after a power loss the replaced file can be empty, which the loader treats as corrupt and reads from the start. Use `path.with_name(path.name + \".part\")` and share one atomic-write helper."
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 19,
+    "summary": "P0F.3: the handler catches `RecursionError`, a defensive branch for a one-in-a-million input. The type and shape checks on lines 23 to 25 add more of the same.",
+    "failure_scenario": "A checkpoint file is written only by this module's own `save_checkpoint`, so deeply nested JSON or a negative or non-int `lines` value can only come from outside tampering. The extra branches add code paths that need their own tests and mask programmer errors. Corruption can instead be handled by the `ValueError` clause alone."
+  }
+]
+```

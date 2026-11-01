@@ -1,0 +1,64 @@
+```json
+[
+  {
+    "file": "code/mail_routes.py",
+    "line": 20,
+    "summary": "apply_routes truncates the live routes file with mode 'w' before validating any route. A RouteError raised mid-loop leaves a partial or empty file in place of the previous good one.",
+    "failure_scenario": "The file holds 50 valid routes. apply_routes is called with 10 routes and the 4th has an invalid domain. The file is already truncated, routes 1-3 are written, render_route raises, and 47 routes are lost. folder_for then sends their mail to 'inbox', with no error and no way to tell. The fix is to render every line first, write to a temp file, then os.replace. This is REL.1 (also P0F.2, because the fallback is silent)."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 13,
+    "summary": "rebuild writes the index file in place with mode 'w'. It is neither atomic nor guarded against concurrent callers.",
+    "failure_scenario": "Process A is mid-rebuild, so the file is truncated and has no 'end' marker. Process B calls folder_for, _load sees no end marker and returns None, and B starts its own rebuild into the same path. The two writers interleave and corrupt the file, or a crash or disk-full error leaves the previous good index destroyed. The marker detects damage but does not protect the old state. The fix is to write to a temp file and os.replace. This is REL.1."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 27,
+    "summary": "_load only checks the file's structure (end marker and line count). Nothing ever checks whether the index is stale against read_routes, and no code path invalidates it.",
+    "failure_scenario": "The index is built once. An operator then changes routes (apply_routes, or whatever read_routes reads). Every later folder_for call finds a structurally valid file and returns the old folder forever, so mail keeps going to the wrong folder until someone deletes the file by hand. The index needs a version or mtime check against the source, or an explicit invalidate called from apply_routes. This is REL.1 (also P2.2, because there are two sources of truth)."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 13,
+    "summary": "render_route validation does not match what load_routes parses. The domain is never checked for '\\t' or '\\n'. The folder is checked only for '\\t' and '\\n', but str.splitlines also splits on '\\r', '\\x0b', '\\x0c', '\\x1c-\\x1e', '\\x85', '\\u2028' and '\\u2029'.",
+    "failure_scenario": "Domain 'a\\tb.com' passes validation (it has a '.', no '@', no space) and is written as 'a\\tb.com\\tfolder'. load_routes partitions at the first tab and stores domain 'a' with folder 'b.com\\tfolder'. A folder like 'Work\\r' or 'Work\\u2028x' is written intact but read back as two lines. The first line is kept as 'domain\\tWork', and the second becomes a junk entry or is silently dropped. Reject all line-break characters, or escape the fields. This is P0F.1, which says to validate input at the boundary."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 15,
+    "summary": "rebuild writes domain and folder with no validation. It does not reuse mail_routes.render_route and re-implements the same tab-separated format.",
+    "failure_scenario": "read_routes yields a folder containing '\\n' or a domain containing '\\t'. The written line count no longer matches the 'end' count, or the fields shift. _load then returns None on every call, so every folder_for call re-reads the source and rewrites the whole file (a rebuild loop). The format is also defined twice (render_route and this f-string, load_routes and _load), so changes will drift apart. Call render_route here, or share one codec. This is P0F.1 and P2.2."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 22,
+    "summary": "A corrupt, unreadable or invalid-UTF-8 index silently becomes a rebuild with no log and no named fallback. A failed read caused by a permission problem is also treated as 'rebuild'.",
+    "failure_scenario": "The index file is on a read-only or permission-denied path, so OSError is caught and _load returns None. rebuild then raises its own OSError from the write, and every folder_for call crashes with a confusing error. A corrupt index that is repaired is likewise never reported, so recurring corruption goes unnoticed. Catch FileNotFoundError separately, log the corruption, and name the fallback. This is P0F.2 and P0E.2/P0E.5 (the handler drops the exception)."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 39,
+    "summary": "folder_for re-reads and re-parses the whole routes file on every lookup. load_routes also raises UnicodeDecodeError on a bad file, and silently skips malformed lines.",
+    "failure_scenario": "Classifying 10k messages reads and parses the file 10k times. One non-UTF-8 byte in the file makes every folder_for call raise. A truncated or hand-edited line is silently dropped, so that sender falls through to 'inbox' with no signal. Cache the parsed table, and give a wrong-shape or undecodable file one named error or fallback. This is REL.3 (also P0F.2)."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 21,
+    "summary": "apply_routes does not normalise or de-duplicate domains. The same domain given twice produces two lines, and the later one silently wins.",
+    "failure_scenario": "The routes list has {'domain': 'Acme.com', 'folder': 'A'} and {'domain': 'acme.com', 'folder': 'B'}. Both pass validation and are written. load_routes keeps only 'B'. The returned count (2) disagrees with the number of effective routes (1), and the conflicting config is never reported. Detect duplicates and raise RouteError. This is P0F.2."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 30,
+    "summary": "The sentinel row 'end\\t<n>' lives in the same namespace as data rows. A real domain named 'end' is indistinguishable from the footer, and the integrity check only validates the last line.",
+    "failure_scenario": "A route with domain 'end' written as the final data row is followed by the real footer, so the count still matches. A truncated file whose last surviving data row is the route 'end\\t3' (folder '3') and whose line count is 4 passes the check as valid, loading a partial index. Use a footer that cannot collide, such as a '#' prefix or a hash of the contents. This is REL.3."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 34,
+    "summary": "SenderIndex.folder_for re-reads and re-parses the whole index file on every call, with no in-memory cache. It also duplicates mail_routes.folder_for.",
+    "failure_scenario": "Each lookup does disk I/O and parses the full file, so per-message lookups cost O(file size) each. The index module's whole purpose is to avoid this work, and it does not. Keep the parsed table on self, and invalidate it by mtime. This is a simplification and efficiency finding."
+  }
+]
+```

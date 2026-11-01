@@ -1,0 +1,52 @@
+```json
+[
+  {
+    "file": "code/item_index.py",
+    "line": 40,
+    "summary": "KEY_VERSION is bumped to 2 and the key format changes, but there is no migration or compatible read. Existing v1 rows are skipped when building `seen`, so every item already stored is re-imported as a new v2 row (REL.2).",
+    "failure_scenario": "An index file holds v1 rows such as {key: 'https://a.com/feed|g1', key_version: 1, read: True}. After upgrade, `import_items` for the same feed and guid builds key 'a.com|g1'. That key is not in `seen`, because v1 rows are filtered out, so a second row with read=False is appended. The item the user already read now shows as unread again, and `import_items` returns it as newly added. The index also holds duplicates from then on. Fix: convert v1 rows in place on load (derive the new key from the old URL key and keep `read`), or add a v1 fallback lookup."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 57,
+    "summary": "`mark_read` only matches rows with key_version == KEY_VERSION, so legacy v1 rows can never be marked read. The new v2 duplicates take the mark instead, and the old rows stay unread forever.",
+    "failure_scenario": "A v1 row for ('https://a.com/feed', 'g1') is in the file and unread. `mark_read(path, 'https://a.com/feed', 'g1')` computes 'a.com|g1', which matches no v1 row, and returns False. The caller is told the item doesn't exist even though the user can see it in the list. Any v1 item that was not re-imported is stuck unread permanently."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 65,
+    "summary": "`unread_titles` does not filter by key_version, so stale v1 rows and their v2 re-import duplicates are both listed, and the same title appears twice.",
+    "failure_scenario": "After upgrade and re-import, the file has a v1 row (unread) and a v2 row (unread) for the same article. `unread_titles` returns the title twice. If the user reads the item, only the v2 row is marked, so the title keeps showing from the v1 row."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 17,
+    "summary": "The new key uses only the host, so different feeds on the same host share one key namespace. Items with the same guid in those feeds collide, and the second one is silently dropped. The scheme and port are also ignored.",
+    "failure_scenario": "Feeds 'https://blog.example.com/news.xml' and 'https://blog.example.com/releases.xml' both contain guid '1' or '42'. Both give key 'blog.example.com|1'. `import_items` skips the second feed's item as already seen, and `mark_read` on one marks the other. Previously the full URL kept them apart, so this is a regression in uniqueness. Fix: keep the full normalized URL, or include the path in the key."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 12,
+    "summary": "`feed_host` is copy-pasted verbatim between item_index.py and reading_list.py, and `item_key` and `make_uid` are the same function under different names. A later fix to one will not reach the other.",
+    "failure_scenario": "A bug in host normalisation (for example, handling userinfo, ports or the scheme, or the collision above) gets fixed in one module. The other module keeps producing different keys for the same feed. Fix: put `feed_host` in one shared module and import it from both."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 23,
+    "summary": "`label` treats every `label_style` other than 1 as the new '#' style and has no explicit check for style 2 or an error for unknown values. The style-1 branch also has no `else`, which the P1.3 clause asks for (P1.3, should-fix).",
+    "failure_scenario": "A row written by a newer version with label_style 3, or one with a corrupt value such as None or 0, is silently rendered as 'feed#number'. This hides the mismatch instead of failing visibly. An explicit `== 2` branch with an error for unknown values makes this fail fast."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 4,
+    "summary": "LABEL_STYLE is bumped to 2, so new rows get '#N' labels while existing rows keep '-NNNN'. Labels for the same feed are mixed in one listing, and old and new styles are not normalized.",
+    "failure_scenario": "After upgrade, `add_items` appends new rows to a file that already holds style-1 rows. `listing` then shows 'host-0001 A' next to 'host#5 B' in one output. Any consumer that parses or sorts the labels sees two formats. Fix: either migrate the stored rows, or document that the mixed display is intended."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 54,
+    "summary": "`mark_read` calls `load_rows` and `save_rows` on every call. Combined with the fact that nothing removes obsolete v1 rows, each call rewrites the whole file, including all stale rows.",
+    "failure_scenario": "Stale v1 rows accumulate alongside their v2 duplicates, so the index file roughly doubles after the first re-import. Every `mark_read` or `import_items` then rewrites the whole inflated file. This is minor next to the correctness problems above."
+  }
+]
+```

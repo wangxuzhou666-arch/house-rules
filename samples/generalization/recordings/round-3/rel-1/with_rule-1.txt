@@ -1,0 +1,84 @@
+```json
+[
+  {
+    "file": "code/site_publisher.py",
+    "line": 8,
+    "summary": "publish() deletes the live directory before any page is rendered, so a failing render leaves the site destroyed or half-written.",
+    "failure_scenario": "The live site is served from live_dir. publish() runs rmtree(live_dir), then renders pages in a loop. If the third render() raises, or write_text hits a disk error, the exception propagates. live_dir now holds only the first two pages and the rest of the old site is gone with no way back. Fix: render every page into a sibling temp dir, validate it, then swap it in with an atomic rename. Keep the old dir until the swap succeeds and restore it on failure. This is not a rebuildable cache, so the REL.1 exemption does not apply.",
+    "category": "rel-1",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 8,
+    "summary": "An empty or all-failing pages mapping still wipes the live site.",
+    "failure_scenario": "publish(live, {}) is called, for example by a caller whose page-collection step returned nothing. rmtree runs, an empty directory is recreated, and an empty list is returned. The site is silently blanked. Nothing validates the input before the destructive step.",
+    "category": "rel-1",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 12,
+    "summary": "Page names are joined into a path without checking they stay inside live_dir.",
+    "failure_scenario": "pages = {'../../etc/cron.d/x': ...} gives target = live_dir/'../../etc/cron.d/x', and write_text writes outside live_dir. An absolute name like '/tmp/x' makes the pathlib join discard live_dir entirely. A name such as 'dir/' or one that clashes with another page ('a' and 'a/b') raises IsADirectoryError or NotADirectoryError. That error comes after the rmtree, so the old site is already gone. Fix: validate names against live_dir.resolve() before the destructive step.",
+    "category": "p0f-1",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 24,
+    "summary": "read_page() has the same unchecked path join, so it can read arbitrary files, and page_names() returns OS-specific separators.",
+    "failure_scenario": "read_page(live, '../../secrets.env') reads a file outside live_dir if the name comes from a request path. page_names() uses str(relative_to()), which yields backslash-separated names on Windows. Those names no longer round-trip with the '/'-style keys passed to publish().",
+    "category": "p0f-1",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 25,
+    "summary": "rebuild() deletes the whole cache before re-rendering, so a render failure partway through loses every preview, including ones that were valid.",
+    "failure_scenario": "rebuild(['a','b','c']) removes the cache, renders a, then render('b') raises. The exception leaves the cache with only a, and the previously valid c and the rest are gone. Callers that rely on cached_names() now see a partial set. The cache can be rebuilt on demand, so REL.1 exempts it, but a rebuild that only partly finishes still leaves an inconsistent set. Fix: build into a temp dir and swap it in.",
+    "category": "rel-1",
+    "severity": "nice"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 16,
+    "summary": "get() has a check-then-act race on path.exists() and shares one fixed .part temp file per name.",
+    "failure_scenario": "Thread A passes the exists() check. Thread B runs rebuild() and rmtree()s the root. A then calls path.read_bytes() or part.replace(path) and gets FileNotFoundError. Two concurrent get('x') calls both write the same x.part, so the bytes can interleave or one replace() can fail. Fix: use a unique temp name (tempfile.NamedTemporaryFile in root) and catch FileNotFoundError on read.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 12,
+    "summary": "The cache key `name` is used unvalidated in the file path.",
+    "failure_scenario": "get('../../x') writes and reads ../../x.png outside root. get('a/b') fails because the parent directory root/a does not exist (the mkdir only creates root). A name containing a dot, such as 'v1.2', works only because the code appends '.png' and uses with_suffix('.part'). Names like 'x' and 'x.png' map to different files, so the cache keys are ambiguous. Fix: validate names at the boundary.",
+    "category": "p0f-1",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 19,
+    "summary": "A failed or empty render is not handled: an empty result is cached permanently, and a failed write leaves a stale .part file.",
+    "failure_scenario": "render(name) returns b'' (for example a silent upstream failure). The empty bytes are written and renamed to name.png. Every later get() sees exists() and returns b'' forever, with no log and no retry. If render raises, nothing is cleaned up or logged, so the leftover .part file stays in root until the next rebuild.",
+    "category": "p0f-2",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 28,
+    "summary": "rebuild() returns len(names) rather than the number of previews actually built, and it re-renders duplicate names from a plain list.",
+    "failure_scenario": "rebuild(['a','a','b']) returns 3 but produces 2 files, and the second 'a' is served from the file the first iteration just wrote. The count reported to the caller does not match cached_names(). An empty names list still deletes the entire cache and returns 0.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 8,
+    "summary": "The rmtree-then-recreate pattern is duplicated in preview_cache.rebuild and site_publisher.publish, and neither use is a safe swap.",
+    "failure_scenario": "Both modules independently hand-roll `if exists: shutil.rmtree(...)` followed by regeneration. Fixing the atomicity problem in one (build into a temp dir, then rename) leaves the other broken, and the two will drift. A shared helper such as `replace_dir_atomically(target, build_fn)` would give both a single place to fix. This is a third-repetition abstraction case under P2.2.",
+    "category": "p2-2",
+    "severity": "nice"
+  }
+]
+```

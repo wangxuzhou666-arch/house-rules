@@ -1,0 +1,84 @@
+```json
+[
+  {
+    "file": "code/access_tail.py",
+    "line": 12,
+    "summary": "load_position checks only JSON syntax, not shape or type. It also doesn't catch UnicodeDecodeError, so one bad position file fails every run (REL.3).",
+    "failure_scenario": "The position file holds valid JSON of the wrong shape, such as `[]`, `null`, `{}`, `{\"inode\": 5}` or `{\"offset\": \"12\"}`. A truncated or partly written file makes this likely. load_position returns it unchanged. read_new_lines then raises KeyError on `position[\"offset\"]`, or TypeError on `start > info.st_size` for a string offset. A negative offset makes `handle.seek` raise OSError. A file with non-UTF-8 bytes makes `read_text` raise UnicodeDecodeError, which is not a JSONDecodeError. Every later run fails the same way until someone deletes the file by hand. The JSON-syntax fallback in the same function is never reached.",
+    "category": "rel-3",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 36,
+    "summary": "The position is saved before the lines are returned to the caller, so a crash while processing them loses those lines for good. The attempt is counted as done before it is known to have succeeded.",
+    "failure_scenario": "read_new_lines reads 1000 new lines and persists the new offset. The caller then crashes or raises while parsing or shipping them. On restart the saved offset is already past those lines, so they are never processed again.",
+    "category": "rel-4",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 28,
+    "summary": "The inode comes from `log_path.stat()` and the file is opened later by path. A rotation between the two calls pairs the old inode with the new file's contents.",
+    "failure_scenario": "stat sees inode A. logrotate then moves the file and creates inode B. open() reads B from offset N, and the saved position becomes {inode: A, offset: N+len}. On the next run the inode is B, which does not match A, so start is 0 and the whole of B is re-read and duplicated. Use `os.fstat(handle.fileno())` on the opened handle instead.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 16,
+    "summary": "The handler logs with `log.warning(..., exc)`, which drops the traceback instead of keeping the stack trace (P0E.5).",
+    "failure_scenario": "A corrupt position file is logged as a bare message with no traceback or exception context. Use `exc_info=True` or `log.exception`. The same pattern appears in `code/batch_log_reader.py` at lines 15, 20, 24 (that one has no exc).",
+    "category": "p0e-5",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 41,
+    "summary": "The checkpoint is only a line count, with no file identity. After rotation or replacement, a new file longer than the old checkpoint silently skips its first lines. Resetting `done` to 0 also happens with no log line (P0F.2).",
+    "failure_scenario": "The checkpoint says 100 lines done. The log is rotated and the new file already has 150 lines. `done > len(rows)` is false, so lines 0-99 of the new file are never returned. Only the shrink case resets to 0, and that reset is silent, so there is no record that the fallback happened.",
+    "category": "p0f-2",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 43,
+    "summary": "The checkpoint is saved before the rows are returned, so a failure in the caller loses those rows. The attempt is counted as complete before it has succeeded (REL.4).",
+    "failure_scenario": "read_new_lines saves a checkpoint of len(rows). The caller raises while handling the batch. The next run starts after those rows, so the batch is silently dropped.",
+    "category": "rel-4",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 37,
+    "summary": "`readlines()` loads the whole log into memory on every call just to count lines and slice off the tail. The cost grows with the full file size, not with the new data.",
+    "failure_scenario": "A multi-GB access log is re-read and held in a list on every batch run. This risks OOM and wastes I/O when only the last few lines are new. A byte offset, as in access_tail.py, avoids this.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 37,
+    "summary": "`str.splitlines()` splits on more than `\\n`: it also splits on \\x0b, \\x0c, \\x1c-\\x1e, \\x85, \\u2028 and \\u2029. A single log line can therefore come back as several entries.",
+    "failure_scenario": "A request path or user-agent contains a \\x0c or \\u2028 character. One access-log line is returned as two or more records, which corrupts parsing downstream. The byte offset still advances by whole lines, so the split is invisible there. Use `decode(...).split(\"\\n\")`, or the bytes-level `splitlines` on `b\"\\n\"` boundaries.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 18,
+    "summary": "`data` is a generic name, and `code/access_tail.py` has a near-copy of the same save and read logic (P2.4, P2.2).",
+    "failure_scenario": "`data` should be named for what it holds, for example `checkpoint_doc`. save_checkpoint and save_position are the same write-to-.part-then-replace code. Two copies drift apart: one has the shape and UTF-8 validation and the other does not. A shared helper is better once a third copy appears.",
+    "category": "p2-4",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 21,
+    "summary": "`path.with_suffix(\".part\")` swaps the suffix instead of appending it. Distinct state files can share one temp name. The write is also not fsynced before `os.replace`.",
+    "failure_scenario": "State files `a.json` and `a.state` in one directory both use `a.part`, so concurrent saves clobber each other's temp file. Without an fsync, a power loss after the replace can leave an empty or truncated state file. The same applies to `code/batch_log_reader.py` line 30. After a crash, the position file reads as invalid JSON and re-reads the log from the start, so every line is duplicated.",
+    "category": "rel-1",
+    "severity": "nice"
+  }
+]
+```

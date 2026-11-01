@@ -1,0 +1,84 @@
+```json
+[
+  {
+    "file": "code/site_publisher.py",
+    "line": 8,
+    "summary": "publish() deletes the live directory before any page is rendered, so a failing render leaves the live site empty or partial.",
+    "failure_scenario": "The live site is served from live_dir. publish() runs rmtree(live_dir), then calls render() for each page. If the third render() raises (template error, DB timeout), the exception propagates with only 2 pages written. The previous good site is gone, readers get FileNotFoundError or a partial site, and there is no rollback. Concurrent readers also see an empty or half-built directory for the whole render time. This is a live site, not a rebuildable cache, so the REL.1 exemption does not apply. Fix: render into a sibling temp dir, validate it, then swap with os.replace/rename. Restore the old directory on failure.",
+    "category": "rel-1",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 12,
+    "summary": "Page names are joined to live_dir without containment checks, so absolute paths or '..' segments write and read outside live_dir.",
+    "failure_scenario": "pages = {'../../etc/cron.d/x': ...} or an absolute name such as '/home/u/.bashrc'. `live_dir / name` resolves outside live_dir (an absolute name replaces the base entirely). target.parent.mkdir and write_text then create or overwrite arbitrary files. read_page(live_dir, '../secret') reads arbitrary files. The page name is an external boundary input and nothing validates it (P0F.1).",
+    "category": "p0f-1",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 13,
+    "summary": "Overlapping page names such as 'a' and 'a/b' fail mid-publish with NotADirectoryError or FileExistsError, after the live dir has already been wiped.",
+    "failure_scenario": "pages = {'docs': ..., 'docs/index.html': ...}. The first iteration writes the file 'docs'. The second calls target.parent.mkdir for 'docs', which exists as a file, and raises FileExistsError. By then rmtree has already destroyed the old site, so the failure leaves a partial site. Duplicate names that differ only in normalization ('x/../y' vs 'y') also silently overwrite each other.",
+    "category": "rel-1",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 16,
+    "summary": "The cache key is used as a file name with no validation, so a name with path separators or '..' escapes the cache root.",
+    "failure_scenario": "get('../../victim') makes _path return root/../../victim.png. mkdir only creates root, so part.write_bytes writes to a path outside root, or fails with FileNotFoundError if the parent is missing. Otherwise it overwrites an arbitrary .png. Names containing '/' ('a/b') pass the exists() check and then fail on write because root/a does not exist. cached_names() uses glob('*.png') non-recursively, so it would never list such entries anyway.",
+    "category": "p0f-1",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 18,
+    "summary": "Every writer of a given name uses the same '<name>.part' temp file, so concurrent get() calls on a miss clobber each other.",
+    "failure_scenario": "Threads A and B both miss on 'logo'. Both write 'logo.part'. A calls part.replace(path), which moves the file. B then calls part.replace(path) and raises FileNotFoundError, because the .part file is gone. Interleaved writes can also leave corrupted PNG bytes in the final file. Fix: use a unique temp name (tempfile.NamedTemporaryFile in root, or a pid/uuid suffix).",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 25,
+    "summary": "rebuild() wipes the whole cache first and then re-renders, so a failure mid-way or a concurrent get() sees a missing or half-built cache.",
+    "failure_scenario": "rebuild(['a','b','c']) runs rmtree(root). If render('b') raises, only 'a' is cached and the old entries are lost, so every later get() pays the render cost again. Concurrently, a get() that has just run root.mkdir but not yet write_bytes can have root deleted under it by rmtree, causing FileNotFoundError. REL.1 exempts a cache that is rebuilt on demand, so this is lower severity than the equivalent publish() bug. Even so, building into a temp dir and swapping removes the race.",
+    "category": "rel-1",
+    "severity": "nice"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 20,
+    "summary": "A cached entry is never validated, so an empty or garbage render result is cached permanently.",
+    "failure_scenario": "render(name) returns b'' (renderer glitch, upstream returned nothing). The empty file is saved as name.png. Every later get() hits path.exists() and returns b'' forever, until someone calls rebuild(). Nothing rejects an empty result or signals the failure (P0F.2).",
+    "category": "p0f-2",
+    "severity": "nice"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 27,
+    "summary": "rebuild() returns len(names), which overcounts when names contains duplicates, and get() re-reads from disk the file it just wrote.",
+    "failure_scenario": "rebuild(['a','a','b']) renders 'a' once, because the second get() is a cache hit, yet it returns 3. A caller that reports 'N previews rebuilt' gets the wrong number. Separately, get() calls path.read_bytes() right after writing the same bytes, which is a redundant disk read on every miss. Fix: return the bytes directly on a miss and count unique names.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 27,
+    "summary": "page_names() builds names with str(Path), which yields OS-specific separators, so on Windows it returns backslash names that do not match the keys passed to publish().",
+    "failure_scenario": "On Windows, publish() with 'docs/index.html' returns that name, but page_names() returns 'docs\\index.html'. Comparing the two, or passing the result to a URL builder, breaks. Using path.relative_to(live_dir).as_posix() would keep the two consistent.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 8,
+    "summary": "rmtree raises on a symlinked live_dir, which is the usual blue/green layout, and there are no tests for either new module.",
+    "failure_scenario": "If live_dir is a symlink to a release directory, shutil.rmtree raises OSError('Cannot call rmtree on a symbolic link') and publish() cannot run at all. Neither new module ships with tests, so the failure paths above (render error, bad names, concurrency) are unverified, contrary to the R.7 approach of proving gates with fail/pass checks.",
+    "category": "unmapped",
+    "severity": "nice"
+  }
+]
+```

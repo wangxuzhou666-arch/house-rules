@@ -1,0 +1,40 @@
+```json
+[
+  {
+    "file": "code/payment_events.py",
+    "line": 6,
+    "summary": "The stored `events.key` format changes from `provider:event_id` to `account/provider/event_id`, with no migration and no fallback read of the old key.",
+    "failure_scenario": "A ledger already holds `stripe:evt_1`. After deploy, `record_charge(conn, 'acme', 'stripe', 'evt_1', 500)` builds the key `acme/stripe/evt_1`, so `INSERT OR IGNORE` no longer matches the old row and a replayed webhook is recorded a second time. `net_cents` then double-counts the charge. `record_refund` for an old charge builds the new key, matches 0 rows and returns False, so the refund is never applied and the charge still counts in `net_cents`. This breaks REL.2 (a stored-ID change needs compatible reads or migration)."
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 6,
+    "summary": "The new `/` separator is not escaped, and the three key parts are normalized unevenly (`account` is not stripped or lowercased, `provider` is lowercased, `event_id` is stripped). Distinct tuples can therefore collapse to one key, and one account can split into two.",
+    "failure_scenario": "(account='a', provider='b', event_id='c/d') and (account='a', provider='b/c', event_id='d') both produce `a/b/c/d`. The second charge is silently ignored as a duplicate. In the other direction, `'acme '` and `'acme'` become different accounts, so a duplicate charge is recorded and a refund may miss its charge."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 12,
+    "summary": "`invoice_label` changes the human-visible invoice identifier from `INV-000123` to `YYYY/NNNN`. The `number` is still a global, never-reset sequence, so the label looks like a per-year counter when it is not. It also changes retroactively for every existing row.",
+    "failure_scenario": "Invoice 123 was sent to a customer as `INV-000123`. After deploy, `outstanding()` lists it as `2025/0123`, so support staff and reconciliation that match on the old label fail to find it. Reading `2026/0457` as the 457th invoice of 2026 is wrong, because the first invoice of 2026 is still the global number plus one. Once `number` passes 9999, `:04d` stops padding, so widths become inconsistent (`2026/10000`). This is REL.2 for the retroactive label change."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 49,
+    "summary": "`outstanding()` output now includes the raw `order_ref` as a free-text field in the middle of a space-separated string. Existing consumers of the `LABEL AMOUNT` shape are broken by the changed format.",
+    "failure_scenario": "A consumer that does `label, amount = line.split()` now gets 3 or more tokens and raises. An `order_ref` containing spaces, such as `'PO 77'`, makes the line impossible to parse unambiguously, and order references are exposed in listings that previously did not show them."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 31,
+    "summary": "`issue()` allocates `number = MAX(number)+1` in a separate statement from the insert, and `number` has no UNIQUE constraint. `invoice_label` is now the customer-facing identifier built from that number.",
+    "failure_scenario": "Two processes (or two connections) call `issue()` for different orders at the same time. Both read MAX = 41 and both insert number 42. Two invoices then carry the identical label `2026/0042`, and `outstanding()` ordering is ambiguous. This race predates the diff, but the diff makes the label the identity shown to users."
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 28,
+    "summary": "`record_charge` and `record_refund` now take two adjacent positional `str` parameters, `account` and `provider`. Swapping them type-checks and runs, and produces a different key with no error.",
+    "failure_scenario": "A call `record_refund(conn, 'stripe', 'acme', 'evt_1')` builds `stripe/acme/evt_1`. It matches 0 rows and returns False, so the refund is silently dropped. Calls written for the old signature that already pass 3 or 4 arguments fail loudly, but newly written calls can transpose the two names with nothing to catch it."
+  }
+]
+```

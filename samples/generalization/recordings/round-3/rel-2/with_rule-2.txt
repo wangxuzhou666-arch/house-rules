@@ -1,0 +1,46 @@
+```json
+[
+  {
+    "file": "code/item_index.py",
+    "line": 42,
+    "summary": "The KEY_VERSION bump to 2 has no migration. Import ignores every stored v1 row when building `seen`, so the whole existing index is re-imported as new rows.",
+    "failure_scenario": "The file holds v1 rows such as {key: 'https://a.com/feed|g1', read: True}. After the upgrade, `seen` is empty, so import_items appends {key: 'a.com|g1', key_version: 2, read: False}. Every item that was already read reappears as unread and every item is duplicated. The v1 rows stay in the file permanently with no cleanup. This is the REL.2 case: a stored-ID change needs compatible reads or a migration plus old-identity checks."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 57,
+    "summary": "mark_read now matches only rows whose key_version equals KEY_VERSION, so legacy v1 rows can never be marked read. The key computed from the new item_key can no longer equal a v1 key anyway.",
+    "failure_scenario": "A user calls mark_read(path, 'https://a.com/feed', 'g1') for an item stored as a v1 row. No row matches, so it returns False and the item stays unread forever. unread_titles also lists the stale v1 row alongside its re-imported v2 duplicate. Both copies show as unread, but only the v2 copy can ever be cleared."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 18,
+    "summary": "The item key now uses only the feed's host, so distinct feeds on the same host share a key namespace. Their items collide on the same guid and one is silently dropped.",
+    "failure_scenario": "Feeds https://blog.example.com/news.xml and https://blog.example.com/releases.xml both contain guid '1'. Both now produce the key 'blog.example.com|1'. The second feed's item is treated as already seen and skipped in import_items. mark_read on one feed also marks the other's row read. The old key used the full feed_url, so this is a new data-loss path."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 12,
+    "summary": "feed_host is copy-pasted verbatim from code/reading_list.py instead of being shared.",
+    "failure_scenario": "The same URL-parsing helper now exists in two modules. A later fix, such as handling ports, userinfo or scheme-less URLs, has to be made twice, and the two copies can drift apart so the two stores derive different identities for the same feed. Extract it into one shared helper (the second repetition, so close to P2.2)."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 12,
+    "summary": "feed_host parsing is fragile. It does not strip userinfo or port, and it does not stop at '?' or '#' when the URL has no path.",
+    "failure_scenario": "'https://user@Example.com/feed' gives host 'user@example.com'. 'https://example.com:443/feed' gives 'example.com:443'. 'https://example.com?x=1' gives 'example.com?x=1'. The same feed written two ways yields two different keys, so its items are imported twice. A scheme-less 'example.com/feed' works only because split('//')[-1] happens to tolerate it. Use urllib.parse.urlsplit(...).hostname."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 21,
+    "summary": "label() returns from inside `if label_style == 1` and then falls through to the other format with no `else`. Any unknown label_style also silently gets the v2 format.",
+    "failure_scenario": "This is P1.3: a branch that returns needs an `else`, and it is not a guard clause because both arms are real formats. A row with label_style 3 or a corrupted value is rendered as '<feed>#<n>' without any error. Mixed files then show different label formats for rows of the same feed ('a.com-0001' beside 'a.com#2')."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 21,
+    "summary": "Old rows keep label_style 1 while new rows are written with style 2, and there is no migration. The same feed's listing now mixes two label formats with different zero-padding.",
+    "failure_scenario": "A file with a.com rows numbered 1 to 3 in style 1 gets new items appended in style 2. listing() then returns 'a.com-0001', 'a.com-0002', 'a.com-0003', 'a.com#4'. Any consumer that parses or sorts by label (for example lexicographic sorting) sees inconsistent ordering and formats."
+  }
+]
+```

@@ -1,0 +1,52 @@
+```json
+[
+  {
+    "file": "code/item_index.py",
+    "line": 40,
+    "summary": "Bumping KEY_VERSION to 2 and filtering `seen` to v2 rows means every existing v1 row is ignored, so every item already stored is imported again as a duplicate.",
+    "failure_scenario": "The file holds v1 rows such as {key: 'https://a.com/feed|g1', key_version: 1}. `import_items` is called again for the same feed and guid g1. `seen` contains no v1 keys, and the new key 'a.com|g1' is not in it, so a second v2 row is appended with read=False. Every stored item is duplicated on the first run after upgrade, and the file keeps both versions."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 57,
+    "summary": "`mark_read` only matches rows with key_version == KEY_VERSION. Existing v1 rows can never be marked read, and the call returns False for items that exist.",
+    "failure_scenario": "A user has an unread v1 row from before the upgrade. `mark_read(path, 'https://a.com/feed', 'g1')` builds the key 'a.com|g1', which cannot equal the v1 key 'https://a.com/feed|g1'. The version check would also reject it. The call returns False, the v1 row stays unread, and `unread_titles` lists it forever."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 4,
+    "summary": "The key format changes with no migration of v1 rows. Their read state is lost, and v1 rows linger as unread next to the new v2 rows.",
+    "failure_scenario": "The file has v1 rows, some read=True. After the bump, `import_items` adds fresh v2 rows with read=False for the same guids, because v1 rows are excluded from `seen`. `unread_titles` returns every title twice, and items the user already read show up as unread again. A load-time conversion is needed: rewrite each v1 key to the v2 form, carry `read` over, and set key_version to 2. Otherwise `seen` and `mark_read` should accept both versions. The REL.3/REL.1 rules (usable state is kept until replacement is validated) point the same way."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 17,
+    "summary": "The new key keeps only the host from the feed URL, so distinct feeds on the same host share one key namespace and their items collide.",
+    "failure_scenario": "Feeds 'https://blog.example.com/tech.xml' and 'https://blog.example.com/news.xml' both publish guid '1'. Both produce the key 'blog.example.com|1'. The second feed's item is treated as already seen and is silently dropped by `import_items`. `mark_read` on one feed's item marks the first matching row, which may belong to the other feed. The old key used the full feed URL and did not have this collision."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 4,
+    "summary": "LABEL_STYLE is bumped to 2 and `label` keeps the v1 branch, but old rows are not migrated. Labels in one listing are now inconsistent, and the stored label_style is trusted without validation.",
+    "failure_scenario": "A file holding rows 'a.com-0001' (style 1) gets new items and shows 'a.com#2' (style 2) in the same `listing`. Labels in one feed become mixed, so earlier labels cannot be matched to later ones by sight. Any row with an unexpected label_style, such as 0, 3 or None, silently takes the style-2 fallback instead of raising an error. The `else`-less `if` followed by an implicit default hides corrupt rows."
+  },
+  {
+    "file": "code/reading_list.py",
+    "line": 12,
+    "summary": "`feed_host` is copy-pasted identically in reading_list.py and item_index.py, so the two copies can drift. The two modules also duplicate load_rows, save_rows and the error-class pattern.",
+    "failure_scenario": "This diff has to fix the key-collision issue in `feed_host`, or change its normalisation (for example port or userinfo handling). If only one file is updated, the same feed gets different identities in the two modules, and the bug fix lands in half the code. Per the P2.2 rule the logic should live in one shared helper module."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 13,
+    "summary": "`feed_host` parsing is fragile. Userinfo and ports are kept, and a scheme-less or query-only URL produces unexpected hosts.",
+    "failure_scenario": "'https://user:pw@a.com/feed' gives host 'user:pw@a.com' and 'https://a.com:443/feed' gives 'a.com:443', so the same site gets different keys. A URL such as 'https://a.com?x=1' gives 'a.com?x=1' because only '/' is split on. The same logical feed then appears as different feeds, and items are imported twice. `urllib.parse.urlsplit(...).hostname` already handles all of these cases."
+  },
+  {
+    "file": "code/item_index.py",
+    "line": 27,
+    "summary": "`load_rows` checks that rows have the required keys but does not check the key_version value. The new code compares `row['key_version'] == KEY_VERSION` on whatever shape is stored, and it never validates or handles older versions.",
+    "failure_scenario": "A hand-edited or partly written file has a row with key_version null or '1' (a string). It passes the FIELDS check and is silently ignored by `import_items` and `mark_read`. The result is duplicate rows and failed read marks, with no named error and no log. Per REL.3, a wrong shape should take the same named-error path as a parse failure."
+  }
+]
+```

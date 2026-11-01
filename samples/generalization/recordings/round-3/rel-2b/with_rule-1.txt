@@ -1,0 +1,34 @@
+```json
+[
+  {
+    "file": "code/payment_events.py",
+    "line": 5,
+    "summary": "Changing the stored key format (`provider:id` to `account/provider/id`) has no migration or compatible read, so existing rows no longer match.",
+    "failure_scenario": "An existing ledger holds the key `stripe:ev_1`. The same webhook is replayed after deploy, and `record_charge` builds `acct/stripe/ev_1`. That key is new, so `INSERT OR IGNORE` inserts it and returns True. The charge is now counted twice in `net_cents`. `record_refund` for an old charge builds the new key, matches 0 rows and returns False, so the refund is silently lost and `net_cents` stays overstated. Violates REL.2 (a stored-ID change needs compatible reads or a migration, plus old-identity checks)."
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 6,
+    "summary": "`account` is not normalized (no strip or case handling), unlike `provider` and `event_id`. The `/` delimiter is not escaped, so different tuples can produce the same key.",
+    "failure_scenario": "`record_charge(conn, 'acme', ...)` and `record_charge(conn, 'Acme ', ...)` produce different keys for the same event, so a replayed webhook is double counted. In the other direction, `('a/b', 'c', 'x')` and `('a', 'b', 'c/x')` both give `a/b/c/x`, so a charge from one account is dropped as a duplicate or a refund hits the wrong event."
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 19,
+    "summary": "Inserting `account` as a new required positional parameter before `provider` in `record_charge` and `record_refund` changes the public signature, and `event_key` changes with it. The remaining arguments shift position.",
+    "failure_scenario": "A caller written for the old signature, `record_refund(conn, 'stripe', 'ch_1')`, is now read as account='stripe', provider='ch_1' and fails with a TypeError for the missing `charge_id`. If the old arguments happen to fit the new arity, the call silently builds a wrong key (account=provider). Only the TypeError case is loud, and no caller in the repo was updated to confirm either case."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 12,
+    "summary": "The invoice label format changes from `INV-000001` to `YYYY/NNNN`. The label is derived at read time, so every already-issued invoice is silently renumbered with no migration. The `number` counter is global rather than per year, and `:04d` stops padding past 9999.",
+    "failure_scenario": "A customer holds a PDF or payment reference reading `INV-000012`. After deploy, `outstanding()` and `issue()` show `2025/0012`, so reconciliation by label fails. In 2026 the counter does not reset, so the first 2026 invoice might be labelled `2026/0431`, which looks wrong for a year-prefixed scheme. Labels also stop sorting lexicographically once the number reaches 5 digits (`2026/10000`). REL.2 treats a new label over the same key as exempt, but old labels already handed out are still invalidated."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 49,
+    "summary": "`outstanding()` now includes the raw `order_ref` in each output string, which changes its line format and exposes an internal reference.",
+    "failure_scenario": "A consumer that splits each line as `label amount` now gets `label order_ref amount`, so it mis-parses and takes the order_ref as the amount. If the order_ref is customer-identifying, it now shows up in any report or log built from this list. The change is unrelated to the label change in the same commit."
+  }
+]
+```

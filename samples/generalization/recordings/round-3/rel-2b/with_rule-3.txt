@@ -1,0 +1,52 @@
+```json
+[
+  {
+    "file": "code/payment_events.py",
+    "line": 6,
+    "summary": "The `event_key` format changed from `provider:id` to `account/provider/id` with no migration or compatibility read. Every key already stored in `events` is orphaned.",
+    "failure_scenario": "The ledger holds the row `stripe:ch_1` from before this change. A provider webhook retry calls `record_charge(conn, 'acme', 'stripe', 'ch_1', 500)`. The new key `acme/stripe/ch_1` does not match, so `INSERT OR IGNORE` inserts a second row and `net_cents` double counts the charge. `record_refund` for that charge looks up `acme/stripe/ch_1`, finds the new row and refunds it, leaving the old row unrefunded. Idempotency and refund state are both broken for all historical data.",
+    "category": "rel-2",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 6,
+    "summary": "The `/` separator is ambiguous, and `account` is not normalized the way `provider` and `event_id` are. Distinct tuples can collide, and equivalent ones can diverge.",
+    "failure_scenario": "`event_key('a', 'b/c', 'x')` and `event_key('a/b', 'c', 'x')` both give `a/b/c/x`. A charge from one account or provider can be silently ignored by `INSERT OR IGNORE` as a duplicate, or a refund can hit the wrong row. Separately, `account='Acme'` and `account=' acme'` produce different keys, because the account is neither stripped nor lowercased, so retries with differently formatted account strings are not deduplicated. An empty `account` yields `/stripe/id` with no error.",
+    "category": "p0f-1",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 19,
+    "summary": "`account` is inserted as a new positional parameter before `provider` in `record_charge` and `record_refund`. Callers written for the old signature break or mis-bind, with no migration of call sites in this change.",
+    "failure_scenario": "A caller still using `record_refund(conn, 'stripe', 'ch_1')` raises `TypeError` for the missing argument. A caller using `record_charge(conn, 'stripe', 'ch_1', 500)` binds `account='stripe'`, `provider='ch_1'`, `event_id=500` and then fails on `500.strip()`. If any caller passed five arguments (for example a trailing default), the values would be silently mis-bound into the key. Appending `account` as a keyword argument, or updating every call site, would avoid this.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 12,
+    "summary": "The invoice label format changed from `INV-%06d` to `YYYY/%04d`, so labels already issued to customers change for existing rows. The 4-digit width also overflows.",
+    "failure_scenario": "Invoice 12, previously communicated as `INV-000012`, now renders as `2025/0012` in `outstanding()`. External references, such as customer emails or accounting exports keyed on the old label, no longer match. `number` is a global `MAX+1` counter that never resets per year, so once it passes 9999 the label becomes `2026/10000`. The widths are then inconsistent and the strings sort wrongly, and a year-prefixed `YYYY/NNNN` label implies a per-year sequence that does not exist.",
+    "category": "rel-2",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 49,
+    "summary": "`outstanding()` now inserts the raw `order_ref` into each output line. This changes the line format that consumers parse, and the free-text field makes the line ambiguous.",
+    "failure_scenario": "A consumer that splits each line as `<label> <amount>` now gets three or more tokens and mis-parses or crashes. `order_ref` is only `.strip()`ped, so it can contain spaces, for example `ORD 17 B`, which makes the amount impossible to find reliably. Order references are also exposed in any report or log that prints this list, which may not be intended.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 31,
+    "summary": "`issue()` allocates `number` with a separate `SELECT MAX(number)+1` before the insert, and nothing makes the pair atomic. The new label depends on that number being unique and gap-free.",
+    "failure_scenario": "Two connections to the same register file both read MAX=41 and both compute 42. They insert different `order_ref`s, which have different uids, so both inserts succeed and two invoices carry the label `2026/0042`. The same duplicate occurs with the old format, but the shorter, year-prefixed label makes collisions look more legitimate and harder to spot.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  }
+]
+```

@@ -1,0 +1,84 @@
+```json
+[
+  {
+    "file": "code/access_tail.py",
+    "line": 11,
+    "summary": "load_position only guards JSON syntax. A valid JSON file with the wrong shape, or a non-UTF-8 file, raises uncaught (KeyError/TypeError/AttributeError/UnicodeDecodeError) instead of taking the same fresh-start fallback.",
+    "failure_scenario": "The position file holds `[]`, `{}`, `{\"inode\":1}`, `{\"offset\":null}` or `{\"offset\":\"5\"}`, or was truncated and contains garbage bytes. `json.loads` succeeds or `read_text` raises UnicodeDecodeError (a ValueError, not a JSONDecodeError). `position[\"offset\"]` or `position[\"inode\"]` then raises, or the comparison `start > info.st_size` raises TypeError. Every later run fails the same way until someone deletes the file by hand. `batch_log_reader.load_checkpoint` in the same diff does handle shape and encoding, so the two modules are inconsistent.",
+    "category": "rel-3",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 29,
+    "summary": "A negative stored offset is not rejected. Only `start > st_size` is checked, so a bad value reaches `handle.seek`.",
+    "failure_scenario": "The position file contains `{\"inode\": <current inode>, \"offset\": -5}`. `start` is -5, which is not greater than `st_size`, so `handle.seek(-5)` on a binary file raises OSError (Invalid argument). Every run then fails, the same persistent-failure pattern as the wrong-shape case.",
+    "category": "rel-3",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 26,
+    "summary": "`stat()` and `open()` are separate, non-atomic steps. The inode is taken from the path before the file is opened, so it can describe a different file than the one actually read.",
+    "failure_scenario": "Logrotate renames the log between `log_path.stat()` and `log_path.open()`. The handle reads the new file, but the saved `inode` is the old file's. The next run sees an inode mismatch and re-reads from 0, producing duplicate lines. In the opposite order, the old offset is applied to the new file and lines are skipped. Use `os.fstat(handle.fileno())` after opening.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 28,
+    "summary": "Rotation by copy-truncate is detected only when the file is now smaller than the stored offset. The inode stays the same, so a file that has regrown past the old offset is read from the middle.",
+    "failure_scenario": "The log was 1000 bytes and the stored offset is 1000. It is truncated and rewritten to 1500 bytes before the next run. The inode matches and `start` (1000) is below `st_size` (1500), so the first 1000 bytes of new data are skipped silently. The same blind spot exists in batch_log_reader, where the line count is compared with `len(rows)` only.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 36,
+    "summary": "The position is committed before the caller has processed the returned lines, so delivery is at-most-once. The same pattern is in batch_log_reader.read_new_lines.",
+    "failure_scenario": "`read_new_lines` saves the new offset and returns the lines. The caller crashes or raises while handling them (parse error, DB down). The next run starts after those lines and they are permanently lost. The state is advanced before the work it represents has succeeded.",
+    "category": "rel-1",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 37,
+    "summary": "`str.splitlines()` splits on more than `\\n`: `\\r`, `\\x0b`, `\\x0c`, `\\x1c`-`\\x1e`, `\\x85`, `\\u2028` and `\\u2029`. The byte offset was computed on `\\n` boundaries, so one log line can come back as several.",
+    "failure_scenario": "An access-log line contains a user-agent or query string with `\\x0b`, `\\x0c` or `\\u2028` (attacker-controlled input is plausible). One logical line comes back as two or more entries, which breaks downstream parsing and line counts. Use `decode(...).split(\"\\n\")` on the `\\n`-terminated `complete` slice, and strip a trailing `\\r` if needed.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 34,
+    "summary": "The whole log is read into memory with `readlines()` on every call just to count lines. The checkpoint is a line index, not a byte offset, so cost grows with total file size instead of new data.",
+    "failure_scenario": "A multi-GB access log that is polled periodically is fully loaded and re-split each run, which costs memory and I/O out of proportion to the few new lines. Storing a byte offset and inode, as access_tail does, or streaming with `itertools.islice` avoids this.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 1,
+    "summary": "The new module copies access_tail.py (atomic `.part` + `os.replace` save, load-with-fallback, `read_new_lines` with the same signature) with small variations, and the two diverge in robustness.",
+    "failure_scenario": "Two near-identical state-file implementations now exist. A fix to one, such as the shape validation present only here, does not reach the other. That is exactly the gap in `access_tail.load_position`. Extract a shared atomic JSON state helper or pick one reader.",
+    "category": "p2-2",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 20,
+    "summary": "The temp-file name is derived with `with_suffix(\".part\")`, which replaces the extension. It can collide with the real state file or with a sibling state file, and nothing is fsynced before the `os.replace`.",
+    "failure_scenario": "Position paths `pos.json` and `pos.txt` in one directory share the temp name `pos.part`. A path already ending in `.part` makes the write and the replace target the same file. Without an fsync, a power loss after the replace can leave an empty or zero-length state file. In batch_log_reader that silently resets to 0, which replays the whole log.",
+    "category": "rel-1",
+    "severity": "nice"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 38,
+    "summary": "Generic names (`data`, `info`, `chunk`, `fresh`) are used, and the reset branches `if done > len(rows): done = 0` and `if start > info.st_size: start = 0` assign without an `else`. Neither the partial-line drop nor the reset has a comment explaining it.",
+    "failure_scenario": "P2.4 asks for qualified names (`data` in load_checkpoint, `info` in read_new_lines). P1.3 requires an `else` on a branch that assigns, and these are not guard clauses. The non-obvious decisions (dropping the unterminated last line, resetting on a shrunken file) carry no comment (P3.2), which hurts maintainability.",
+    "category": "p2-4",
+    "severity": "should-fix"
+  }
+]
+```

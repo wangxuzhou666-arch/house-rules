@@ -1,0 +1,84 @@
+```json
+[
+  {
+    "file": "code/site_publisher.py",
+    "line": 8,
+    "summary": "publish() deletes the live directory before any page has been rendered, so a failing renderer leaves the live site empty or half-written.",
+    "failure_scenario": "The live site holds 50 pages and publish() is called. rmtree(live_dir) removes all of them. The 20th render callable raises. Pages 21-50 are never written, and the site stays broken until the next successful publish. Concurrent read_page() and page_names() calls during the loop also see missing pages. Fix: render every page first, write into a sibling temp directory, then swap it into place with an atomic rename.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 25,
+    "summary": "rebuild() removes the whole cache before regenerating, so a render failure destroys the existing cache and leaves it partially rebuilt.",
+    "failure_scenario": "The cache holds 100 good PNGs and rebuild(names) is called. rmtree wipes them all. The render for the 3rd name raises, so the call aborts with only 2 entries. Every later get() has to re-render, and the earlier good state is gone. Concurrent get() calls during the rebuild can also see exists() true and then fail in read_bytes() after the file is deleted. Fix: build into a new directory and swap it in, or overwrite entries one by one.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 12,
+    "summary": "Page names are joined to live_dir without validation, so '..' segments or an absolute name write outside live_dir. read_page() has the same hole.",
+    "failure_scenario": "pages = {'../../etc/cron.d/x': ...} or {'/home/u/.ssh/authorized_keys': ...} makes live_dir / name resolve outside live_dir. Path.__truediv__ with an absolute right-hand side discards live_dir. The parent directories are created and the file is overwritten. read_page(live_dir, '../secret') reads arbitrary files. Fix: resolve the target and check that it is inside live_dir at the boundary.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 12,
+    "summary": "The cache key name goes unvalidated into a filesystem path, so names containing '/' or '..' escape root.",
+    "failure_scenario": "get('../../tmp/x') writes and reads '<root>/../../tmp/x.png' and its .part file outside the cache. A name like 'a/b' fails with FileNotFoundError in write_bytes, because only root is created and not the nested parent. rebuild() later does not remove files written outside root.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 18,
+    "summary": "The temp file name '<name>.part' is shared by all concurrent callers, and with_suffix replaces any dotted suffix in name.",
+    "failure_scenario": "Two threads call get('a') on a cold cache. Both write 'a.part'. One thread's replace() moves the file away, so the other thread's replace() raises FileNotFoundError. Interleaved writes can also publish a torn PNG. Names 'v1.2' and 'v1.3' both map to 'v1.part', and 'v1.2' also collides with a name 'v1' that happens to share the same stem. Fix: use a unique temp name, such as tempfile.NamedTemporaryFile in root or a pid/uuid suffix, and append '.part' rather than replacing the suffix.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 19,
+    "summary": "When render() raises, the .part file and any partial write stay behind and are never cleaned up.",
+    "failure_scenario": "render(name) raises after part is created, or replace() fails. A stale '<name>.part' stays in root forever. cached_names() ignores .part files, so the leak is invisible, and rebuild() is the only thing that ever clears it. Fix: wrap the write and replace in try/finally and unlink the .part file.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 21,
+    "summary": "get() checks exists() and then read_bytes() separately (TOCTOU), and it re-reads from disk the bytes it just wrote.",
+    "failure_scenario": "Thread A sees exists() true. Thread B runs rebuild() and removes the directory. A's read_bytes() raises FileNotFoundError. On a cache miss, the freshly rendered bytes are written and then read back from disk, which is a wasted I/O round trip. Fix: return the rendered bytes directly on a miss, and handle FileNotFoundError on a hit by re-rendering.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 8,
+    "summary": "publish() rmtree's whatever live_dir it is given with no guard, so a wrong argument deletes an arbitrary directory.",
+    "failure_scenario": "A caller passes Path('.'), Path.home() or a parent of the site root (for example a config or default-value bug). publish() recursively deletes everything there before writing any page. Fix: delete only content the publisher itself created, or swap in a staging directory instead of deleting a caller-supplied path.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/site_publisher.py",
+    "line": 14,
+    "summary": "Page names that nest under one another, such as 'a' and 'a/b', break publish() partway through.",
+    "failure_scenario": "pages = {'docs': ..., 'docs/index.html': ...}. 'docs' is written as a file, then target.parent.mkdir for 'docs/index.html' raises FileExistsError or NotADirectoryError. The live directory has already been wiped, so it is left half-written.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/preview_cache.py",
+    "line": 28,
+    "summary": "rebuild() returns len(names) even when names contains duplicates, so the count does not match the entries actually rendered.",
+    "failure_scenario": "rebuild(['a', 'a', 'b']) renders 'a' once. The second get('a') is a cache hit. The method returns 3 although only 2 entries exist, so a caller that reports or asserts on the count is misled. Fix: dedupe the names or return len(self.cached_names()).",
+    "category": "unmapped",
+    "severity": "nice"
+  }
+]
+```

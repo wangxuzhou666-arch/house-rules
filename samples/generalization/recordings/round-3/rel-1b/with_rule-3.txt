@@ -1,0 +1,68 @@
+```json
+[
+  {
+    "file": "code/sender_index.py",
+    "line": 13,
+    "summary": "rebuild() truncates the live index with open(\"w\") and rewrites it in place, so a failed or interrupted write destroys the previous valid index. Concurrent readers also see a half-written file.",
+    "failure_scenario": "The disk fills, the process is killed, or a write raises midway through the loop. The old good index is already truncated, so it is gone. A concurrent folder_for() reads the partial file, sees no valid footer, treats it as corrupt, and starts its own rebuild() that races the first writer. Fix by writing to a temp file in the same directory and swapping it in with os.replace(). This breaks REL.1: keep usable state until the replacement is ready.",
+    "category": "rel-1",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 20,
+    "summary": "apply_routes() opens the routes file with \"w\", truncating it, and then validates each route while writing. A RouteError on route N leaves a truncated file holding only routes 0..N-1.",
+    "failure_scenario": "A previously valid routes file has 50 domains. The new list has a bad domain at position 30. The file is truncated and rewritten with 29 entries, then RouteError propagates. Mail for the other 21 domains now falls through to \"inbox\" in folder_for(). Fix by validating and rendering every route first, then writing atomically (temp file plus os.replace). This breaks REL.1.",
+    "category": "rel-1",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 37,
+    "summary": "The index is only rebuilt when the file is corrupt or missing. A valid index is never refreshed, so it goes stale as soon as the underlying routes change.",
+    "failure_scenario": "The index is built from read_routes(). The user adds or changes a route in the source. _load() still sees a well-formed file with a matching footer, so folder_for() keeps returning the old folder, or \"inbox\", indefinitely. The footer only detects truncation, not staleness. The index needs an invalidation signal such as an mtime or version comparison, or a rebuild whenever the routes change.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 15,
+    "summary": "rebuild() writes domain and folder with no validation. A folder containing a newline, a carriage return or other splitlines() separators breaks the index format. The footer count then never matches, so the index looks corrupt on every read.",
+    "failure_scenario": "read_routes yields (\"a.com\", \"x\\ny\"). The file gets 2 physical lines for 1 route, and the footer says count 1 while _load() computes 2. _load() returns None on every call, so every folder_for() call runs a full rebuild: it rewrites the whole file and then returns. Lookups also use the rebuilt in-memory dict, so the bad entry is silently misrouted. The same applies to tabs inside a domain, or an empty domain or folder. This breaks REL.3: a wrong shape needs a named error or fallback. The validation in mail_routes.render_route is not reused here.",
+    "category": "rel-3",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 37,
+    "summary": "An OSError raised by rebuild() inside folder_for() (read-only directory, full disk, permissions) propagates to the caller. The routing lookup fails even though rebuild() already holds the correct table in memory.",
+    "failure_scenario": "The index directory is unwritable. _load() returns None and rebuild() raises PermissionError at open(\"w\"). folder_for() crashes instead of returning the correct folder from the routes it just read. Degrade explicitly: catch OSError around the write, log it, and return dict(routes). This breaks P0F.2.",
+    "category": "p0f-2",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 37,
+    "summary": "folder_for() re-reads and re-parses the whole routes file on every lookup. load_routes() also lets UnicodeDecodeError escape and silently skips malformed lines.",
+    "failure_scenario": "Classifying N messages does N full file reads and parses, and all of it is on the hot path. If the file contains non-UTF-8 bytes, read_text raises UnicodeDecodeError out of folder_for() and crashes the caller. A line with a missing tab or an empty folder is dropped with no log, so that domain silently falls back to \"inbox\". Cache the table, or load it once per batch. Handle the decode error explicitly and log skipped lines. This breaks P0F.2 and REL.3.",
+    "category": "p0f-2",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 9,
+    "summary": "render_route() validation is incomplete. It misses tabs and carriage returns inside the domain, line separators other than \\n in the folder, and the string \"None\" produced when the folder is None.",
+    "failure_scenario": "A domain of \"a\\tb.com\" passes the checks and writes \"a\\tb.com\\tfolder\", which load_routes() reads back as domain \"a\" and folder \"b.com\\tfolder\". A folder with \"\\r\" or \"\\u2028\" is split by splitlines() into two records on reload. {\"domain\": \"x.com\", \"folder\": None} becomes the folder \"None\" via str(None). A domain like \".\" or \"a.\" also passes the check \"'.' in domain\". The validation does not match the file format that load_routes() parses.",
+    "category": "rel-3",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 5,
+    "summary": "SenderIndex re-implements the domain-to-folder TSV format, domain normalisation and folder_for() lookup already present in mail_routes.py. Nothing connects the two.",
+    "failure_scenario": "The two modules write and read different file formats: SenderIndex adds an \"end\" footer and mail_routes does not. The address-to-domain parsing and the \"inbox\" default are copy-pasted. A change to one (for example, the normalisation rules) will not reach the other, and the two lookups will return different folders for the same address. Build the index as a layer over load_routes(): pass `lambda: load_routes(p).items()` as read_routes, and share one domain-extraction helper.",
+    "category": "p2-2",
+    "severity": "should-fix"
+  }
+]
+```

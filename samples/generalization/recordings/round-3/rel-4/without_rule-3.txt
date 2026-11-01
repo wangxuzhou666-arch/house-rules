@@ -1,0 +1,76 @@
+```json
+[
+  {
+    "file": "code/sms_codes.py",
+    "line": 22,
+    "summary": "The per-phone limit is a check-then-act sequence with no lock. `_used` reads the count, then `deliver` runs, and only afterwards is the count written back, so concurrent requests for one phone all pass the check.",
+    "failure_scenario": "With limit=3, 10 concurrent send_code('+15551234567') calls each read used=0, pass the check, and all send an SMS. Each then writes sent[phone]=1, so the stored count ends at 1. The sibling mail_codes.py reserves under a lock, which shows the intended design. An attacker can use the race to pump SMS cost and spam a victim's phone.",
+    "category": "unmapped",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 29,
+    "summary": "`self.sent[phone] = used + 1` writes back a stale `used` read before the slow `deliver()` call. It is a lost update, and a day rollover during delivery can also write a stale count into the freshly cleared dict.",
+    "failure_scenario": "Request A reads used=2 and blocks in gateway.deliver. Request B also reads used=2 and delivers. Both then write 3, so 4 codes were sent while the counter says 3. If midnight passes while A is in deliver, A stores the old day's count into the new day's dict, and the phone starts the new day with 1 code already used.",
+    "category": "unmapped",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 31,
+    "summary": "The quota is reserved before `transport.send`, and nothing rolls it back when send raises. A transport outage burns the user's daily allowance without a code being delivered.",
+    "failure_scenario": "The SMTP server is down. A user clicks 'send code' 3 times and each call raises from transport.send, but _reserve already incremented the counter to 3. When the transport recovers, the user gets TooManyRequests until the next day and never receives a code. Release the reservation in an `except` and re-raise, or count only after success while still holding the lock against the race.",
+    "category": "p0f-2",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 20,
+    "summary": "The rate-limit key is the raw address string with no normalization. Case variants of an email and format variants of a phone number are counted as different recipients.",
+    "failure_scenario": "With limit=3, requests for 'Bob@x.com', 'bob@x.com' and 'BOB@X.COM' each get their own counter, as do '+1 555 123 4567' and '+15551234567' in sms_codes.py. The per-address cap is bypassed by trivial case or format changes, so one mailbox or phone can receive unlimited codes.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 1,
+    "summary": "sms_codes.py and mail_codes.py duplicate the whole mechanism: the TooManyRequests class, the daily-reset counter, the 6-digit code generation and the limit check. The copies have already drifted, because only the mail version is locked.",
+    "failure_scenario": "A fix such as the lock, normalization or rollback must be applied twice. It was already applied to one copy only, which is how the race above ended up in the SMS path. Extract a shared DailyLimiter plus one TooManyRequests and one `make_code()` helper (P2.2, a third repetition would be too late).",
+    "category": "p2-2",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 24,
+    "summary": "The exception message embeds the full phone number, and the mail version embeds the full email address, so personal data goes into error text that will end up in logs and API responses.",
+    "failure_scenario": "TooManyRequests(f'{phone} already received 3 codes today') propagates to a top-level handler or HTTP error body and is logged. The user's PII is then stored in logs, or returned to a caller who can probe which numbers or addresses were recently sent codes.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/sms_codes.py",
+    "line": 16,
+    "summary": "`_used` is named like a getter but mutates state, changing `self.day` and clearing `self.sent`. The reset is a hidden side effect of reading a count and is not synchronized.",
+    "failure_scenario": "A reader of send_code sees only a count lookup and misses that the day reset happens there. Under concurrency, one thread's clear() can wipe counts that another thread is about to read or write, which compounds the race in send_code.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 32,
+    "summary": "The generated code is returned to the caller and is never stored, hashed, expired or tied to the address, so this module cannot verify codes.",
+    "failure_scenario": "Any caller or logging wrapper that receives the plaintext return value can leak it. Callers must build their own storage and verification, and each is likely to implement its own expiry and attempt limits inconsistently, so brute-forcing a 6-digit code is not bounded here.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/mail_codes.py",
+    "line": 12,
+    "summary": "The mailer is built on `date.today`, which uses the server's local timezone, and the `self.today() != self.day` rollover calls `today()` twice. The per-day window therefore moves with server timezone and DST, and the two calls can straddle midnight.",
+    "failure_scenario": "A server in a different timezone resets quotas at an unexpected hour, so users get a fresh allowance in the middle of their local day. A fixed-calendar-day window also allows a burst of 2×limit across midnight, and the double `today()` call is needlessly non-atomic.",
+    "category": "unmapped",
+    "severity": "nice"
+  }
+]
+```

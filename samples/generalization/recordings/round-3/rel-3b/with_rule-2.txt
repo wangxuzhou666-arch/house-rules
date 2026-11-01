@@ -1,0 +1,84 @@
+```json
+[
+  {
+    "file": "code/access_tail.py",
+    "line": 12,
+    "summary": "load_position checks only that the JSON parses. Valid JSON with the wrong shape (a list, null, a missing key, a string offset, a negative offset) passes through and crashes read_new_lines.",
+    "failure_scenario": "The position file contains `[]`, `null`, `{}` or `{\"inode\": 1, \"offset\": \"5\"}`. load_position returns it unchanged. read_new_lines then raises KeyError or TypeError on `position[\"offset\"]`, or ValueError from `handle.seek(-5)`. Because the bad file is never replaced, every later run fails the same way. batch_log_reader.load_checkpoint in this same diff already validates shape and falls back to the start.",
+    "category": "rel-3",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 12,
+    "summary": "A position file that is not valid UTF-8 raises UnicodeDecodeError, which is a ValueError but not a JSONDecodeError. It is not caught, so the documented 'read from the start' fallback is skipped. The try also wraps two failing calls on one line.",
+    "failure_scenario": "A partial write, disk corruption or a stray binary file leaves invalid bytes in the position file. path.read_text(encoding='utf-8') raises UnicodeDecodeError, which propagates out of read_new_lines and the tail job crashes on every run. The sibling module catches this case separately.",
+    "category": "p0e-1",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 28,
+    "summary": "The resets `start = 0` when the file is truncated or the inode changes are silent. They happen with no log line and no named fallback. The reset to 0 also re-delivers the whole file.",
+    "failure_scenario": "The access log is rotated or truncated. read_new_lines quietly re-reads from offset 0 and returns lines that may have been processed before, and the operator sees nothing to explain the duplicates or the jump.",
+    "category": "p0f-2",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 26,
+    "summary": "The inode comes from `log_path.stat()` before the file is opened, and the data is read from whatever file the path points to at open time. Rotation in between pairs the old inode with the new file's offset. Rotation detection by inode alone also misses delete-and-recreate (inode reuse) and copytruncate.",
+    "failure_scenario": "The log is rotated between stat() and open(). The saved state is (old_inode, offset in the new file). Or the file is truncated in place with the same inode and regrows past the saved offset. start_offset is then valid but lands mid-line or skips unread data. Taking the inode with os.fstat(handle.fileno()) after opening removes the first race.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/access_tail.py",
+    "line": 36,
+    "summary": "The position is saved before the caller has handled the returned lines (at-most-once delivery). Decoding with `.splitlines()` also splits on characters that are not log line terminators.",
+    "failure_scenario": "If the consumer crashes or raises after read_new_lines returns, the offset has already advanced and those lines are never seen again. Separately, an access-log line containing \\x0b, \\x0c, \\x1c-\\x1e, \\x85 or \\u2028 (for example in a user-agent or URL) is split into two bogus records. `complete.split(b'\\n')` would split on the same delimiter used to compute the offset.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 38,
+    "summary": "The checkpoint counts lines, with no file identity and no content check. Rotation or replacement of the log is undetected unless the new file happens to be shorter than the checkpoint. When it is detected, `done = 0` is applied silently.",
+    "failure_scenario": "The checkpoint says 1000 lines done. The log is rotated and the new file already has 1500 lines. rows[1000:] is returned and 1000 unseen lines are skipped for good. If the new file is shorter, everything is re-read with no warning logged.",
+    "category": "p0f-2",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 35,
+    "summary": "The whole file is read into memory on every call just to count lines. The final line without a trailing newline is always dropped, even when the file is finished.",
+    "failure_scenario": "A multi-GB log is fully loaded via readlines() on each poll, where seek(offset) would be enough. For a completed batch file whose last record has no trailing newline, that record is never returned, because rows.pop() fires on every run and the checkpoint never counts it.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 35,
+    "summary": "Opening in text mode with universal newlines translates a bare '\\r' into a line break, and readlines() splits on it. The row count and content therefore differ from the raw file.",
+    "failure_scenario": "A log line contains a literal carriage return, for example from a user-supplied field. readlines() yields two rows, so the checkpoint line count no longer matches the file's real '\\n' records, and one record is returned as two. Using newline='\\n' keeps record boundaries consistent.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 18,
+    "summary": "The generic names `data` (here) and `info` (access_tail.py:26) are not qualified.",
+    "failure_scenario": "`data` in load_checkpoint holds the parsed checkpoint JSON, and `info` in read_new_lines holds an os.stat_result. Names such as `payload` and `log_stat` say what they hold. This is a readability cost only.",
+    "category": "p2-4",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/batch_log_reader.py",
+    "line": 32,
+    "summary": "The atomic-write helper (save_checkpoint / save_position) and the 'return only complete lines and advance the saved position' logic are copy-pasted across the two modules. Both modules define read_new_lines with different state formats and different hardening. Neither module explains the non-obvious ordering (partial-line exclusion, save before return).",
+    "failure_scenario": "The two copies have already diverged. Only batch_log_reader validates the saved state and splits the UTF-8 error out of the JSON error. A fix to one (shape validation, fsync before replace, logging) will not reach the other. The code carries no comments on the partial-line handling, the save-before-return ordering or the .part temp file, so those choices are easy to break.",
+    "category": "p3-2",
+    "severity": "nice"
+  }
+]
+```
