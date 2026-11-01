@@ -2,7 +2,7 @@ English | [中文](README.zh.md)
 
 # house-rules
 
-Grow your own house rules from code review.
+An attempt to turn a general coding agent into a personal one: grow your own house rules from code review.
 
 What an external code reviewer (Claude Code's built-in `/code-review`) keeps finding in
 your code becomes written, versioned rules. You approve each rule change one by one. The
@@ -12,17 +12,20 @@ rules are compiled into a short digest that both your coding session and the nex
 
 ## Why this exists
 
+I wanted my coding agent to understand me a little better with every task, so that reviewing
+its work gets easier over time.
+
 1. **The problem.** Claude Code's `/code-review` is good at finding problems in my code, but
    it does not know my coding style. It reviews against its own idea of good code, and nothing
    it finds makes it back into my rules.
 2. **The idea.** Let the coding style and the reviewer work as each other's copilot. The style
    goes into every coding session and every review. What the reviewer finds that the style
    does not cover comes back as a proposed rule change, and I decide.
-3. **The catch.** A style document that keeps growing blows up the context: every session and
-   every review pays for it, and a context file has to earn that cost. In recent studies,
-   LLM-written context files did not help and cost about 20% more, and a few focused skills
-   beat one big one ([related work](docs/METHOD.md#6-related-work)). Reviews cost money too,
-   so reviewing every commit is not an option.
+3. **The catch.** Rules that only pile up can backfire: a growing style document blows up the
+   context, every session and every review pays for it, and a context file has to earn that
+   cost. In recent studies, LLM-written context files did not help and cost about 20% more,
+   and a few focused skills beat one big one ([related work](docs/METHOD.md#6-related-work)).
+   Reviews cost money too, so reviewing every commit is not an option.
 4. **What I built.** A low-cost plugin that keeps the style document evolving while I work:
    - the rules are compiled into a digest of at most 4096 bytes by default, so a new rule has
      to fit, or something is merged or retired first;

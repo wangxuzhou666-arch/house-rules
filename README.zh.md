@@ -2,7 +2,7 @@
 
 # house-rules
 
-从 code review 里，长出你自己的 house rules。
+尝试把通用的 coding agent 变成懂你的 personal coding agent：从 code review 里，长出你自己的 house rules。
 
 外部 code reviewer（Claude Code 内置的 `/code-review`）在你的代码里反复发现的问题，
 会变成写下来、有版本的规则。每一条规则改动都由你逐条批准。规则会被编译成一份简短的 digest，
@@ -15,11 +15,13 @@
 
 ## 为什么做这个
 
+我想让 coding agent 在一个个 coding task 里越来越懂我，我后面 review 起来也越来越省力。
+
 1. **问题。** Claude Code 的 `/code-review` 很会在我的代码里找问题，但它不认识我的 coding style，
    只会按它自己心目中的“好代码”来审；它发现的东西，也不会回到我的规则里去。
 2. **想法。** 让 coding style 和 reviewer 互相当对方的 copilot：style 进入每一次编码会话和每一次 review；
    reviewer 发现的、style 没覆盖的问题，会作为规则改动提案回来，由我来定。
-3. **代价。** style 文档越写越长，就会撑爆上下文：每个会话、每次 review 都要为它付费，
+3. **代价。** 规则只加不减，反而可能帮倒忙：style 文档越写越长，就会撑爆上下文，每个会话、每次 review 都要为它付费，
    而一份上下文文件得配得上这笔开销。近期的研究里，模型自己写的上下文文件没有帮助，还多花约 20%；
    几个聚焦的 skill 也好过一个大而全的（见[相关工作](docs/METHOD.zh.md#6-相关工作)）。
    review 本身也要花钱，所以不能每次提交都审。
