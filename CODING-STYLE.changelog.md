@@ -261,3 +261,12 @@ The tool these rules are run with was renamed from review-ratchet to house-rules
 - The three retirement markers (P0E.4, P0E.6, R.5) now read `<!-- house-rules-retired: ID -->`, the form the tool reads to keep a retired ID from being reused. Until this edit it did not see these three markers, so those IDs were not reserved against reuse.
 
 The Backfill and Revision entries above are left as written: they use the old name, the old `ratchet/` source paths in their evidence lines and the finding IDs `review-ratchet:l1:...`, which are persistent ledger IDs and are not rewritten. Numbering still continues from the highest Revision heading, so the next batch is Revision 3.
+
+## Labeling note — 2026-10-31
+
+The Labeling section that `house-rules compile` appends to every digest was reworded in the generator (`house_rules/digest.py`), not in `CODING-STYLE.md`. It adds no clause, retires none and changes no clause's requirement, so it has no revision number, no receipt and no decision to record. What changed in the compiled digest:
+
+- The lead now says every finding object in the JSON array MUST carry both keys and that findings are filed by `category`, instead of naming the two keys as extras besides `file`, `line`, `summary` and `failure_scenario`.
+- The `category` bullet now sends a finding to `unmapped` also when a clause's exemption applies, and "Prefer `unmapped` over stretching a clause to fit" became "Never stretch a clause to fit."
+
+Why: in the first 24 runs of the generalization check (`samples/generalization/`, round 1), 8 carried no `category` on any finding, and controls covered by a stated exemption were labeled with the clause. The digest shrank from 4082 to 4047 bytes. Numbering still continues from the highest Revision heading, so the next batch is Revision 3.

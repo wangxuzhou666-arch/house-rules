@@ -68,7 +68,7 @@ Whatever produces a signal that feeds rule changes will tend to satisfy the sign
 
 - **What happened.** Early labels had no "none of these" option. In the pilot, 19 of 41 reviewer findings landed under one clause, the reviewer-conduct rule "standards come from this file".
 - **Why.** A labeler forced to name a rule picks the bucket that can never be wrong; the catch-all looked like the busiest rule and hid real gaps (by my manual reading of those 19; the count alone proves nothing).
-- **Guard.** `unmapped` is a first-class label, and the digest tells the reviewer to prefer it to stretching a clause. Labels are validated deterministically ([section 5](#5-carrying-the-loop-to-another-reviewer)), and an ID recovered from prose is marked `attributed`. ([LEDGER.md](LEDGER.md#rule-ids))
+- **Guard.** `unmapped` is a first-class label, and the digest tells the reviewer to use it when no clause truly matches or an exemption applies, and never to stretch a clause to fit. Labels are validated deterministically ([section 5](#5-carrying-the-loop-to-another-reviewer)), and an ID recovered from prose is marked `attributed`. ([LEDGER.md](LEDGER.md#rule-ids))
 
 ### An instruction nobody wired
 

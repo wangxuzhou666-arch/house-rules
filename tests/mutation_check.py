@@ -591,13 +591,20 @@ MUTANTS = (
 
     # ---- labeling: the digest section that makes the model emit category and severity ----
     Mutant("labeling: the keys are optional", "house_rules/digest.py",
-           "every finding object MUST carry two keys", "a finding object may carry two keys"),
+           "Every finding object in your JSON array MUST carry both keys below",
+           "A finding object in your JSON array may carry both keys below"),
+    Mutant("labeling: the line that says findings are filed by category is dropped", "house_rules/digest.py",
+           "; findings are filed by `category`:", ":"),
     Mutant("labeling: the severity key is dropped", "house_rules/digest.py",
            '- `"severity"`: `blocker`, `should-fix` or `nice`, the one listed for that clause under Violations.\n', ""),
     Mutant("labeling: the example names the key wrongly", "house_rules/digest.py",
            '"category": "{category}", "severity": "{severity}"}}`', '"cat": "{category}", "severity": "{severity}"}}`'),
     Mutant("labeling: the unmapped escape hatch is dropped", "house_rules/digest.py",
-           ', or `"unmapped"` if no clause truly matches', ""),
+           ', or `"unmapped"` if no clause truly matches or an exemption applies', ""),
+    Mutant("labeling: the exemption no longer sends a finding to unmapped", "house_rules/digest.py",
+           " or an exemption applies.", "."),
+    Mutant("labeling: the ban on stretching a clause is a preference again", "house_rules/digest.py",
+           "Never stretch a clause to fit.", "Prefer `unmapped` over stretching a clause to fit."),
     Mutant("labeling: one finding per defect is dropped", "house_rules/digest.py",
            "File one finding per defect. ", ""),
 
