@@ -258,8 +258,10 @@ claude plugin marketplace add wangxuzhou666-arch/house-rules
 claude plugin install house-rules@house-rules
 ```
 
-These commands install from the repository on GitHub. The project's own acceptance run loads
-the plugin from a local checkout and does not verify a remote install.
+These commands install from the repository on GitHub. The offline acceptance script loads the
+plugin from a local checkout and does not test a remote install; a remote install from GitHub
+was checked by hand for the first public release
+([ACCEPTANCE.md](docs/ACCEPTANCE.md#v1-checks-2026-11-01)).
 
 From a local checkout, load it for one session without installing:
 

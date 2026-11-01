@@ -218,7 +218,8 @@ claude plugin marketplace add wangxuzhou666-arch/house-rules
 claude plugin install house-rules@house-rules
 ```
 
-这两条命令从 GitHub 上的仓库安装。项目自己的验收是从本地 checkout 加载插件的，并不验证远程安装。
+这两条命令从 GitHub 上的仓库安装。离线验收脚本从本地 checkout 加载插件，不测远程安装；首次公开发布时，
+从 GitHub 远程安装已手动验过（[ACCEPTANCE.md](docs/ACCEPTANCE.md#v1-checks-2026-11-01)）。
 
 从本地 checkout 加载，仅用于一个会话，不做安装：
 
