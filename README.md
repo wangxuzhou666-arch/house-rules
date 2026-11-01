@@ -190,6 +190,21 @@ what gets found, and the look-alike is flagged as often as the violation.
   wording. Today's digest is byte-identical to round 1's. The three rounds were 114 reviewer
   calls in all.
 
+![Figure 1: three bar charts. (a) Flagged under any label: both files in 21 of 21 runs, with and without the rule. (b) Labeled with the rule's ID: the violation in 14 of 21 runs with the rule and 0 without it, the control in 10 of 21 and 0. (c) With-rule runs in which no finding had a category: 7 of 21, 17 of 18 and 6 of 18 in rounds 1 to 3.](samples/generalization/figures/figure1-en.png)
+
+**Figure 1:** Generalization check, recorded with the built-in `/code-review` of Claude Code
+2.1.284, three runs per condition. With the rule: the rule's line is in the digest the reviewer
+reads; Rule removed: only that line is deleted. (a) Share of runs in which the reviewer flagged
+the file under any label, `unmapped` included. (b) Share of runs in which a finding on the file
+carried the rule's clause ID. Panels (a) and (b) pool the 7 cases of round 1 (21 runs per
+condition). (c) Share of with-rule runs in which no finding carried a category at all; round 2
+shortened the labeling instruction and round 3 restored it (both rounds also reworded REL.1 and
+REL.2 and re-ran 6 cases). The rule changes the label, not the finding: the clause ID appears
+only with the rule, and also on look-alike controls that comply or fall under the rule's
+exemption. Of the 10 control labels, 3 are on `rel-3`, whose control had a real defect, and 2 on
+`rel-1b`, whose exemption is arguable ([Table 1](samples/generalization/README.md#figure-and-table)).
+A difference of one run is noise; the figure records labels, not whether code got better.
+
 To replay all three rounds, free and deterministic, in a git clone (a downloaded zip is not
 enough):
 
