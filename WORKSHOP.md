@@ -2,17 +2,19 @@ English | [中文](WORKSHOP.zh.md)
 
 # Workshop: from a review finding to a rule, and whether the rule holds
 
+house-rules keeps your coding standards in a rules file, compiles them into a short digest that your coding session and a code reviewer both read, and records what the reviewer finds and what became of each finding. It is for people who use Claude Code (its `/code-review`) or who can bring another reviewer's output as JSON.
+
 A hands-on walk through house-rules in six short sections, 45 to 60 minutes in all. You read a rules file, replay a recorded review, turn a gap the review exposed into a rule, look at the one measurement this project has, set up the automation and its limits, and try to improve a rule.
 
 The main line is free and deterministic: it replays recordings and calls no model. The two steps that could spend money (one in section 5, one in section 6) say so before you run them, and you can skip both.
 
 What this workshop does not give you is evidence that an agent writes better code under these rules. The project does not claim that. It gives you a way to write down what a reviewer keeps finding, decide rule by rule what becomes a rule, and check whether a rule changes what the reviewer does. Sections 4 and 6 show how hard that last check is.
 
-Alone or in a group, each section ends with a checkpoint to say out loud. Sections 4 and 6 add questions to discuss. The commands themselves run in seconds; the time goes on reading the output and doing the exercises.
+Alone or in a group, each section ends with a checkpoint to say out loud. Sections 4 and 6 add questions to discuss. The commands themselves run in seconds; the time goes on reading the output and doing the exercises. The "Swap in your own" boxes are optional extras and are not in the times.
 
 ## Before you start
 
-You need `git` 2.28 or newer (with a name and email set, because you will commit), Python 3.10 or newer, and a shell. The tool uses the Python standard library only. Claude Code is not needed for the free path.
+You need `git` 2.28 or newer (with a name and email set, because you will commit), Python 3.10 or newer, and a POSIX shell (bash or zsh on macOS or Linux, or WSL on Windows: the commands use `sed -i.bak`, `seq` and heredocs). The tool uses the Python standard library only. Claude Code is not needed for the free path.
 
 ```sh
 git clone https://github.com/wangxuzhou666-arch/house-rules
@@ -24,7 +26,8 @@ house-rules --help
 
 - Clone it; do not download a zip. Section 4 needs a git repository and stops without one.
 - Use one terminal for the whole workshop, because the two `export` lines live in it. If your `python3` is older than 3.10, put a newer one first on `PATH` in this terminal.
-- Sections 1, 2, 3 and 5 work in a scratch repository, `hr-demo`, next to your clone. Sections 4 and 6 work in the clone itself, and section 6 undoes its edits at the end.
+- `house-rules --help` lists about twenty subcommands. The workshop uses ten, each introduced where it first appears: `init`, `compile`, `review`, `count`, `decision-context`, `prepare-decisions`, `apply-decisions`, `decision-summary`, `wrapup` and `label`.
+- Sections 1, 2, 3 and 5 work in a scratch repository, `hr-demo`, next to your clone, and each builds on the one before. Sections 4 and 6 work in the clone itself, and section 6 undoes its edits at the end. To start a section over, remove `hr-demo` (`rm -rf "$HR_SRC/../hr-demo"`) and redo section 1: the `mkdir` lines fail on a directory that already exists.
 - The output blocks below were recorded in one run. Hashes, dates, paths and a few byte counts will differ in yours; the shape should not.
 
 Words used throughout:
@@ -32,11 +35,22 @@ Words used throughout:
 | Word | Meaning here |
 |---|---|
 | rules file | Your standards as clauses with stable ids, such as `ERR.1`: `CODING-STYLE.md` |
+| clause | One rule in the rules file: an id, the text and a severity, as in `**[ERR.1]** Propagate configuration parsing errors. (should-fix)` |
+| severity | How serious a violation is: `blocker`, `should-fix` or `nice` |
 | digest | The short form of the rules file, compiled into `CODING-STYLE.digest.md`. The coding session and the reviewer both read it, so it has a byte budget |
 | reviewer | A code review that is not part of this project: Claude Code's built-in `/code-review`, or any review whose output you import |
 | finding | One defect the reviewer reports, with a file, a line and a label (a clause id, or `unmapped`) |
 | blind spot | A real defect that no clause covers, so its label is `unmapped` |
 | ledger | The local file `.style-findings.jsonl` that records findings and what became of them. It is git-ignored |
+| hook | A script that git (or Claude Code) runs at a fixed moment. `init` installs two git hooks, one before a commit and one after; section 5 adds Claude Code's Stop hook, which runs when a turn ends |
+| wrap-up | A review of the work since the last review, started only when enough has changed (section 5). `init --no-wrapup-auto` means: no commit starts one by itself |
+| round | One review of one change. A change gets at most 3 rounds. On the default branch every new commit is a new change, so its round count starts again at 0 (sections 2 and 5) |
+| run id | The name you give one review (`--run live-r3`). Importing the same id again is a replay: nothing new is recorded and no round is used |
+| replay | Re-reading a recorded review instead of calling a model: free, and the same every time |
+| case | From section 4: one rule, a file that violates it and a control |
+| control | A look-alike file that is legitimate and must not be flagged. It either complies with the rule (`compliant`) or falls under an exemption the rule states (`exempt`) |
+| oracle | A script that runs the violation and the control under an injected failure and decides from behavior which one breaks. It calls no model |
+| held-out | A case written after round 1 and not used as evidence when a rule's wording changes, so it is a fairer test of the rule (`rel-1b`, `rel-2b`) |
 
 ---
 
@@ -48,6 +62,7 @@ Words used throughout:
 
 ```sh
 cd "$HR_SRC"
+# the mkdir fails if ../hr-demo already exists: to start over, rm -rf ../hr-demo first
 mkdir ../hr-demo && cd ../hr-demo && git init -q -b main
 # the sample rules without REL.1: lines 6 to 9 hold REL.1 and its notes, so ERR.1 and R.1 stay
 sed '6,9d' "$HR_SRC/samples/config-replacement/CODING-STYLE.md" > CODING-STYLE.md
@@ -60,6 +75,8 @@ git add .house-rules.json CODING-STYLE.md CODING-STYLE.digest.md CLAUDE.md .giti
 git commit -q -m "chore: adopt house-rules"
 ```
 
+Three things in that block are new. `--rules-file` names the file that holds your clauses. `--no-wrapup-auto` leaves the automatic wrap-up off, so nothing you commit in this workshop can start a review by itself (section 5 explains it). `--strict` makes `compile --check` exit 1 when the digest is over its byte budget as well as when it is stale.
+
 The corpus is two clauses and a note:
 
 ```text
@@ -71,7 +88,7 @@ This is a small teaching corpus, not a required style for other repositories.
 - **[R.1]** Review correctness as well as these rules. Use unmapped for a real defect no code rule covers.
 ```
 
-`--dry-run` prints what `init` would do, one diff per file, and writes nothing. The real run writes the config, the digest, an `@import` of the digest in `CLAUDE.md` (so Claude Code and `/code-review` read it), two git hooks and `.gitignore` entries. Then read the digest:
+`--dry-run` prints what `init` would do, one diff per file (about 100 lines in all: skim it), and writes nothing. The real run writes the config, the digest, an `@import` of the digest in `CLAUDE.md` (a line that makes Claude Code load that file, so Claude Code and `/code-review` read it), two git hooks and `.gitignore` entries. Then read the digest:
 
 ```sh
 cat CODING-STYLE.digest.md
@@ -114,13 +131,54 @@ stale: CODING-STYLE.digest.md (digest, the STAGED version is out of date)
 this check reads what is staged, not the working tree: run `house-rules compile` if the working tree is stale too, then `git add CODING-STYLE.digest.md`
 ```
 
-**Swap in your own.** Point `init` at a rules file of your own (`house-rules init --rules-file docs/CODING-STYLE.md` in your repository), or write three clauses of your own in this shape, in a scratch copy of the sample:
+**Swap in your own.** To use a rules file of your own, point `init` at it in your repository: `house-rules init --rules-file docs/CODING-STYLE.md`. To practice first, use a scratch copy of the sample in a directory of its own, so `hr-demo` stays as it is. A clause has this shape:
 
 ```text
 - **[ID]** What must hold. (should-fix) <!-- digest: a shorter text for the digest -->
 ```
 
-Run `compile --check --strict` and read the line your reviewer will actually see. The digest is loaded into every session, which is why it is capped (4096 bytes by default) and why a long clause needs a short `digest:` text.
+Make a scratch repository (`init` needs one), start from the sample rules and add a long clause of your own:
+
+```sh
+cd "$HR_SRC/.."
+mkdir hr-mine && cd hr-mine && git init -q -b main
+cp "$HR_SRC/samples/config-replacement/CODING-STYLE.md" CODING-STYLE.md
+cat >> CODING-STYLE.md <<'EOF'
+- **[RET.1]** Every public function that can fail must document the exception it raises and the conditions that trigger it, in its docstring. (should-fix)
+EOF
+house-rules init --yes --no-wrapup-auto --rules-file CODING-STYLE.md
+grep '^RET.1' CODING-STYLE.digest.md
+```
+
+The digest line is the clause text cut at its first `;` or sentence-ending `.`, and at 90 characters at most, so a long clause ends in `…`:
+
+```text
+RET.1 | should-fix | Every public function that can fail must document the exception it raises and the conditi…
+```
+
+Now give it a short text of your own, the `digest:` comment, check that the digest is stale, rebuild it and read the line again:
+
+```sh
+sed -i.bak 's/in its docstring. (should-fix)$/in its docstring. (should-fix) <!-- digest: Document the exception a public function raises -->/' CODING-STYLE.md && rm CODING-STYLE.md.bak
+house-rules compile --check --strict
+house-rules compile
+grep '^RET.1' CODING-STYLE.digest.md
+```
+
+`compile --check --strict` does not print digest lines; it says `stale: CODING-STYLE.digest.md (digest, out of date)` and exits 1, because you changed the rules and not the digest. `compile` rewrites it, and the `grep` now shows `RET.1 | should-fix | Document the exception a public function raises`. To see the budget bite, lower it and check again:
+
+```sh
+cat > .house-rules.json <<'EOF'
+{
+  "rules_files": ["CODING-STYLE.md"],
+  "wrapup_auto": false,
+  "digest_max_bytes": 600
+}
+EOF
+house-rules compile --check --strict
+```
+
+This prints `warning: digest CODING-STYLE.digest.md is 1132 bytes, over digest_max_bytes 600` and exits 1 (without `--strict` it would exit 0). The digest is loaded into every session, which is why it is capped (4096 bytes by default) and why a long clause needs a short `digest:` text. Put the budget back (delete the `digest_max_bytes` line), then write three clauses of your own in `CODING-STYLE.md` in place of `RET.1`, with `digest:` texts, and compile again.
 
 **Checkpoint.** You can say (1) what one digest line contains, (2) why the digest has a byte budget, and (3) what the pre-commit hook refuses, and why it checks the staged copy.
 
@@ -146,7 +204,7 @@ house-rules review --from-file "$HR_SRC/samples/config-replacement/recorded-revi
 house-rules count --by-rule --label-source
 ```
 
-The second import is on purpose.
+`--from-file` imports a review that already exists instead of running one, and `--run live-r3` is the run id, the name of this review. The second import is on purpose: same file, same run id.
 
 **What you should see.** `heldout_unsafe.py` opens the settings file for writing, which empties it, and only then serializes the values. The first import:
 
@@ -168,9 +226,11 @@ findings: 2 total, 2 open (gate 0 / l1 2 / l2 0); events: 3
 review rounds on main@<12 hex>: 1/3
 ```
 
+The last line is the round counter: 1 of the 3 rounds this change may have, used. Here the "change" is `main` at its current commit; a new commit on `main` starts a new count (section 5 shows it).
+
 Finding 1 is a real delete-before-write defect that your two rules do not cover. The recorded text says `"category": "rel-1"`, a clause your corpus does not have, so the importer cannot resolve the label and files it as `unmapped`: a blind spot. Finding 2 (the replacement file loses the old file's permission bits) is a different, smaller bug.
 
-**Swap in your own.** Import a review of your own. Save any reviewer's output as a JSON array of objects with `file`, `line`, `summary`, `failure_scenario`, `category` (a kebab-case clause id, or `unmapped`) and `severity` (`blocker`, `should-fix` or `nice`), then:
+**Swap in your own.** Import a review of your own. Save any reviewer's output as a JSON array of objects with `file`, `line`, `summary`, `failure_scenario`, `category` (a kebab-case clause id, or `unmapped`) and `severity` (`blocker`, `should-fix` or `nice`), then import it in your own repository, or in `hr-mine`, the scratch repository of the swap-in in section 1 (`cd "$HR_SRC/../hr-mine"`). Not in `hr-demo`: the helper in section 3 knows only the two recorded findings, and a third one makes it stop with a chain of errors.
 
 ```bash
 house-rules review --from-file mine.json --run mine-1
@@ -194,7 +254,7 @@ In Claude Code the model writes the assessment and a native popup asks you (`/ho
 
 ```sh
 cd "$HR_SRC/../hr-demo"
-mkdir .house-rules/work
+mkdir -p .house-rules/work
 house-rules decision-context > .house-rules/work/context.json
 python3 "$HR_SRC/samples/config-replacement/make_answers.py" assessment .house-rules/work/context.json > .house-rules/work/assessment.json
 house-rules decision-context --assessment .house-rules/work/assessment.json > .house-rules/work/cards.json
@@ -203,7 +263,26 @@ python3 "$HR_SRC/samples/config-replacement/make_answers.py" answers .house-rule
 house-rules apply-decisions --dry-run --input .house-rules/work/answers.json
 ```
 
-The tool reads these files only from inside the repository, and `.house-rules/` is git-ignored, so the scratch files neither get committed nor count as work in section 5. Open `assessment.json` (what the model says), `cards.json` (what the person would be shown: the finding, the code, the exact before and after text) and `answers.json` (what the person says). Nothing has changed yet.
+The tool reads these files only from inside the repository, and `.house-rules/` is git-ignored, so the scratch files neither get committed nor count as work in section 5. Open `assessment.json` (what the model says), `cards.json` (what the person would be shown: the finding, the code, the exact before and after text) and `answers.json` (what the person says). Nothing has changed yet, so this is the moment to try two things; both are optional and both work only before the real apply further down.
+
+**Swap in your own.** Try a different answer first. Change `accept` to `revise` in a copy of the answers and dry-run that:
+
+```bash
+sed 's/"decision": "accept"/"decision": "revise"/' .house-rules/work/answers.json > .house-rules/work/answers-revise.json
+house-rules apply-decisions --dry-run --input .house-rules/work/answers-revise.json
+```
+
+`changed` comes back empty, because the tool records a request to revise and applies nothing (its counters file the answer under `rejected`). Then make the clause yours: change its wording, check it and prepare a new batch:
+
+```bash
+sed 's/Preserve the existing usable configuration until/Keep the old configuration until/' .house-rules/work/assessment.json > .house-rules/work/assessment-b.json
+house-rules decision-context --assessment .house-rules/work/assessment-b.json > .house-rules/work/cards-b.json
+house-rules prepare-decisions --assessment .house-rules/work/assessment-b.json > .house-rules/work/prepared-b.json
+python3 "$HR_SRC/samples/config-replacement/make_answers.py" answers .house-rules/work/prepared-b.json --confirmed-by "Your Name" > .house-rules/work/answers-b.json
+house-rules apply-decisions --dry-run --input .house-rules/work/answers-b.json
+```
+
+If you did this one, apply `answers-b.json` instead of `answers.json` in the next block. Your wording then shows in `CODING-STYLE.md` and in the changelog, which says `accept by Your Name`; the digest line and its 1063 bytes do not change, because the clause carries its own `digest:` text; and `decision-summary` also counts the first batch, which you prepared and never answered, as `pending`. Do not try either of these after the real apply: REL.1 exists by then, so the evidence has changed and the tools stop with `assessment context changed; collect and assess again`. To try again, redo section 3 in a fresh `hr-demo`.
 
 Now apply the answers, check the result and commit it:
 
@@ -222,9 +301,17 @@ git commit -q -m "rules: add REL.1"
 ```text
 {
   "accepted": 1,
-  "answer_counts": { "accept": 1, "defer": 1 },
+  "answer_counts": {
+    "accept": 1,
+    "defer": 1
+  },
   "batch_id": "<64 hex>",
-  "changed": ["CODING-STYLE.md", "CODING-STYLE.digest.md", ".house-rules/proposals/version.json", "CODING-STYLE.changelog.md"],
+  "changed": [
+    "CODING-STYLE.md",
+    "CODING-STYLE.digest.md",
+    ".house-rules/proposals/version.json",
+    "CODING-STYLE.changelog.md"
+  ],
   "rejected": 0,
   "status": "applied"
 }
@@ -234,17 +321,7 @@ git commit -q -m "rules: add REL.1"
 
 Two rules of the tool are worth showing. A group with no explicit answer is never applied: a default is not consent. And accepting a rule does not mark the finding it came from as fixed; closing it is a separate act (section 5).
 
-**Swap in your own.** Do this after the dry run and before the real `apply-decisions`; nothing is written until then. Change the clause to your own wording, check it, and prepare a new batch:
-
-```bash
-sed 's/Preserve the existing usable configuration until/Keep the old configuration until/' .house-rules/work/assessment.json > .house-rules/work/assessment-b.json
-house-rules decision-context --assessment .house-rules/work/assessment-b.json > .house-rules/work/cards-b.json
-house-rules prepare-decisions --assessment .house-rules/work/assessment-b.json > .house-rules/work/prepared-b.json
-python3 "$HR_SRC/samples/config-replacement/make_answers.py" answers .house-rules/work/prepared-b.json --confirmed-by "Your Name" > .house-rules/work/answers-b.json
-house-rules apply-decisions --dry-run --input .house-rules/work/answers-b.json
-```
-
-Then apply `answers-b.json` instead of `answers.json`. To see what a different answer does, change `accept` to `revise` in a copy of the answers and dry-run that: `changed` comes back empty, because the tool records a request to revise and applies nothing (its counters file the answer under `rejected`). For the real thing, `/house-rules:maintain` does the model's part and asks through the host's native question tool (Claude Code needed; not part of this free path).
+For the real thing, `/house-rules:maintain` does the model's part and asks through the host's native question tool (Claude Code needed; not part of this free path).
 
 **Checkpoint.** You can say who did what: the tool kept the evidence and validated; the model proposed; the person decided; nothing changed without an `accept`. You can find the exact clause text and the decision in `CODING-STYLE.changelog.md`.
 
@@ -261,13 +338,15 @@ Then apply `answers-b.json` instead of `answers.json`. To see what a different a
 ```sh
 cd "$HR_SRC"
 python3 -I samples/generalization/cases/rel-1/oracle.py
-cat samples/generalization/cases/rel-1/code/*.py
+for f in samples/generalization/cases/rel-1/code/*.py; do echo "== $f"; cat "$f"; done
 python3 samples/generalization/run_check.py --round 1
 python3 samples/generalization/run_check.py
 git status --short
 ```
 
-The oracle runs both files under an injected failure and prints one line per fact. It decides what is true from behavior, not from a model. The two files are the violation (`site_publisher.py`, which deletes the live directory before rendering) and its control (`preview_cache.py`, a cache that is rebuilt on demand, which the rule exempts). `run_check.py --round 1` scores the recorded reviews of round 1; with no argument it scores all three rounds and compares them. Both exit 0 even when verdicts are FAIL.
+The oracle runs both files under an injected failure and prints one line per fact. It decides what is true from behavior, not from a model. (`-I` is Python's isolated mode: it ignores `PYTHON*` environment variables and user site-packages, so nothing but the standard library can change what the oracle does.) The two files, printed one after the other with their names, are the control (`preview_cache.py`, a cache that is rebuilt on demand, which the rule exempts) and the violation (`site_publisher.py`, which deletes the live directory before rendering). `run_check.py --round 1` scores the recorded reviews of round 1; with no argument it scores all three rounds and compares them. Both exit 0 even when verdicts are FAIL.
+
+Cases are named after the rule they test: `rel-1` tests REL.1, `rel-2` tests REL.2, and so on. The clone's own `CODING-STYLE.md` has REL.1 to REL.4, which `hr-demo` does not (it only got REL.1, in section 3). A trailing `b` marks a second case for the same rule: `rel-3b` replaces the control of `rel-3` (see the swap-in below), and `rel-1b` and `rel-2b` are held-out cases.
 
 **What you should see.** The oracle ends with nine `ok` lines, such as:
 
@@ -295,19 +374,19 @@ How to read a row. Each case has 3 runs per condition. `with_rule` reviews saw t
 
 Read the two conditions side by side. Without the rule, the violation is flagged 3 of 3 and labeled 0 of 3: the reviewer finds the bug anyway, and the rule changes the label. With the rule, `rel-1` labels the exempt control as often as the violation (3 of 3 and 3 of 3), so it fails the pass line. In round 1 only `rel-3b` passes. Say it as plainly as the README does: the check is small (4 rules, 7 cases, 3 runs per condition, one reviewer version, one author) and mostly says "not yet".
 
-**Swap in your own.** Offline, with no reviewer: choose one rule of your own, write a violation file and a look-alike control that complies or falls under the rule's stated exemption, and write an `oracle.py` in the shape of `samples/generalization/cases/rel-1/oracle.py`: inject a failure, print one line per fact, exit 0 only if the violation breaks and the control does not. The oracle is what keeps the control honest. In this project the control of `rel-3` turned out to be defective: the reviewer was right and the case was wrong, which is why `rel-3b` exists. Recording your case with a real reviewer is a paid step; section 6 describes it.
+**Swap in your own.** Offline, with no reviewer: choose one rule of your own, write a violation file and a look-alike control that complies or falls under the rule's stated exemption, and write an `oracle.py` in the shape of `samples/generalization/cases/rel-1/oracle.py`: inject a failure, print one line per fact, exit 0 only if the violation breaks and the control does not. Put the three files in a case directory of your own (`samples/generalization/cases/mine-1/`, with the two code files under `code/`; the layout is in [the generalization README](samples/generalization/README.md#layout)) and run `python3 -I samples/generalization/cases/mine-1/oracle.py`. The oracle is what keeps the control honest. In this project the control of `rel-3` turned out to be defective: the reviewer was right and the case was wrong, which is why `rel-3b` exists. Recording your case with a real reviewer is a paid step; the swap-in at the end of section 6 has the steps and the cost.
 
 **Checkpoint.** You can read one row and say what each count is, state the pass line, and explain why "violation flagged 3 of 3 without the rule" neither shows the rule is useless nor that it works.
 
 **Questions to discuss.** What would a rule have to do to count as "generalizing"? Why does the check keep a control next to every violation?
 
-**Go deeper.** [Generalization check: layout and `--live`](samples/generalization/README.md) · [Pre-registered criteria and addenda](samples/generalization/CRITERIA.md)
+**Go deeper.** [Generalization check: layout](samples/generalization/README.md#layout) · [Scoring and `--live`](samples/generalization/README.md#score-and-record) · [Pre-registered criteria and addenda](samples/generalization/CRITERIA.md)
 
 ---
 
 ## 5. Automation, and what it costs (about 10 minutes)
 
-**Goal.** See the pieces that make the loop run by itself (hooks, thresholds, caps, the plugin) and the settings that bound the spend. Every command is offline; the one optional step that can spend money is marked.
+**Goal.** See the pieces that make the loop run by itself (hooks, thresholds, caps, the plugin) and the settings that bound the spend. A wrap-up is a review of the work since the last review, run only when enough has changed; this section is about when it runs and when it is stopped. Every command is offline; the one optional step that can spend money is marked.
 
 **Commands.** In the scratch repo from section 3. First, would a wrap-up review run now? Measuring uses local git only and bills nothing.
 
@@ -326,7 +405,7 @@ EOF
 house-rules wrapup --dry-run
 ```
 
-Next, close one finding with a commit trailer and record one judgment by hand:
+Next, close one finding with a commit trailer and record one judgment by hand. `heldout_unsafe.py` was never committed (section 1 committed only the config files), so this commit adds the file as new; the trailer is what closes the finding:
 
 ```sh
 cp heldout_safe.py heldout_unsafe.py
@@ -337,7 +416,7 @@ house-rules label live-r3-2 --outcome dismissed --note "real, but outside this s
 house-rules count --by-rule --label-source
 ```
 
-Last, the round cap. Three more imports use new run ids; the fourth is refused before any reviewer would run. This adds duplicate findings to the ledger, which is fine in a scratch repo:
+Last, the round cap. The commit above moved `main`, and on the default branch every new commit is a new change, so its round count starts again at 0 ([Review rounds](docs/LEDGER.md#review-rounds)). Three more imports use new run ids and take it to 3 of 3; the fourth is refused before any reviewer would run. This adds duplicate findings to the ledger, which is fine in a scratch repo:
 
 ```sh
 for r in again-1 again-2 again-3 again-4; do house-rules review --from-file "$HR_SRC/samples/config-replacement/recorded-review.txt" --run $r; done
@@ -358,7 +437,7 @@ wrapup: 32 changed line(s) in 2 file(s) since <tree> (the working tree as review
 [dry-run] wrapup: changed lines 32 >= wrapup_min_changed_lines 20; would run `claude -p '/code-review high <range>'`; nothing run or written
 ```
 
-Either threshold is enough. The trailer commit prints `infer: +1 fixed (auto:commit), +0 fixed (auto:gate_pass); open 1`, and `count` now shows `1 open` instead of the `2 open` of section 2; `label` prints `label: 1 human outcome(s), dismissed (live-r3-2)` and `count` then shows `0 open`. The first import of the cap loop shows something new: the same recorded text now resolves to `REL.1` on `heldout_unsafe.py:7`, because the clause exists. Runs 2 and 3 exit 0; run 4 is refused with exit status 3:
+Either threshold is enough. The trailer commit prints `infer: +1 fixed (auto:commit), +0 fixed (auto:gate_pass); open 1`, and `count` now shows `1 open` instead of the `2 open` of section 2, and its last line reads `review rounds on main@<12 hex>: 0/3` (it was `1/3` in section 2; the commit started a new change); `label` prints `label: 1 human outcome(s), dismissed (live-r3-2)` and `count` then shows `0 open`. The first import of the cap loop shows something new: the same recorded text now resolves to `REL.1` on `heldout_unsafe.py:7`, because the clause exists. Runs 2 and 3 exit 0; run 4 is refused with exit status 3:
 
 ```text
 house-rules: error: round cap reached for main@<12 hex>: 3/3 rounds used; 6 findings still open (house-rules count). Fix blockers, let the rest go to distill, or rerun with --over-cap (recorded).
@@ -374,7 +453,7 @@ house-rules: error: round cap reached for main@<12 hex>: 3/3 rounds used; 6 find
 | `wrapup_auto_max_per_day` | 2 | Automatic reviews asked for or started in any rolling 24 hours; past it, exit 4 and one notice. The book is `.house-rules/auto-reservations.jsonl` |
 | `digest_max_bytes` | 4096 | How large the digest may grow; a rule that would push it over is refused |
 
-**With the plugin (needs Claude Code; not part of the free path).** Install it, run setup once per repository, and commit as usual. When the work since the last review crosses a threshold, the Stop hook starts one wrap-up review in the background and asks you at most one question, only for a new blind spot. This needs Claude Code 2.1.163 or newer.
+**With the plugin (needs Claude Code; not part of the free path).** Install it, run setup once per repository, and commit as usual. When the work since the last review crosses a threshold, the Stop hook (Claude Code's hook that runs when a turn ends) starts one wrap-up review in the background and asks you at most one question, only for a new blind spot. This needs Claude Code 2.1.163 or newer.
 
 ```bash
 claude plugin marketplace add wangxuzhou666-arch/house-rules
@@ -389,7 +468,7 @@ Then `/house-rules:setup` in your repository. The other skills are `/house-rules
 
 **Checkpoint.** You can say what starts a review, what stops it (the thresholds, the round cap, the daily cap), where the daily-cap book lives, and what a commit trailer does.
 
-**Go deeper.** [Thresholds](docs/WRAPUP.md#thresholds) · [The daily cap](docs/WRAPUP.md#the-daily-cap) · [Cost, limits and versions](docs/WRAPUP.md#cost-limits-and-versions) · [If nothing happens](docs/WRAPUP.md#if-nothing-happens) · [Cost](docs/INTEGRATION.md#cost) · [With and without the plugin](docs/INTEGRATION.md#with-and-without-the-plugin)
+**Go deeper.** [Review rounds](docs/LEDGER.md#review-rounds) · [Thresholds](docs/WRAPUP.md#thresholds) · [The daily cap](docs/WRAPUP.md#the-daily-cap) · [Cost, limits and versions](docs/WRAPUP.md#cost-limits-and-versions) · [If nothing happens](docs/WRAPUP.md#if-nothing-happens) · [Cost](docs/INTEGRATION.md#cost) · [With and without the plugin](docs/INTEGRATION.md#with-and-without-the-plugin)
 
 ---
 
@@ -463,7 +542,15 @@ git checkout -- CODING-STYLE.md CODING-STYLE.digest.md samples/generalization
 
 The outcome: the rewrites showed no improvement, so the author rolled REL.1 and REL.2 back to the round-1 wording; the current digest is byte-identical to round 1's. Ask the group: what would you test next? What would make a 3-run result trustworthy: more runs, a fixed model, a second reviewer, a different label?
 
-**Swap in your own.** Take one rule of your own from section 1 or 3. Reword its digest line, then write down, before any paid run, what the reviewer will label and what it will do with your control. If you have budget, record one case of your own with `--live` and note the result honestly, pass or fail.
+**Swap in your own.** Take one rule of your own from section 1 or 3. Reword its digest line, then write down, before any paid run, what the reviewer will label and what it will do with your control. If you have budget, record one case of your own with `--live` and note the result honestly, pass or fail. The preparation is free and offline; only the last step spends money:
+
+1. The check reads the clone's rules, not those of `hr-demo`. Add your clause to the clone's `CODING-STYLE.md` and run `house-rules compile`. The clone's digest has only about 14 bytes of room, so any new clause pushes it over 4096 bytes and `compile` warns (`warning: digest CODING-STYLE.digest.md is 4133 bytes, over digest_max_bytes 4096` for a one-line clause; your number will differ); it still writes the digest. A new clause also gives the new round the digest it needs, because a round must use a digest no earlier round used.
+2. Copy a case as a template, `cp -r samples/generalization/cases/rel-1 samples/generalization/cases/mine-1`, replace the two files in `code/` with your violation and your control (two different file names), and rewrite `oracle.py` as in section 4.
+3. Edit `samples/generalization/cases/mine-1/case.json`. The harness reads `v` (keep 1), `id` (the directory name), `clause` (your clause id), `violation` and `control` (paths inside `code/`) and `control_kind` (`exempt` or `compliant`); the other fields only document the case for people.
+4. `python3 -I samples/generalization/cases/mine-1/oracle.py` must exit 0, and `python3 samples/generalization/run_check.py --live --round 4 --case mine-1` prints the plan and exits 2 without a call, as in the commands above.
+5. The paid step: the same command with `--yes-spend 6`. That is 6 reviews, about $1.2 at the author's estimate of $0.2 per review, plus at most 6 repeats of failed runs: about $2.4 in all, at most. Every flag is documented in the `--live` bullet of [Score and record](samples/generalization/README.md#score-and-record).
+
+To undo all of this in the clone, run the Undo command above again and `rm -rf samples/generalization/cases/mine-1` (and delete any recordings you made).
 
 **Checkpoint.** You can explain why a replay cannot confirm a rule edit, what it costs to find out, and the three lessons in your own words.
 
@@ -475,6 +562,15 @@ The outcome: the rewrites showed no improvement, so the author rolled REL.1 and 
 
 A rules file with stable clause ids, a digest the reviewer and the coding session read, a ledger of findings and what became of them, a changelog of every rule change with its evidence and the decision, and a way to ask whether a rule holds. You do not have evidence that the agent writes better code, and this project does not claim any.
 
-To clean up: `rm -rf "$HR_SRC/../hr-demo"`. The clone is unchanged unless you recorded a live case in section 6.
+**Using it on your repository.**
+
+1. Install it for good. The `export` lines of this workshop last for one terminal. Put the clone's `bin/` on your `PATH`, or install the Claude Code plugin (see [Install](README.md#install) in the README).
+2. In your repository, run `house-rules init --rules-file <your rules file>` (or `/house-rules:setup` with the plugin), previewing with `--dry-run` first. Commit the files `init` lists, together: the pre-commit hook checks the staged copies.
+3. Get one review in: `house-rules review --level high` (it costs money; section 5), or import another reviewer's JSON with `house-rules review --from-file out.json --run ID`. Then `house-rules count --by-rule` shows what is open, by clause.
+4. Before you turn any automation on, set the thresholds in `.house-rules.json` and run `house-rules wrapup --dry-run` until you can predict what it will do (section 5).
+5. Change the rules only through the decision step, `/house-rules:maintain` (needs Claude Code) or `decision-context` and `apply-decisions` (section 3), so each change keeps its evidence and its decision in the changelog.
+6. Treat any claim that a rule helps as unproven. The replay cannot confirm it; only a paid live round can (sections 4 and 6).
+
+To clean up: `rm -rf "$HR_SRC/../hr-demo" "$HR_SRC/../hr-mine"` (the second exists only if you did the swap-in in section 1). The clone is unchanged unless you recorded a live case or added a case of your own in section 6.
 
 Next: [README](README.md) for installing the plugin, [Fitting house-rules into daily work](docs/INTEGRATION.md) for daily use, and [Why the loop is built this way](docs/METHOD.md) for the design and its limits.
