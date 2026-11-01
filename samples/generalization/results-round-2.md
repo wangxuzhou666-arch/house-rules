@@ -23,5 +23,7 @@ Run slots that needed a repeat after a failed first attempt (both attempts are k
 
 Notes:
 
+- rel-1: the rules changed since recording: the REL.1 line of the digest now differs from the recorded one; the scores describe the recorded digests
+- rel-1b: the rules changed since recording: the REL.1 line of the digest now differs from the recorded one; the scores describe the recorded digests
 - rel-2: the rules changed since recording: the REL.2 line of the digest now differs from the recorded one; the scores describe the recorded digests
 - rel-2b: the rules changed since recording: the REL.2 line of the digest now differs from the recorded one; the scores describe the recorded digests

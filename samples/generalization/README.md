@@ -6,6 +6,13 @@ Each case pairs a new violation with a control (compliant, or covered by the rul
 
 Recordings are filed by round. A round is one digest generation: all its runs were made with the same `with_rule` digest. Round 1 holds seven cases (`rel-1` to `rel-4`, `rel-3b`, and the held-out `rel-1b` and `rel-2b`); its scores are in [results-round-1.md](results-round-1.md).
 
+Three rounds have been recorded; [results-compare.md](results-compare.md) puts them side by side, and CRITERIA.md Addenda 2 and 3 fixed each later round before it was recorded:
+
+- Round 1: the rules as they were. PASS 1 (`rel-3b`), FAIL 6.
+- Round 2: a shorter Labeling instruction plus REL.1 and REL.2 rewritten to lead with their exemptions. PASS 0, FAIL 6: in 17 of 18 `with_rule` runs no finding carried a `category` key. The Labeling instruction was then restored.
+- Round 3: only the REL.1 and REL.2 rewrites. PASS 1 (`rel-3b`), FAIL 5. Exempt controls of REL.1 were labeled with the clause as often as in round 1 (`rel-1` 3/3, held-out `rel-1b` 2/3), and with the same clause text `rel-4` moved from 1/3 to 3/3 on its violation, a measure of how much 3 runs vary.
+- Decision after round 3: the rewrites showed no improvement, so REL.1 and REL.2 were restored to their round-1 wording (Revision 5 in `CODING-STYLE.changelog.md`). The current digest is byte-identical to the one round 1 was recorded with.
+
 ## Layout
 
 ```
