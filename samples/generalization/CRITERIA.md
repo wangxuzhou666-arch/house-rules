@@ -97,3 +97,14 @@ Round 1 failed `rel-1` and `rel-2` because the controls, which fall under the st
 
 - For each file and condition, the number of runs (of 3) in which a finding on that file has a `summary` that names the case's clause (`REL.4` or `rel-4`). The `category` and the failure scenario are not read.
 - It is reported for every round, round 1 included. It was added after round 1 had been seen, because some runs named the clause in the summary but carried no `category`. It has no pass line and is never part of a verdict.
+
+## Addendum 3 — round 3 (added after round 2 had been seen, before any round-3 recording)
+
+- Round 2 stands as recorded: PASS 0, FAIL 6. In 17 of its 18 `with_rule` runs, and 16 of its 18 `without_rule` runs, no finding carried a `category` key, so nothing could be labeled; in round 1, 7 of 21 `with_rule` runs had none. The two cases recorded into round 1 an hour before round 2, on the round-1 digest and the same Claude Code version, still carried it. The shorter Labeling instruction of round 2 is the likely cause: the clauses of `rel-3b` and `rel-4` did not change, yet both lost every label and `rel-3b` went from PASS to FAIL. This is an inference from these counts, not a tested mechanism.
+- The Labeling instruction is restored to its round-1 text. To fit the digest's byte budget with it, the digest line of REL.2 is shortened through the proposal flow before round 3 is recorded; the full text of the clause in `CODING-STYLE.md` does not change.
+- Round 3 has the same six cases and holds fixed everything Addendum 2 holds fixed. Its `with_rule` digest differs from round 1's only in the REL.1 and REL.2 lines (and the header that names the source's hash). So:
+  - `rel-1b` and `rel-2b` are the held-out check of the new exemption wording, without the Labeling change acting alongside it.
+  - `rel-1` and `rel-2` are a check of the fix.
+  - The clauses of `rel-3b` and `rel-4` read as in round 1, so for these two cases round 3 repeats round 1 and shows how much the counts move between recordings of the same clause text.
+- Round 3 was decided after round 2 had been seen. It is reported next to rounds 1 and 2, never in place of either.
+- Keeping or rolling back the rule changes stays a decision by a person after round 3 has been seen; both the decision and all three rounds are reported.
