@@ -104,7 +104,7 @@ These judgment rules are adopted in this repository only. They may generalize, b
    **Finding source:** `review-ratchet:l1:r1:r1-4`.
    **Examples:** Violates: deleting the old installation before copying its replacement, then losing both on a copy failure. Complies: preparing and validating the replacement before switching, with the old state retained or recoverable if the switch fails.
 
-2. **[REL.2]** Changes to the generation of persistent IDs used for deduplication, linking or closing records require compatible reads or a migration, with verification that old records still identify the same objects. (should-fix) <!-- digest: Exempt: a new label or format over the same stored key. Otherwise a stored key (dedup, links, closing) change needs compatible reads or migration and old-identity checks -->
+2. **[REL.2]** Changes to the generation of persistent IDs used for deduplication, linking or closing records require compatible reads or a migration, with verification that old records still identify the same objects. (should-fix) <!-- digest: Exempt: a new label or format over the same stored key. Otherwise a stored-ID change needs compatible reads or migration and old-identity checks -->
    A new label or display format over the same stored key and fields is exempt.
    **Why added (proposal D, accepted 2026-10-28):** An ID-format change can create duplicate records and break existing links even when both formats look valid. This is a persistence contract, distinct from naming style and from PRJ.1's distinction between replay and new execution.
    **Finding source:** `review-ratchet:l1:r1:r1-5`.

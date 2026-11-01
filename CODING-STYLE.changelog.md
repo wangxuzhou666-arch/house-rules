@@ -319,3 +319,34 @@ Why: in the first 24 runs of the generalization check (`samples/generalization/`
 - Evidence: `house-rules:l2:g1-rel2-w1:g1-rel2-w1-6` — `samples/generalization/cases/rel-2/code/reading_list.py:20` — Bumping LABEL_STYLE to 2 leaves old rows displaying in a different format from new rows, so one feed mixes `host-0001` and `host#2` labels.
 - Evidence: `house-rules:l2:g1-rel2-w2:g1-rel2-w2-7` — `samples/generalization/cases/rel-2/code/reading_list.py:4` — `LABEL_STYLE` is bumped to 2 but old rows are not migrated, and the label text changes from zero-padded `host-0001` to `host#1`.
 - Decision: accept by Colar — "采纳 (Recommended)"
+
+## Revision 4 — 2026-10-31 (batch 1e60809fba01badaeddf6f7e76de91e751be361fba33a1c8c3bbf6d85f3dd6de)
+
+### rewrite REL.2
+
+- Before:
+  ```markdown
+  2. **[REL.2]** Changes to the generation of persistent IDs used for deduplication, linking or closing records require compatible reads or a migration, with verification that old records still identify the same objects. (should-fix) <!-- digest: Exempt: a new label or format over the same stored key. Otherwise a stored key (dedup, links, closing) change needs compatible reads or migration and old-identity checks -->
+     A new label or display format over the same stored key and fields is exempt.
+     **Why added (proposal D, accepted 2026-10-28):** An ID-format change can create duplicate records and break existing links even when both formats look valid. This is a persistence contract, distinct from naming style and from PRJ.1's distinction between replay and new execution.
+     **Finding source:** `review-ratchet:l1:r1:r1-5`.
+     **Examples:** Violates: replacing stored `r1-001` with `r1-1` so replay inserts a second record. Complies: compatible lookup or a migration that preserves the object's identity and references, or changing only its displayed label.
+  ```
+- After:
+  ```markdown
+  2. **[REL.2]** Changes to the generation of persistent IDs used for deduplication, linking or closing records require compatible reads or a migration, with verification that old records still identify the same objects. (should-fix) <!-- digest: Exempt: a new label or format over the same stored key. Otherwise a stored-ID change needs compatible reads or migration and old-identity checks -->
+     A new label or display format over the same stored key and fields is exempt.
+     **Why added (proposal D, accepted 2026-10-28):** An ID-format change can create duplicate records and break existing links even when both formats look valid. This is a persistence contract, distinct from naming style and from PRJ.1's distinction between replay and new execution.
+     **Finding source:** `review-ratchet:l1:r1:r1-5`.
+     **Examples:** Violates: replacing stored `r1-001` with `r1-1` so replay inserts a second record. Complies: compatible lookup or a migration that preserves the object's identity and references, or changing only its displayed label.
+  ```
+- Why: Make room to restore the earlier Labeling text, which round 2 showed is needed for the `category` key (written in 1 of 18 with_rule runs with the shorter text). The full clause keeps the dedup/links/closing scope.
+- Evidence: `house-rules:l2:g1-rel2-w1:g1-rel2-w1-6` — `samples/generalization/cases/rel-2/code/reading_list.py:20` — Bumping LABEL_STYLE to 2 leaves old rows displaying in a different format from new rows, so one feed mixes `host-0001` and `host#2` labels.
+- Evidence: `house-rules:l2:g1-rel2-w2:g1-rel2-w2-7` — `samples/generalization/cases/rel-2/code/reading_list.py:4` — `LABEL_STYLE` is bumped to 2 but old rows are not migrated, and the label text changes from zero-padded `host-0001` to `host#1`.
+- Decision: accept by Colar — "采纳 (Recommended)"
+
+## Labeling note, reverted — 2026-10-31
+
+The Labeling rewording recorded in the "Labeling note — 2026-10-31" above is reverted in the generator (`house_rules/digest.py`): the compiled Labeling section is again the one used before that note, byte for byte. Like the note it reverts, this changes no clause and has no revision number.
+
+Why: in round 2 of the generalization check (`samples/generalization/`), recorded with the reworded section, 17 of 18 `with_rule` runs carried no `category` on any finding, against 7 of 21 in round 1 with the earlier section. Revision 4 above shortened the REL.2 digest line first so that the restored section fits the byte budget; the digest is 4092 of 4096 bytes. Numbering still continues from the highest Revision heading, so the next batch is Revision 5.

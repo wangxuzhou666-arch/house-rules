@@ -247,8 +247,7 @@ class DigestContentTest(CompileCase):
     def test_labeling_section_carries_the_fixed_instruction(self) -> None:
         self.cli_ok("compile")
         labeling = self.digest().split("## Labeling\n", 1)[1]
-        for phrase in ("findings are filed by `category`", "kebab-case",
-                       '`"unmapped"` if no clause truly matches or an exemption applies', "Never stretch a clause to fit",
+        for phrase in ("kebab-case", "`unmapped`", "Prefer `unmapped` over stretching a clause",
                        "one finding per defect", "instead of filing duplicates"):
             self.assertIn(phrase.lower(), labeling.lower())
 
@@ -256,7 +255,7 @@ class DigestContentTest(CompileCase):
         self.cli_ok("compile")
         labeling = self.digest().split("## Labeling\n", 1)[1]
         self.assertIn("JSON array", labeling)
-        self.assertIn("Every finding object in your JSON array MUST carry both keys below", labeling)
+        self.assertIn("every finding object MUST carry two keys", labeling)
         self.assertIn('- `"category"`:', labeling)
         self.assertIn('- `"severity"`:', labeling)
         for severity in ("blocker", "should-fix", "nice"):
@@ -411,7 +410,7 @@ class LabelingExampleTest(CompileCase):
         self.assertIn("no clause has a severity", err)
         self.assertEqual(self.digest_lines("Violations"), ["(none)"])
         labeling = self.labeling()
-        self.assertIn('in kebab-case, or `"unmapped"` if no clause truly matches or an exemption applies.', labeling)
+        self.assertIn('in kebab-case, or `"unmapped"` if no clause truly matches', labeling)
         self.assertNotIn("->", labeling)
         self.assertIn('"category": "unmapped", "severity": "should-fix"}`', labeling)
         for clause_text in ("p1-1", "r-1", "P1.1", "R.1", "p0e"):
@@ -613,7 +612,7 @@ class InjectSectionsTest(CompileCase):
         self.configure_targets("CLAUDE.md", {"path": "AGENTS.md", "sections": ["violations", "reviewer"]})
         self.cli_ok("compile")
         self.assertEqual(self.headings("AGENTS.md"), ["## Violations", "## Reviewer rules"])
-        self.assertNotIn("MUST carry both keys", self.block("AGENTS.md"))
+        self.assertNotIn("MUST carry two keys", self.block("AGENTS.md"))
         self.assertEqual(self.headings("CLAUDE.md"), ["## Violations", "## Reviewer rules", "## Labeling"])  # the other target is unaffected
         self.assertIn("## Labeling", self.digest())  # and so is the digest itself
 
