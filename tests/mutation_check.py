@@ -589,6 +589,10 @@ MUTANTS = (
     Mutant("plugin: review skill stops naming the label page as a fallback", "skills/review/SKILL.md",
            "6. `house-rules label-page` (a local HTML page", "6. A label page (a local HTML page"),
 
+    # ---- launcher: the Python version guard ----
+    Mutant("launcher: a Python older than 3.10 is not stopped before the import", "bin/house-rules",
+           "if sys.version_info < (3, 10):", "if False:"),
+
     # ---- labeling: the digest section that makes the model emit category and severity ----
     Mutant("labeling: the keys are optional", "house_rules/digest.py",
            "every finding object MUST carry two keys", "a finding object may carry two keys"),

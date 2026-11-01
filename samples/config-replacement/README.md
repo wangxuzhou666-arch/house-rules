@@ -45,7 +45,8 @@ the earlier form of `safe_config.py`. To replay it without a model:
 1. In a new scratch git repository, copy `CODING-STYLE.md`, run
    `house-rules init --rules-file CODING-STYLE.md` and commit.
 2. Copy the three files in `reviewed/` to the repository root, so the paths the review
-   names exist. Do not use the published `safe_config.py` or `heldout_safe.py` for this.
+   names exist. Do not use the `safe_config.py` or `heldout_safe.py` at the top of this
+   folder for this: they are newer than the copies in `reviewed/`.
 3. Run `house-rules review --from-file samples/config-replacement/recorded-review.txt --run live-r3`.
 
 No reviewer is called. It records two findings: REL.1 on `heldout_unsafe.py` line 7, and an

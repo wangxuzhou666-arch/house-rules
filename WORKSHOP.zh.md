@@ -19,6 +19,7 @@ house-rules 把你的编码规范放在一个规则文件里，编译成一份�
 你需要 `git` 2.28 或更新版本（并已设置姓名和邮箱，因为你会提交）、Python 3.10 或更新版本，以及一个 POSIX shell（macOS 或 Linux 上的 bash 或 zsh，Windows 上用 WSL：命令里用到了 `sed -i.bak`、`seq` 和 heredoc）。这个工具只用 Python 标准库。免费的这条路不需要 Claude Code。
 
 ```sh
+python3 --version
 git clone https://github.com/wangxuzhou666-arch/house-rules
 cd house-rules
 export HR_SRC="$PWD"
@@ -27,7 +28,8 @@ house-rules --help
 ```
 
 - 要 clone，不要下载 zip。第 4 节需要 git 仓库，没有的话会直接报错停下。
-- 整个工作坊用同一个终端，因为那两行 `export` 只在这个终端里有效。如果你的 `python3` 低于 3.10，请在这个终端里把较新的 Python 放到 `PATH` 最前面。
+- `python3 --version` 必须打印 3.10 或更新的版本，因为 `house-rules` 用你 `PATH` 里的第一个 `python3` 运行。如果版本更低，`house-rules --help` 会只打印一行就停下：`house-rules: error: Python 3.10 or newer is required, but this is Python <version> (<path of that python3>)`。然后请在这个终端里把较新的 Python 放到 `PATH` 最前面，再运行一次。
+- 整个工作坊用同一个终端，因为那两行 `export`，以及为较新的 Python 改的 `PATH`，只在这个终端里有效。
 - `house-rules --help` 会列出大约二十个子命令。工作坊用到其中十个，每个都在第一次出现的地方介绍：`init`、`compile`、`review`、`count`、`decision-context`、`prepare-decisions`、`apply-decisions`、`decision-summary`、`wrapup` 和 `label`。
 - 第 1、2、3、5 节在你 clone 旁边的一个临时仓库 `hr-demo` 里做，而且一节接着一节。第 4、6 节直接在 clone 里做，第 6 节结尾会撤销改动。想把某一节重来，就删掉 `hr-demo`（`rm -rf "$HR_SRC/../hr-demo"`），从第 1 节重做：已经存在的目录会让 `mkdir` 那几行报错。
 - 下面的输出块是某一次运行记录下来的。你那边的哈希、日期、路径和个别字节数会不一样，形状应该一样。
@@ -198,7 +200,7 @@ house-rules compile --check --strict
 
 ```sh
 cd "$HR_SRC/../hr-demo"
-# 那次 review 看到的三个文件（已发布的 safe_config.py 和 heldout_safe.py 更新过：这里不要用）
+# 那次 review 看到的三个文件是 reviewed/ 里的副本；samples/config-replacement/ 顶层同名的文件（safe_config.py、heldout_safe.py）更新过：这里不要用
 cp "$HR_SRC"/samples/config-replacement/reviewed/*.py .
 cat heldout_unsafe.py
 house-rules review --from-file "$HR_SRC/samples/config-replacement/recorded-review.txt" --run live-r3
@@ -370,7 +372,7 @@ rel-3b  REL.3   compliant  without_rule  3/3      0/3                3/3        
 PASS 1  FAIL 6  INCOMPLETE 0
 ```
 
-运行以 `wrote samples/generalization/results-round-1.json and samples/generalization/results-round-1.md` 结束。完整回放会为三轮各打印一张表，第 2、3 轮下面还有 `notes:`，说那几轮之后规则变过；那两轮是用改写过的措辞录的，后来被回滚了（第 6 节）。在没改动的树上，`git status --short` 什么也不打印：回放逐字节重现了已提交的结果文件。
+运行以两行结束：`wrote samples/generalization/results-round-1.json and samples/generalization/results-round-1.md` 和 `samples/generalization/results-compare.md not written: --round scores only one round`（只有完整回放才会写对比文件）。完整回放会为三轮各打印一张表，第 2、3 轮下面还有 `notes:`，说那几轮之后规则变过；那两轮是用改写过的措辞录的，后来被回滚了（第 6 节）。在没改动的树上，`git status --short` 什么也不打印：回放逐字节重现了已提交的结果文件。
 
 怎么读一行。每个用例每个条件有 3 次运行。`with_rule` 的 review 看到的是仓库的 digest；`without_rule` 的 review 看到的是去掉这一条条款之后的同一份 digest。*labeled* 表示该文件上某条发现把这条条款的 ID 当作 category；*flagged* 表示该文件上有发现，标签不限。通过线只看 `with_rule`：违规文件在至少 3 次里有 2 次被打上标签，并且对照文件 3 次里一次都没被打上。
 
@@ -491,18 +493,25 @@ assert t.count(old) == 1
 open(p, "w", encoding="utf-8").write(t.replace(old, new))
 EOF
 house-rules compile
-python3 samples/generalization/run_check.py --round 1 | tail -8
+python3 samples/generalization/run_check.py --round 1 | tail -10
 git status --short
 git diff samples/generalization/results-round-1.md
 python3 samples/generalization/run_check.py --live --round 4 --case rel-1
 ```
 
-**你会看到。** digest 变短了（`compile: 1 written, 0 unchanged; digest CODING-STYLE.digest.md: 4053 bytes (limit 4096)`）。回放打印的分数和之前一样，外加每个受影响的用例一条提示：
+**你会看到。** digest 变短了（`compile: 1 written, 0 unchanged; digest CODING-STYLE.digest.md: 4053 bytes (limit 4096)`）。回放打印的分数和之前一样，外加每个受影响的用例一条提示。最后十行（两行图例在这里缩短了）以总数开头，`PASS 1  FAIL 6  INCOMPLETE 0`，判定和第 4 节里的相同：
 
 ```text
+PASS 1  FAIL 6  INCOMPLETE 0
+labeled = a finding carries the case's clause as its category; ...
+cited = secondary, declared after round 1, ...
+run slots that needed a repeat after a failed first attempt (both attempts are kept): 0
+
 notes:
   rel-1: the rules changed since recording: the REL.1 line of the digest now differs from the recorded one; the scores describe the recorded digests
   rel-1b: the rules changed since recording: ...
+wrote samples/generalization/results-round-1.json and samples/generalization/results-round-1.md
+samples/generalization/results-compare.md not written: --round scores only one round
 ```
 
 `git status` 显示 `CODING-STYLE.md`、`CODING-STYLE.digest.md` 和 `samples/generalization/results-round-1.*` 被修改了。回放把提示写进了被跟踪的结果文件（`git diff` 在那里显示的就是这些：分数原封不动，下面多了一个 `Notes:` 列表），所以最后一步要把它撤销。live 命令只给出计划；它不发起任何调用，退出码为 2：

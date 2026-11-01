@@ -17,6 +17,7 @@ Alone or in a group, each section ends with a checkpoint to say out loud. Sectio
 You need `git` 2.28 or newer (with a name and email set, because you will commit), Python 3.10 or newer, and a POSIX shell (bash or zsh on macOS or Linux, or WSL on Windows: the commands use `sed -i.bak`, `seq` and heredocs). The tool uses the Python standard library only. Claude Code is not needed for the free path.
 
 ```sh
+python3 --version
 git clone https://github.com/wangxuzhou666-arch/house-rules
 cd house-rules
 export HR_SRC="$PWD"
@@ -25,7 +26,8 @@ house-rules --help
 ```
 
 - Clone it; do not download a zip. Section 4 needs a git repository and stops without one.
-- Use one terminal for the whole workshop, because the two `export` lines live in it. If your `python3` is older than 3.10, put a newer one first on `PATH` in this terminal.
+- `python3 --version` must print 3.10 or newer, because `house-rules` runs on the first `python3` on your `PATH`. If it is older, `house-rules --help` prints one line and stops: `house-rules: error: Python 3.10 or newer is required, but this is Python <version> (<path of that python3>)`. Then put a newer Python first on `PATH` in this terminal and run it again.
+- Use one terminal for the whole workshop, because the two `export` lines, and any `PATH` change for a newer Python, live in it.
 - `house-rules --help` lists about twenty subcommands. The workshop uses ten, each introduced where it first appears: `init`, `compile`, `review`, `count`, `decision-context`, `prepare-decisions`, `apply-decisions`, `decision-summary`, `wrapup` and `label`.
 - Sections 1, 2, 3 and 5 work in a scratch repository, `hr-demo`, next to your clone, and each builds on the one before. Sections 4 and 6 work in the clone itself, and section 6 undoes its edits at the end. To start a section over, remove `hr-demo` (`rm -rf "$HR_SRC/../hr-demo"`) and redo section 1: the `mkdir` lines fail on a directory that already exists.
 - The output blocks below were recorded in one run. Hashes, dates, paths and a few byte counts will differ in yours; the shape should not.
@@ -196,7 +198,7 @@ The recording was made when the rules already had REL.1. Yours does not, and tha
 
 ```sh
 cd "$HR_SRC/../hr-demo"
-# the three files that review saw (the published safe_config.py and heldout_safe.py are newer: do not use them here)
+# the three files that review saw are the copies in reviewed/; the files of the same names at the top of samples/config-replacement/ (safe_config.py, heldout_safe.py) are newer: do not use them here
 cp "$HR_SRC"/samples/config-replacement/reviewed/*.py .
 cat heldout_unsafe.py
 house-rules review --from-file "$HR_SRC/samples/config-replacement/recorded-review.txt" --run live-r3
@@ -368,7 +370,7 @@ rel-3b  REL.3   compliant  without_rule  3/3      0/3                3/3        
 PASS 1  FAIL 6  INCOMPLETE 0
 ```
 
-and the run ends with `wrote samples/generalization/results-round-1.json and samples/generalization/results-round-1.md`. The full replay prints a table for each of the three rounds, then `notes:` under rounds 2 and 3 saying the rules changed since recording; those rounds were recorded with rewritten wording that was later rolled back (section 6). On an unchanged tree `git status --short` prints nothing: the replay reproduces the committed result files byte for byte.
+and the run ends with two lines, `wrote samples/generalization/results-round-1.json and samples/generalization/results-round-1.md` and `samples/generalization/results-compare.md not written: --round scores only one round` (only the full replay writes the comparison). The full replay prints a table for each of the three rounds, then `notes:` under rounds 2 and 3 saying the rules changed since recording; those rounds were recorded with rewritten wording that was later rolled back (section 6). On an unchanged tree `git status --short` prints nothing: the replay reproduces the committed result files byte for byte.
 
 How to read a row. Each case has 3 runs per condition. `with_rule` reviews saw the repository's digest; `without_rule` reviews saw the same digest minus that one clause. *Labeled* means a finding on that file carries the clause id as its category; *flagged* means a finding on that file with any label. The pass line, on `with_rule` only: the violation labeled in at least 2 of 3 runs and the control labeled in 0 of 3.
 
@@ -489,18 +491,25 @@ assert t.count(old) == 1
 open(p, "w", encoding="utf-8").write(t.replace(old, new))
 EOF
 house-rules compile
-python3 samples/generalization/run_check.py --round 1 | tail -8
+python3 samples/generalization/run_check.py --round 1 | tail -10
 git status --short
 git diff samples/generalization/results-round-1.md
 python3 samples/generalization/run_check.py --live --round 4 --case rel-1
 ```
 
-**What you should see.** The digest shrinks (`compile: 1 written, 0 unchanged; digest CODING-STYLE.digest.md: 4053 bytes (limit 4096)`). The replay prints the same scores as before, plus a note per affected case:
+**What you should see.** The digest shrinks (`compile: 1 written, 0 unchanged; digest CODING-STYLE.digest.md: 4053 bytes (limit 4096)`). The replay prints the same scores as before, plus a note per affected case. The last ten lines (the two legend lines are shortened here) start with the totals, `PASS 1  FAIL 6  INCOMPLETE 0`, the same verdicts as in section 4:
 
 ```text
+PASS 1  FAIL 6  INCOMPLETE 0
+labeled = a finding carries the case's clause as its category; ...
+cited = secondary, declared after round 1, ...
+run slots that needed a repeat after a failed first attempt (both attempts are kept): 0
+
 notes:
   rel-1: the rules changed since recording: the REL.1 line of the digest now differs from the recorded one; the scores describe the recorded digests
   rel-1b: the rules changed since recording: ...
+wrote samples/generalization/results-round-1.json and samples/generalization/results-round-1.md
+samples/generalization/results-compare.md not written: --round scores only one round
 ```
 
 `git status` shows `CODING-STYLE.md`, `CODING-STYLE.digest.md` and `samples/generalization/results-round-1.*` modified. The replay writes the note into the tracked result files (that is all `git diff` shows there: a `Notes:` list under the unchanged scores), which is why the last step undoes it. The live command only plans; it makes no call and exits 2:

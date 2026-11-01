@@ -2,6 +2,12 @@
 import sys
 from pathlib import Path
 
+# The package uses 3.10-only syntax, which an older Python reports as a traceback from deep inside it. Say it here instead,
+# and keep this file readable by 3.9 and older: nothing above or below may use a newer feature.
+if sys.version_info < (3, 10):
+    running = ".".join(str(part) for part in sys.version_info[:3])
+    sys.exit(f"house-rules: error: Python 3.10 or newer is required, but this is Python {running} ({sys.executable})")
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from house_rules.cli import main  # noqa: E402

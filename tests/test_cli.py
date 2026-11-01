@@ -1,4 +1,6 @@
+import ast
 import json
+import shutil
 import subprocess
 import sys
 import unittest
@@ -310,6 +312,53 @@ class ExecutableTest(RepoCase):
                               capture_output=True, text=True)
         self.assertEqual(proc.returncode, 1)
         self.assertIn("house-rules: error:", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+
+
+class LauncherPythonGuardTest(unittest.TestCase):
+    """Under Python 3.9 (the python3 macOS ships) the package died with a TypeError traceback from ingest.py; the launcher says why."""
+
+    LAUNCHER = REPO_ROOT / "bin" / "house-rules"
+    # Runs the launcher as __main__ in a child that believes it is the Python given as the first argument.
+    AS_PYTHON = (
+        "import collections, runpy, sys\n"
+        "version, launcher, *args = sys.argv[1:]\n"
+        "fake = collections.namedtuple('version_info', 'major minor micro releaselevel serial')\n"
+        "sys.version_info = fake(*map(int, version.split('.')), 'final', 0)\n"
+        "sys.argv = [launcher, *args]\n"
+        "runpy.run_path(launcher, run_name='__main__')\n"
+    )
+
+    def run_as(self, version: str, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run([sys.executable, "-c", self.AS_PYTHON, version, str(self.LAUNCHER), *args],
+                              capture_output=True, text=True, stdin=subprocess.DEVNULL)
+
+    def test_python_3_9_gets_one_line_naming_the_requirement_the_version_and_the_interpreter(self) -> None:
+        proc = self.run_as("3.9.6", "--help")
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(proc.stdout, "")
+        self.assertEqual(proc.stderr, f"house-rules: error: Python 3.10 or newer is required, but this is Python 3.9.6 ({sys.executable})\n")
+
+    def test_python_3_10_gets_past_the_guard(self) -> None:
+        proc = self.run_as("3.10.0", "--help")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("usage:", proc.stdout)
+        self.assertNotIn("Python 3.10 or newer", proc.stderr)
+
+    def test_the_launcher_uses_no_syntax_newer_than_python_3_9(self) -> None:
+        """The guard can only speak if an old Python gets as far as running the launcher, so it has to parse there."""
+        ast.parse(self.LAUNCHER.read_text(encoding="utf-8"), feature_version=(3, 9))
+
+    def test_a_real_older_python_prints_the_line_instead_of_a_traceback(self) -> None:
+        for name in ("python3.9", "python3.8", "/usr/bin/python3"):
+            older = shutil.which(name)
+            if older and subprocess.run([older, "-c", "import sys; sys.exit(sys.version_info >= (3, 10))"]).returncode == 0:
+                break
+        else:
+            self.skipTest("no Python older than 3.10 on this machine")
+        proc = subprocess.run([older, str(self.LAUNCHER), "--help"], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        self.assertEqual(proc.returncode, 1)
+        self.assertRegex(proc.stderr, r"^house-rules: error: Python 3\.10 or newer is required, but this is Python 3\.\d+\.\d+ \(.+\)\n$")
         self.assertNotIn("Traceback", proc.stderr)
 
 
