@@ -1643,12 +1643,15 @@ class RealCasesTest(unittest.TestCase):
 class RoundOneRecordingsTest(unittest.TestCase):
     """The committed recordings of round 1 score as they did when they sat directly under recordings/ (and as results.md first said).
     Recordings never change, so these numbers are pinned: (violation labeled, violation flagged, control labeled, control flagged) of
-    the runs of 3, and the secondary pair (violation cited, control cited), for with_rule and without_rule."""
+    the runs of 3, and the secondary pair (violation cited, control cited), for with_rule and without_rule. rel-1b and rel-2b joined
+    round 1 later, on the same digest (CRITERIA.md Addendum 2), and are pinned as first recorded."""
 
     ROUND_ONE_DIGEST = "f85fe1df1803e7e5ca40660f2e60eccfa26f8f31a82c9938ca2f04a5d360a3eb"
     PINNED = {
         "rel-1": ("FAIL", ((3, 3, 3, 3), (1, 1)), ((0, 3, 0, 3), (0, 0))),
+        "rel-1b": ("FAIL", ((2, 3, 2, 3), (2, 2)), ((0, 3, 0, 3), (0, 0))),
         "rel-2": ("FAIL", ((2, 3, 2, 3), (1, 0)), ((0, 3, 0, 3), (0, 0))),
+        "rel-2b": ("FAIL", ((1, 3, 0, 3), (2, 1)), ((0, 3, 0, 3), (0, 0))),
         "rel-3": ("FAIL", ((3, 3, 3, 3), (1, 1)), ((0, 3, 0, 3), (0, 0))),
         "rel-3b": ("PASS", ((2, 3, 0, 3), (1, 0)), ((0, 3, 0, 3), (0, 0))),
         "rel-4": ("FAIL", ((1, 3, 0, 3), (2, 0)), ((0, 3, 0, 3), (0, 0))),
@@ -1670,7 +1673,7 @@ class RoundOneRecordingsTest(unittest.TestCase):
                                   (row["secondary"]["violation_cited_runs"], row["secondary"]["control_cited_runs"])) for row in rows])
             self.assertEqual([row["runs_ok"] for row in rows], [3, 3])
         self.assertEqual(got, self.PINNED)
-        self.assertEqual(results["totals"], {"PASS": 1, "FAIL": 4, "INCOMPLETE": 0})
+        self.assertEqual(results["totals"], {"PASS": 1, "FAIL": 6, "INCOMPLETE": 0})
         self.assertEqual(results["repeats"], {"slots_repeated": 0, "failed_attempts": []})
         self.assertEqual(results["round"], 1)
 

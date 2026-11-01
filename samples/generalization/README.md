@@ -4,7 +4,7 @@ house-rules turns code-review findings into written rules. This check asks one q
 
 Each case pairs a new violation with a control (compliant, or covered by the rule's stated exemption). The reviewer (Claude Code's `/code-review`) sees both files together, once with the rule in the digest and once with that clause removed. The scoring is fixed in [CRITERIA.md](CRITERIA.md), written before any recording.
 
-Recordings are filed by round. A round is one digest generation: all its runs were made with the same `with_rule` digest. Round 1 holds five cases (`rel-1` to `rel-4` and `rel-3b`); its scores are in [results-round-1.md](results-round-1.md).
+Recordings are filed by round. A round is one digest generation: all its runs were made with the same `with_rule` digest. Round 1 holds seven cases (`rel-1` to `rel-4`, `rel-3b`, and the held-out `rel-1b` and `rel-2b`); its scores are in [results-round-1.md](results-round-1.md).
 
 ## Layout
 
@@ -47,6 +47,8 @@ Run it for `rel-1` to `rel-4`.
 
 `rel-3b` is `rel-3` with a corrected control (the control of `rel-3` did not survive a state file that is not valid UTF-8; see Addendum 1 in [CRITERIA.md](CRITERIA.md)); it was recorded in round 1 on the same digest after the other four, run its oracle the same way, and it is reported next to `rel-3`, not in place of it.
 
+`rel-1b` (REL.1) and `rel-2b` (REL.2) are held-out cases for the clauses' exemptions: they were written after round 1, are not used as evidence when the wording of those rules changes, and were recorded into round 1 on the same digest before any rule changed (Addendum 2 in [CRITERIA.md](CRITERIA.md)). Run their oracles the same way.
+
 ## Score and record
 
 ```
@@ -57,7 +59,7 @@ python3.12 samples/generalization/run_check.py --live --round 2 --case rel-1 --y
 ```
 
 - `--replay` (the default) scores the recordings of every round against [CRITERIA.md](CRITERIA.md), prints one table per round, the runs that needed a repeat and any notes, and writes `results-round-<N>.json` and `.md` for each round and, when more than one round has results, `results-compare.md` (per case: violation labeled, control labeled and verdict in each round). `--round N` limits it to that round and writes no comparison. A round is scored for exactly the cases its `round.json` lists. It refuses (exit 1) a recording whose raw output, digest snapshot, code files or base files have been changed since it was made, a `with_rule` snapshot that is not the digest named in `round.json`, and recordings of a case that `round.json` does not list.
-- `--live` runs the reviewer and needs `--round N`. Without `--yes-spend N` it only prints the plan. `N` must equal the number of planned calls (cases x 2 conditions x 3 runs; with all five round-1 cases that is 30); the plan line also gives the maximum number of repeats on top, which `N` covers. A call that fails, or whose output has no findings array, is repeated once at once; both attempts are kept (see Failed runs in CRITERIA.md). The reviewer's stderr is not recorded: it names the recording machine's settings and local paths, so no provenance file holds any of it. For a failed attempt only, the last 5 lines go to the console and all of it to the `.stderr.txt` file above; a run that worked leaves nothing of it. Existing recordings are never overwritten: delete them, or add `--skip-existing` to record only the runs that have none. Once the spending is confirmed, `round.json` is written (or the case is added to it).
+- `--live` runs the reviewer and needs `--round N`. Without `--yes-spend N` it only prints the plan. `N` must equal the number of planned calls (cases x 2 conditions x 3 runs; with all seven round-1 cases that is 42); the plan line also gives the maximum number of repeats on top, which `N` covers. A call that fails, or whose output has no findings array, is repeated once at once; both attempts are kept (see Failed runs in CRITERIA.md). The reviewer's stderr is not recorded: it names the recording machine's settings and local paths, so no provenance file holds any of it. For a failed attempt only, the last 5 lines go to the console and all of it to the `.stderr.txt` file above; a run that worked leaves nothing of it. Existing recordings are never overwritten: delete them, or add `--skip-existing` to record only the runs that have none. Once the spending is confirmed, `round.json` is written (or the case is added to it).
 - `--case ID` (repeatable) and `--runs N` select part of the check; results files are not written for a partial selection.
 
 The scoring tables have two secondary columns, `violation cited` and `control cited`: the number of runs in which a finding on that file has a `summary` that names the case's clause (`REL.4` or `rel-4`, whole word, any case). They were declared after round 1, have no pass line and never change a verdict. They sit in a separate `secondary` object of `results-round-<N>.json`.

@@ -1,0 +1,34 @@
+```json
+[
+  {
+    "file": "code/payment_events.py",
+    "line": 6,
+    "summary": "The event key format changes from `provider:id` to `account/provider/id`, with no migration of rows already in the `events` table.",
+    "failure_scenario": "A ledger already holds the row `stripe:evt_1`. After deploy, a webhook retry for the same event produces the key `acme/stripe/evt_1`. `INSERT OR IGNORE` no longer collides, so the charge is counted twice and `net_cents` is overstated. `record_refund` for an old charge looks up the new-format key, matches nothing, returns False, and leaves `refunded` at 0, so a refunded charge stays in `net_cents`. This is a silent data-integrity regression (REL.1: keep the usable state until the replacement is ready; migrate or fall back to the old key)."
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 6,
+    "summary": "The new key joins `account`, `provider` and `event_id` with '/' without escaping or validating the parts, and `account` is not normalized the way `provider` (lowercased) and `event_id` (stripped) are.",
+    "failure_scenario": "Account 'a', provider 'b', event_id 'c/d' gives the key 'a/b/c/d'. Account 'a', provider 'b/c', event_id 'd' (or account 'a/b', provider 'c') gives the same key, so distinct events collide and `INSERT OR IGNORE` drops a real charge. Account 'Acme' versus 'acme', or 'acme ' with a trailing space, yields different keys for the same account, so the same event is deduplicated inconsistently. This violates P0F.1 (validate input at the boundary)."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 12,
+    "summary": "The label uses the year from `issued_on`, but `number` comes from a global `MAX(number)+1`, not a per-year counter. The format also drops the `INV-` prefix and shrinks the padding from 6 digits to 4.",
+    "failure_scenario": "The first invoice of 2027 is labelled '2027/9876' instead of '2027/0001'. A reader of the '<year>/<seq>' format expects per-year numbering, so gap detection and audits misread it. Past 9999 invoices the zero-padded width grows, so labels sort inconsistently as strings. Labels already issued and printed as 'INV-000123' are now rendered as '2025/0123', so existing external references no longer match anything the register shows."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 49,
+    "summary": "The `outstanding()` line format gains a free-form `order_ref` field between the label and the amount, with no escaping.",
+    "failure_scenario": "A consumer that parses these strings as '<label> <amount>', such as `line.split()[-1]` or a regex, now sees a different shape. `order_ref` is only stripped before it is stored, so it can contain spaces ('ORD 77 b'), which makes the line ambiguous to split. The change also exposes customer or order identifiers in a report that previously showed only label and amount. A structured return (tuple or dict) would avoid both problems."
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 19,
+    "summary": "`account` is inserted as a new positional parameter ahead of `provider`, so any call site not updated in the same change breaks or misbinds.",
+    "failure_scenario": "A stale call `record_charge(conn, 'stripe', 'evt_1', 500, 'extra')` or a keyword-style call fails with a TypeError at runtime. Calls that happen to supply the right number of strings, such as `record_refund(conn, 'stripe', 'ch_1', 'x')`, silently bind 'stripe' as the account. Nothing in the repo shows the callers were updated, and a required first-position argument is a risky signature change without a default or keyword-only marker."
+  }
+]
+```

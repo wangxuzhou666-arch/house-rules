@@ -1,0 +1,40 @@
+```json
+[
+  {
+    "file": "code/payment_events.py",
+    "line": 6,
+    "summary": "event_key changed the persisted primary-key format from `provider:event_id` to `account/provider/event_id` with no migration or fallback read for rows already in `events`.",
+    "failure_scenario": "A ledger already holds key `stripe:ch_123`. After deploy, `record_refund(conn, 'acme', 'stripe', 'ch_123')` looks up `acme/stripe/ch_123`, matches nothing, and returns False. The refund is silently never applied and `net_cents` stays overstated. A provider webhook retry of the old charge `ch_123` builds the new key, so `INSERT OR IGNORE` inserts it again as a second row. That charge is now double-counted and idempotency is lost for all historical events."
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 6,
+    "summary": "The new `account` key component is neither normalized (no strip/lower, unlike provider and event_id) nor guarded against the `/` delimiter, so distinct events can collide and equivalent ones can differ.",
+    "failure_scenario": "The account `a/b` with provider `x` produces the same key as the account `a` with provider `b` and event `x/...`. The key `a/b/x/e1` can come from two different tuples, so the second charge is silently dropped by `INSERT OR IGNORE`. Separately, `'Acme'` and `'acme '` produce different keys for the same account, so a redelivered event is recorded twice."
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 19,
+    "summary": "`account` was inserted as the new second positional parameter of `record_charge` and `record_refund`, shifting every existing positional argument. The parameter is also unused beyond key construction, and `net_cents` still sums across all accounts.",
+    "failure_scenario": "An out-of-repo caller still passing `(conn, 'stripe', 'evt_1', 500)` now binds `provider='evt_1'` and `event_id=500`, so it crashes with an AttributeError on `int.strip`. A caller of the `record_refund` signature gets a TypeError. Meanwhile `net_cents(conn)` still returns one total across all accounts, so adding the account dimension to the key gives no per-account totals."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 12,
+    "summary": "`invoice_label` was changed from `INV-000123` to `<year>/<number:04d>`. It is the externally visible invoice identity returned by `issue`, and nothing maps or recognizes old labels. The number comes from a global MAX+1, so it is not per-year.",
+    "failure_scenario": "Invoices already issued as `INV-000123` are re-rendered in `outstanding` as `2025/0123`, so customers or accountants who hold the old label can no longer match it. A year prefix implies per-year numbering, but numbers keep running globally: the first invoice of 2027 is labelled `2027/0457`, not `2027/0001`. Past 9999 invoices the zero-padding overflows to 5 digits, which breaks fixed-width sorting and parsing of the label."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 49,
+    "summary": "`outstanding` now includes the raw `order_ref` in each output line, changing the output format and exposing an internal reference that was not there before.",
+    "failure_scenario": "Any consumer that parses `'<label> <amount>'` by `split()` or a regex now reads the `order_ref` as the amount. If the `order_ref` contains spaces it shifts every later field, so `float()` on the last-but-one token raises ValueError or yields a wrong number. Customer-facing outstanding lists now leak internal order references."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 28,
+    "summary": "`issue` derives the invoice number with a separate `SELECT MAX(number)+1` before the insert, and `number` has no UNIQUE constraint. This is existing code, but the diff makes `number` the sole visible part of the label.",
+    "failure_scenario": "Two writers on the same register file each read MAX=41 and both insert number 42 for different order_refs. The two invoices then show the same label `2026/0042`, and `outstanding` ordering by number is ambiguous."
+  }
+]
+```

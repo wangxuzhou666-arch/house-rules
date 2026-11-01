@@ -1,0 +1,84 @@
+```json
+[
+  {
+    "file": "code/mail_routes.py",
+    "line": 21,
+    "summary": "apply_routes opens the routes file with 'w' (truncating it) and validates each route while writing, so one bad route aborts mid-loop and leaves a truncated or half-written file.",
+    "failure_scenario": "A list of 100 routes whose 50th has an empty folder raises RouteError after 49 lines are written. The previous good routing table is already destroyed. load_routes then reads the partial table, and every sender in the missing domains silently falls back to 'inbox'. Fix: validate and render all routes first, then write a temp file and os.replace it. This is a persistent-state shape and atomicity problem in the spirit of REL.3.",
+    "category": "rel-3",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 33,
+    "summary": "The index is only rebuilt when it is corrupt. A well-formed index is never refreshed when the underlying routes change, so folder_for serves stale routing forever.",
+    "failure_scenario": "The index is built once with a.com -> work. Someone later changes the routes so a.com -> billing, via apply_routes or any read_routes source. _load still finds a valid 'end' sentinel with the right count and returns the old table. Mail for a.com keeps going to 'work' until someone deletes the file by hand. There is no mtime, version or source-hash check.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 11,
+    "summary": "rebuild writes domain and folder with no validation. A tab or newline in a value breaks the line/sentinel format, so the index is rewritten on every lookup. Unlike render_route in mail_routes.py, nothing here rejects these characters.",
+    "failure_scenario": "read_routes yields ('a.com', 'x\\ny'). The file then has 3 lines plus the sentinel, but the sentinel says 'end\\t2'. Every _load fails the count check and returns None. Every folder_for call rebuilds the whole file, which is slow, races with other readers, and still returns a result built from the unvalidated routes. A folder containing \\r, \\x0b or \\u2028 does the same, because splitlines() treats those as line breaks.",
+    "category": "p0f-1",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 12,
+    "summary": "rebuild truncates the index file in place and is not atomic. folder_for triggers it on a read path, so concurrent callers can race.",
+    "failure_scenario": "Process A calls open('w'), which truncates the file, and is still writing. Process B calls _load, sees a truncated file with no sentinel, and starts its own rebuild. Both processes interleave writes to the same path, which can leave a file that has a valid-looking sentinel but mixed content. Fix: write to a temp file and os.replace it.",
+    "category": "rel-3",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 20,
+    "summary": "_load swallows OSError and UnicodeDecodeError (and returns None for every other malformed shape) without logging, so index corruption is silently self-healed.",
+    "failure_scenario": "The index file is unreadable or has bad bytes. folder_for quietly rebuilds from read_routes and nobody learns the file was corrupt, or why. Repeated disk or permission faults and partial writes stay invisible until the rebuild itself fails. P0F.2 says to degrade explicitly: log it and name the fallback. P0E.2 asks for a named action per handler, and here the action is the silent value None.",
+    "category": "p0f-2",
+    "severity": "blocker"
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 12,
+    "summary": "render_route rejects tab and newline in folder but not in domain. It also misses other line separators that splitlines() honours, such as \\r, \\x0b and \\u2028, in both fields.",
+    "failure_scenario": "A route with domain 'a.com\\tevil' passes the checks ('.' present, no '@', no space). It is written as 'a.com\\tevil\\tfolder'. load_routes partitions on the first tab, so the domain becomes 'a.com' and the folder becomes 'evil\\tfolder'. Mail for a.com is routed to the wrong folder. A folder containing '\\r' splits into two lines on read, and the second half is dropped by 'if domain and folder'.",
+    "category": "p0f-1",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 31,
+    "summary": "load_routes silently drops malformed lines, and returns {} when the file is missing. folder_for then sends all mail to 'inbox' with no log or error.",
+    "failure_scenario": "The routes file is deleted, is at the wrong path, or has a line with no tab. Routing quietly falls back to 'inbox' for the affected or all senders, with no signal that routing is broken. P0F.2 requires that a degrade be logged and the fallback named. REL.3 says a wrong-shaped state file should take a named error or fallback, not be skipped line by line.",
+    "category": "p0f-2",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 39,
+    "summary": "folder_for re-reads and re-parses the entire routes file on every address lookup. The routes list may also hold duplicate domains, which last-wins in the dict without warning.",
+    "failure_scenario": "Classifying a mailbox of N messages does N full file reads and parses, which is O(N x routes). apply_routes does not check for duplicate domains. Two entries for 'a.com' are both written, and load_routes silently keeps the later one.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 17,
+    "summary": "The index duplicates the 'domain<TAB>folder' write and parse logic and the domain/address normalisation already in mail_routes.py, with a different file format (sentinel line). The two folder_for implementations are parallel and can disagree.",
+    "failure_scenario": "A change to the normalisation or the format, such as a new validation rule, must be made in both places. Today render_route validates but rebuild does not. Pointing a SenderIndex at the routes file written by apply_routes (no sentinel) makes _load fail and rewrite that file in the sentinel format, clobbering it. Fix: reuse load_routes or render_route and share one address-to-domain helper.",
+    "category": "p2-2",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 9,
+    "summary": "The sentinel-line scheme is non-obvious and has no comment explaining the end-marker, the count check or the rebuild-on-corruption decision.",
+    "failure_scenario": "A maintainer sees the 'end\\t<n>' line and cannot tell why it exists, or that removing it or changing the count semantics breaks truncation detection. P3.2 asks to comment decisions, pitfalls and ordering constraints. The same applies to the write ordering in rebuild.",
+    "category": "p3-2",
+    "severity": "nice"
+  }
+]
+```

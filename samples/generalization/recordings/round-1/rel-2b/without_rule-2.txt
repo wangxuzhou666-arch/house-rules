@@ -1,0 +1,40 @@
+```json
+[
+  {
+    "file": "code/payment_events.py",
+    "line": 6,
+    "summary": "The idempotency key format changed from `provider:event_id` to `account/provider/event_id`, with no migration or backward-compatible lookup for rows already in the `events` table.",
+    "failure_scenario": "The ledger already holds `stripe:evt_1` from before the change. A webhook redelivery of evt_1 now builds the key `acct/stripe/evt_1`. `INSERT OR IGNORE` finds no conflict, so the charge is inserted a second time and `net_cents` double-counts it. `record_refund` for a pre-change charge builds the new key, matches no row, and returns False. The charge stays unrefunded and keeps counting toward `net_cents`."
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 6,
+    "summary": "The key is built by joining three free-form strings with `/` and no escaping. `account` is also left raw while `provider` is lowercased and `event_id` is stripped, so the key is neither unambiguous nor consistently normalized.",
+    "failure_scenario": "`event_key('a/b', 'c', 'x')` and `event_key('a', 'b', 'c/x')` both give `a/b/c/x`. Two different events collide, so the second charge is silently dropped by `INSERT OR IGNORE`. Separately, ' acct1' and 'acct1', or 'Acct1' and 'acct1', give different keys for the same account, which allows duplicate charges. A refund with a differently cased account misses its charge."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 12,
+    "summary": "`invoice_label` is computed on read from `issued_on`, and its format changed from `INV-000123` to `YYYY/NNNN`. Labels already given to customers or other systems now change retroactively.",
+    "failure_scenario": "Invoice 123 was sent to a customer as `INV-000123`. After deploy, `outstanding()` lists it as `2024/0123`, so reconciling or searching by the old label fails. Because `number` is a global counter (`MAX(number)+1`) and never resets per year, the year prefix suggests a per-year sequence that does not exist. Invoice 12345 is shown as `2025/12345`: the `:04d` width overflows and the label length varies."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 49,
+    "summary": "`outstanding()` now inserts `order_ref` between the label and the amount, which changes the output format that consumers see. It also exposes the raw, user-supplied order reference.",
+    "failure_scenario": "A downstream consumer that splits each line into `<label> <amount>` now reads the order_ref as the amount, which raises a ValueError or produces wrong totals. An `order_ref` that contains spaces makes the line impossible to parse unambiguously."
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 19,
+    "summary": "`account` and `provider` are adjacent `str` parameters, and the new one is inserted before the existing one. Swapped arguments type-check and run, and the call sites for `record_charge` and `record_refund` (both changed here) are not visible in the repo.",
+    "failure_scenario": "A caller passes `record_charge(conn, 'stripe', 'acct1', 'evt_1', 500)`. The key becomes `stripe/acct1/evt_1`, and a later `record_refund` with the correct order never matches it. The refund is silently ignored (returns False) and `net_cents` stays inflated. Keyword-only parameters would catch the swap."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 29,
+    "summary": "The invoice number comes from `SELECT MAX(number)+1` followed by a separate INSERT, and the `number` column has no UNIQUE constraint. Two writers can allocate the same number.",
+    "failure_scenario": "Two processes share one SQLite file and both read MAX=41 before either commits. Both insert number 42 for different orders. The new label `YYYY/0042` is then shared by two invoices, and the year prefix does not make the labels unique. This race exists before the diff, but the diff builds the label on top of it."
+  }
+]
+```

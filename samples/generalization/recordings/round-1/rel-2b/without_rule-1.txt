@@ -1,0 +1,46 @@
+```json
+[
+  {
+    "file": "code/payment_events.py",
+    "line": 5,
+    "summary": "The `event_key` format changed from `provider:id` to `account/provider/id` with no migration of rows already in `events`, so old and new keys never match.",
+    "failure_scenario": "A ledger created before this change holds a row with key 'stripe:ch_1'. After deploy, a webhook replay of ch_1 for account 'acme' computes 'acme/stripe/ch_1'. `INSERT OR IGNORE` finds no conflict and inserts a duplicate, so `net_cents` double counts the charge and idempotency is lost. `record_refund(conn, 'acme', 'stripe', 'ch_1')` looks up the new key, matches 0 rows and returns False. The old charge can never be refunded and stays in `net_cents`. Both failures are silent."
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 6,
+    "summary": "Key components are joined with an unescaped '/' and normalized unevenly: `provider` is lowercased, `event_id` is stripped, `account` is neither.",
+    "failure_scenario": "(account='a/b', provider='c', id='d') and (account='a', provider='b', id='c/d') both produce 'a/b/c/d'. The second charge is ignored by `INSERT OR IGNORE` and returns False, so a real charge is dropped. Separately, account ' acme' and 'acme', or 'ACME' and 'acme', become different keys. A refund sent with slightly different account formatting silently matches nothing."
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 19,
+    "summary": "`account` was inserted as a new positional `str` ahead of `provider` in both `record_charge` and `record_refund`, and `net_cents` was not updated to match.",
+    "failure_scenario": "Callers that pass `provider`, `event_id` and `charge_id` as bare strings can swap `account`, `provider` and `event_id` without any type error, which gives a wrong key and a silent no-op refund (P2.5-style hazard). Old-style 4-argument `record_charge` calls raise TypeError, but other call shapes shift silently. `net_cents` still sums every account, so a per-account ledger cannot report a per-account balance and multi-account totals get mixed."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 12,
+    "summary": "The label is now `YYYY/NNNN` built from a global, never-resetting counter (`MAX(number)+1`). The year prefix implies per-year numbering that does not exist, and `:04d` is narrower than the old `:06d`.",
+    "failure_scenario": "The first invoice of 2027 is labeled '2027/10432' once the counter passes 9999, so the label width becomes inconsistent. Readers will assume numbering restarts each year. If anyone later resets the counter per year to match, `number` has no uniqueness constraint, so labels or numbers collide. The label is also computed on read rather than stored, so every already-issued invoice such as 'INV-000123' now prints as '2025/0123'. This breaks references that customers and accounting systems already hold."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 12,
+    "summary": "`invoice_label` trusts `row['issued_on'][:4]` to be a four-digit year. Only `issue()` normalizes the date, so rows written by other paths or older versions can yield a wrong or garbled prefix.",
+    "failure_scenario": "A legacy or directly imported row with issued_on '5/3/2024' or '03.05.2024' gets the label '5/3/0001' or '03.0/0001'. The label silently reports the wrong year, and the bug never raises an error."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 49,
+    "summary": "`outstanding()` now adds `order_ref` to the output string, which changes the return format and exposes the internal order reference.",
+    "failure_scenario": "Any consumer that splits the string as '<label> <amount>' (a report, reminder email or CSV export) now reads the order_ref as the amount and fails or mis-parses. An order_ref that contains spaces makes the line ambiguous. The reference may also be sensitive and now flows to every place that prints the outstanding list."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 28,
+    "summary": "`issue()` computes `number` with SELECT MAX+1 and the INSERT runs without a transaction or a UNIQUE constraint on `number`. Duplicate-uid inserts return None with no log (P0F.2).",
+    "failure_scenario": "Two writers on the same register file both read MAX=41 and both insert number 42 under different uids, which gives two invoices with the same label. The new label format is now the only customer-facing identity, so duplicate labels become ambiguous. A re-issue of an existing order_ref returns None, indistinguishable from other failures, and the caller cannot tell why."
+  }
+]
+```

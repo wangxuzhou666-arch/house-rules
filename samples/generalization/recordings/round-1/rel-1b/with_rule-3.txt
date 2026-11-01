@@ -1,0 +1,64 @@
+```json
+[
+  {
+    "file": "code/sender_index.py",
+    "line": 36,
+    "summary": "The index is only rebuilt when the file is missing or fails its own integrity check. It is never compared with the route source, so a valid index is served indefinitely even after the routes change.",
+    "failure_scenario": "rebuild() runs once and writes a self-consistent file. An admin then changes a domain's folder through read_routes or apply_routes. _load() sees a valid end-marker and count and returns the old table, so folder_for keeps returning the old folder (or 'inbox' for a new domain). The only way to refresh it is to delete the file or corrupt it."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 13,
+    "summary": "rebuild() opens the live index with mode 'w', which truncates it before the replacement is complete. It does not write to a temp file and rename. A failed or concurrent write leaves a truncated file and destroys the previous valid index (REL.1).",
+    "failure_scenario": "Disk-full or a crash happens mid-write, or two processes call folder_for at once. The valid index is already truncated. A second reader sees a half-written file and rebuilds too, so two writers interleave on the same path. A failed rebuild leaves no usable index. Writing to path.with_suffix('.tmp') and calling os.replace would keep the old file until the new one is ready."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 14,
+    "summary": "rebuild() writes domains and folders without any validation. A tab or newline in a folder, or a tab or newline inside a domain, corrupts the line format. A trailing newline in the last record cannot be told apart from the end marker.",
+    "failure_scenario": "read_routes yields ('a.com', 'work\\nmail'). Two lines are written, so the count in the end marker no longer equals len(lines)-1. Every later _load() returns None and every folder_for call rewrites the whole file, which is a permanent rebuild-per-lookup loop. A folder 'x\\tend\\t99' or a tab inside a domain silently splits into the wrong key and folder."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 20,
+    "summary": "apply_routes opens the routes file with 'w' (truncating it) and then validates each route inside the write loop. A RouteError partway through leaves the file truncated or partial, and the previous good routes are lost (REL.1, P0F.1). Validation belongs before the open.",
+    "failure_scenario": "apply_routes(path, [good1, good2, {'domain': 'bad'}, good4]) writes good1 and good2, then render_route raises for the third. The old routes file is gone, and the file holds only two routes. Mail for every other domain now falls through to 'inbox'."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 11,
+    "summary": "render_route does not reject tab or newline inside the domain. It rejects only space, '@' and a missing dot. The folder check misses other characters that splitlines() treats as line breaks.",
+    "failure_scenario": "domain 'a.com\\tevil' passes the check. The line 'a.com\\tevil\\tfolder' is read back by partition as domain 'a.com' with folder 'evil\\tfolder', so routing is silently wrong. A folder containing '\\r', '\\x0b', '\\x0c', '\\x85' or '\\u2028' passes the '\\t'/'\\n' check. splitlines() then cuts the record in two, and the first half or the folder is lost."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 32,
+    "summary": "load_routes silently drops any malformed or short line (no tab, empty domain or folder) and returns a partial table with no log or error (P0F.2, REL.3). A missing file also silently returns {}.",
+    "failure_scenario": "A truncated or hand-edited routes file has a line 'corp.com' with no folder. That domain is skipped, and mail from corp.com is routed to 'inbox' with no trace. A deleted file looks the same as an empty config."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 22,
+    "summary": "_load swallows OSError and UnicodeDecodeError and returns None, and every integrity-check failure also returns None. Nothing is logged, so a corrupt, unreadable or permission-denied index is rebuilt silently (P0F.2). OSError also lumps the expected 'file not found' case together with real I/O faults.",
+    "failure_scenario": "The index directory becomes unreadable (EACCES) or the disk errors. Every folder_for call hits the OSError, rebuilds, and then hits the same error again on the write. The failure shows up only as repeated slow rebuilds, or as an unrelated exception from rebuild, with no log entry naming the cause."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 11,
+    "summary": "rebuild() normalizes the domain (strip, lower) but ignores the folder, and it has no duplicate or empty-domain handling. Unlike mail_routes.render_route, it enforces none of the route validation.",
+    "failure_scenario": "read_routes returns [('', 'x'), ('A.com', ''), ('a.com', 'work')]. The empty domain and the empty folder are written verbatim. Duplicates are resolved by dict(routes) as last-wins, but the file still holds both lines. An empty folder value is then returned from folder_for as '' instead of falling back to 'inbox'."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 34,
+    "summary": "SenderIndex.folder_for and rebuild duplicate the logic already in mail_routes: the tab-separated serialization, the domain extraction (address.rsplit('@', 1)[-1].strip().lower()) and the lookup with an 'inbox' default. They add a second on-disk format, so two modules now own the same route data.",
+    "failure_scenario": "A fix to the domain parsing or the validation rules (for example IDN handling, or the tab/newline check) has to be made in both mail_routes.py and sender_index.py. The two copies drift apart, and one path ends up routing the same address to a different folder than the other."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 38,
+    "summary": "folder_for re-reads and re-parses the whole routes file on every lookup, with no cache. Per-message routing therefore costs O(file size) I/O each time.",
+    "failure_scenario": "Routing a batch of thousands of messages against a routes file with thousands of domains reads and splits the file once per address. Load the table once per batch, or reuse the SenderIndex that already exists to avoid this."
+  }
+]
+```

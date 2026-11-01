@@ -1,0 +1,33 @@
+{
+  "v": 1,
+  "case": "rel-2b",
+  "condition": "without_rule",
+  "run": 3,
+  "attempt": 1,
+  "level": "high",
+  "date_utc": "2026-11-01T00:15:45Z",
+  "command": [
+    "claude",
+    "-p",
+    "/code-review high 0f569e5c26e410f3dfc51bee312ac81f9218579b..1aa8a701b0770d929f40f046d7719f38532dcac4"
+  ],
+  "range": "0f569e5c26e410f3dfc51bee312ac81f9218579b..1aa8a701b0770d929f40f046d7719f38532dcac4",
+  "reviewer_version": "2.1.284 (Claude Code)",
+  "reviewer_version_error": null,
+  "code_sha256": {
+    "code/payment_events.py": "f8cca16db362a265389465b91f3549d525587c95713d96d3ca61851c29931b5a",
+    "code/invoice_register.py": "6f61d3f0a1d2ab4f2662dfbf0ae72ca2eb583ec70834ec43ab14a67c6ef115a8"
+  },
+  "base_sha256": {
+    "base/invoice_register.py": "b7ddd0b7f65e9266bf89501a04a6075f7c13d9e5484d2854117319980bdd6441",
+    "base/payment_events.py": "023c1d9b47b11bedd62b681cb01564659cd43ff87b2696485d13ec94c80057d9"
+  },
+  "digest_sha256": "1a538b0c32f731e241b3fda4d75da7f4762656c73d5ffcdd6ccbf40ceeab44d8",
+  "clause_removed": "REL.2",
+  "exit_code": 0,
+  "error": null,
+  "model_id": null,
+  "raw_sha256": "e6b5ddda8b42f0e24445275f28273e9741498b4633d8134d2a63e9ed1be7138f",
+  "status": "ok",
+  "failure": null
+}

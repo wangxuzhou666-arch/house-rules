@@ -1,0 +1,46 @@
+```json
+[
+  {
+    "file": "code/payment_events.py",
+    "line": 5,
+    "summary": "Changing the `event_key` format changes the stored primary-key identity, and nothing migrates the existing `events` rows or reads the old format (REL.2).",
+    "failure_scenario": "A DB already holds rows keyed `stripe:evt_1`. After deploy the key becomes `acct/stripe/evt_1`. A provider webhook retry of `evt_1` no longer hits the PK, so `INSERT OR IGNORE` inserts a second row. `record_charge` returns True and `net_cents` double-counts the charge. `record_refund` for an old charge matches no row, returns False, and the refund is never applied, so `net_cents` stays overstated."
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 19,
+    "summary": "A new required `account` parameter is inserted before `provider`, so existing positional callers silently shift their arguments. The same applies to `record_refund`.",
+    "failure_scenario": "A caller still using `record_charge(conn, 'stripe', 'evt_1', 500)` now binds account='stripe', provider='evt_1', event_id=500. `500.strip()` raises AttributeError. A caller whose values are all strings, such as `record_refund(conn, 'stripe', 'ch_1')`, binds provider='ch_1' and charge_id missing, which raises TypeError. Where the arity happens to fit, it writes keys under the wrong namespace. No migration or compatibility shim is provided."
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 6,
+    "summary": "The new key joins `account`, `provider` and `event_id` with '/' without escaping. `account` is neither stripped nor lowercased, unlike the other two parts, so distinct tuples can collide and equivalent ones can differ.",
+    "failure_scenario": "(account='a/b', provider='c', id='x') and (account='a', provider='b', id='c/x') both give `a/b/c/x`. One tenant's charge is then ignored as a duplicate of another's, or a refund hits the wrong tenant's row. Separately, account 'Acme ' and 'Acme' produce different keys for the same account, so duplicates slip through."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 12,
+    "summary": "The invoice label format changes from `INV-000123` to `YYYY/NNNN`. This changes the user-visible invoice identity with no compatibility handling (REL.2).",
+    "failure_scenario": "Invoices already sent to customers or filed in accounting as `INV-000123` are now shown as `2025/0123`. Lookups, reconciliation and any code or person matching on the old string fail. Both formats exist in the wild with no mapping between them."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 12,
+    "summary": "The label puts the year before the number, which implies a per-year sequence. The number is still a global `MAX(number)+1`, and the year comes from the caller-supplied `issued_on`. The `:04d` padding is also narrower than before (6 digits).",
+    "failure_scenario": "In 2027 the first invoice is labelled `2027/0457`, not `2027/0001`. A backdated `issued_on` gives a lower-numbered invoice a later or earlier year label, so label order no longer follows number order. Once the number passes 9999 the width changes (`2025/10000`), so fixed-width parsing and sorting by label string break."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 49,
+    "summary": "The `outstanding()` output now inserts `order_ref` between the label and the amount. This changes the output shape of a public function, and `order_ref` has no length or space limit.",
+    "failure_scenario": "A consumer that splits the line on whitespace and reads the last field as the amount, or takes the second token as the amount, now gets a wrong field. An `order_ref` containing spaces shifts every later token, so parsing silently yields the wrong values."
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 30,
+    "summary": "`issue` computes the next number with `SELECT MAX+1` and then does an `INSERT OR IGNORE`. A non-atomic read-then-write can produce a duplicate number, and a duplicate-uid replay discards the allocated number. This code was not touched by the diff, but the new label relies on number uniqueness.",
+    "failure_scenario": "Two connections issue concurrently and both read MAX=5. Both insert number=6 for different `order_ref`s, because `number` has no UNIQUE constraint. Two invoices then carry the same `YYYY/0006` label, so the label is no longer an identifier."
+  }
+]
+```

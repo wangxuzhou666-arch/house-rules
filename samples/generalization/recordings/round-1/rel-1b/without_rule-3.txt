@@ -1,0 +1,64 @@
+```json
+[
+  {
+    "file": "code/sender_index.py",
+    "line": 36,
+    "summary": "The index is rebuilt only when it is corrupt, never when the routes change, so a structurally valid index stays stale forever.",
+    "failure_scenario": "A first folder_for() call builds the index. A route is then added or changed through mail_routes.apply_routes or the route source behind read_routes. Every later folder_for() reads the old index, passes the 'end\\tN' trailer check, and returns the old folder. The trailer only proves the file was fully written. It does not prove the file is current. There is no mtime, version or source-hash comparison, and no invalidate() method."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 20,
+    "summary": "apply_routes opens the routes file with 'w', which truncates it, and validates each route only while writing. One bad route leaves the live file truncated or half-written.",
+    "failure_scenario": "apply_routes(path, [good1, good2, {'domain': 'bad', 'folder': 'x'}, good4]). The file is truncated first, good1 and good2 are written, then RouteError is raised on the third route. The routes file now holds only 2 of 4 routes, and every later folder_for() sends mail for the missing domains to 'inbox'. Validate all routes first, then write to a temp file and os.replace it."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 11,
+    "summary": "Validation lets through values that break the tab-separated line format on reload: tabs or newlines inside the domain, a folder containing '\\r', '\\x0b', '\\x0c', '\\x85' or '\\u2028', and a None folder (str(None) is 'None').",
+    "failure_scenario": "A domain 'a.com\\tb' is accepted (only '.', '@' and ' ' are checked) and is written as 'a.com\\tb\\tfolder'. load_routes then reads domain 'a.com' with folder 'b\\tfolder'. A folder 'x\\u2028y' passes the '\\t' and '\\n' check, but splitlines() breaks it into two lines on read, so the route is lost. route={'domain':'a.com','folder':None} is accepted and mail goes to a folder literally named 'None'. A domain like '.com' or 'a.' also passes the '.' check."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 32,
+    "summary": "load_routes silently skips malformed lines (no tab, empty domain or empty folder) and returns a partial table with no log or error. This is a silent degrade (P0F.2) and the wrong-shape case from REL.3.",
+    "failure_scenario": "The routes file is partly corrupted or hand-edited, for example one line with a space instead of a tab. That domain vanishes from the table, and folder_for quietly returns 'inbox' for it. Nobody is told that routing is partly broken, so mail is misfiled with no signal."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 16,
+    "summary": "rebuild does no validation or normalisation of its own. Folder values are not stripped, tabs, newlines and empty values are not rejected, and it does not share render_route with mail_routes. Its on-disk format also conflicts with the one in mail_routes.",
+    "failure_scenario": "Rebuild writes a folder containing '\\n', or a '\\u2028' that splitlines splits on. The line count then no longer matches the trailer, so _load returns None on every call and folder_for rebuilds the whole file on every lookup. If SenderIndex and mail_routes.load_routes ever read the same path, load_routes treats the trailer 'end\\tN' as a real route for domain 'end' with folder 'N'. Separately, rebuild strips and lowercases the domain but not the folder, while render_route strips both."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 13,
+    "summary": "rebuild writes the index in place (open with 'w') with no atomic replace. Concurrent callers truncate and rewrite the same file while others read it.",
+    "failure_scenario": "Two workers call folder_for at the same time. One opens the index with 'w' (truncating it) while the other reads an empty or partial file. The second sees no trailer, treats the index as corrupt and starts its own rebuild on the same path. Both write interleaved, and a reader can see a truncated file. A crash mid-write leaves a trailer-less file that forces a rebuild on the next call. Write to a temp file and os.replace it."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 22,
+    "summary": "_load swallows every OSError and UnicodeDecodeError and returns None with no log. A missing file on first run is indistinguishable from a permission error or corruption, so the failure is invisible (P0F.2).",
+    "failure_scenario": "The index file is unreadable (EACCES) or has a bad encoding. folder_for silently rebuilds and rewrites it, possibly hiding a permissions or disk problem. If the rebuild's write also fails, an OSError from open() escapes folder_for to the caller. A normal cache miss (FileNotFoundError) and a real fault take the same silent path."
+  },
+  {
+    "file": "code/sender_index.py",
+    "line": 1,
+    "summary": "SenderIndex is a second implementation of domain-to-folder routing, with its own file format and parsing. It duplicates mail_routes.load_routes and folder_for, and the address-to-domain extraction (rsplit('@',1)[-1].strip().lower()) is copied.",
+    "failure_scenario": "Two lookup paths that parse and normalise differently (the 'end' trailer, folder stripping, malformed-line handling) will drift apart, so the same address resolves to different folders depending on which module is called. A fix to one (for example how an address with no '@' is handled) is easy to leave out of the other."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 39,
+    "summary": "folder_for calls load_routes on every lookup, which re-reads and re-parses the whole routes file each time.",
+    "failure_scenario": "Classifying a mailbox of N messages does N full file reads and parses of the routes file, which is O(N x routes) I/O. It should load the table once per batch or cache it."
+  },
+  {
+    "file": "code/mail_routes.py",
+    "line": 20,
+    "summary": "apply_routes does not reject duplicate domains. It writes both lines, and load_routes keeps the last silently. It also returns len(routes) as the number applied, which is wrong when duplicates collapse.",
+    "failure_scenario": "routes=[{'domain':'a.com','folder':'x'},{'domain':'A.com','folder':'y'}] writes two lines. load_routes keeps only 'y', but apply_routes reports 2 routes applied, so the caller's count and the effective table disagree and the earlier route is dropped with no warning."
+  }
+]
+```

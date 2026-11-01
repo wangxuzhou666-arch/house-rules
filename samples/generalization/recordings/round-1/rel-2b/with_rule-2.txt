@@ -1,0 +1,52 @@
+```json
+[
+  {
+    "file": "code/payment_events.py",
+    "line": 5,
+    "summary": "The persisted primary key format changed from `provider:event_id` to `account/provider/event_id` with no migration or fallback read (REL.2, blocker-level data risk).",
+    "failure_scenario": "A charge was stored earlier under `stripe:ch_1`. After deploy, `record_refund(conn, 'acme', 'stripe', 'ch_1')` looks up `acme/stripe/ch_1`, matches no row, and returns False. The refund is silently lost and `net_cents` still counts the charge. If the provider redelivers the old webhook `ch_1`, `INSERT OR IGNORE` sees a new key and inserts a second row, so the charge is counted twice. This breaks the idempotency that `event_key` exists to provide. Existing rows need a migration (rewrite the keys) or a compatible read that also tries the legacy key.",
+    "category": "rel-2",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 6,
+    "summary": "`account` is not normalized, while `provider` is lowercased and `event_id` stripped. The `/` separator can also collide with values that contain `/`.",
+    "failure_scenario": "`record_charge(conn, 'Acme', ...)` and `record_refund(conn, 'acme ', ...)` build different keys, so the refund misses the charge. Separately, `account='a/b', provider='c'` and `account='a', provider='b/c'` both produce `a/b/c/<id>`, so one tenant's event can be swallowed as a duplicate of another's. The separator is unescaped and the three fields are not normalized the same way.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  },
+  {
+    "file": "code/payment_events.py",
+    "line": 19,
+    "summary": "`account` was inserted as a new positional `str` parameter before `provider`, next to two other `str` parameters. Callers that are not updated can still run with the arguments shifted.",
+    "failure_scenario": "A caller that was not updated and calls `record_charge(conn, provider, event_id, cents)` fails with a TypeError, which is loud. A caller that passes a fifth argument, or that already passes `(conn, a, b, c)` in a different order, silently builds a wrong key (account and provider swapped) and records under the wrong identity. A keyword-only `*, account` or a typed key object would make the shift fail loudly. This is a defensive-design concern, not a confirmed break: the repo has no callers of these functions.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 12,
+    "summary": "The invoice label format changed from `INV-000123` to `YYYY/NNNN`. The number is a global `MAX(number)+1` counter that does not reset per year, and the width shrinks from 6 digits to 4.",
+    "failure_scenario": "Labels already issued to customers or accountants as `INV-000123` now render as `2026/0123`, and nothing maps the old label to the new one. The number keeps increasing across years, so a 2027 invoice might read `2027/0124` rather than `2027/0001`, which suggests per-year numbering that does not exist. Numbers above 9999 overflow the `04d` width and give inconsistent label lengths. Stored identity (`uid`, `number`) is unchanged, so the REL.2 display-only exemption applies. The cost is audit and lookup confusion, not data loss.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 49,
+    "summary": "`outstanding()` now includes `order_ref` in every output line, and nothing in the diff says why.",
+    "failure_scenario": "If the `outstanding()` list is shown to customers or written to logs or reports, internal order references are exposed. Any consumer that parses the old `LABEL amount` format splits on whitespace and reads the order ref as the amount, so parsing breaks. An `order_ref` containing spaces makes the line ambiguous.",
+    "category": "unmapped",
+    "severity": "nice"
+  },
+  {
+    "file": "code/invoice_register.py",
+    "line": 29,
+    "summary": "`number` is computed with a separate `SELECT MAX(number)+1` and a later insert. The column has no UNIQUE constraint, and the new label is built from `number` alone.",
+    "failure_scenario": "Two connections or processes both run `issue()` for different orders and read the same MAX. Both insert with the same `number`, so two distinct invoices get the identical label `2026/0007`. The label was changed in this diff to rely on `number`, and the race was not fixed. Fix it with a UNIQUE index on `number`, or allocate the number inside one transaction.",
+    "category": "unmapped",
+    "severity": "should-fix"
+  }
+]
+```

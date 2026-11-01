@@ -210,6 +210,202 @@
       }
     },
     {
+      "id": "rel-1b",
+      "clause": "REL.1",
+      "label": "rel-1",
+      "control_kind": "exempt",
+      "verdict": "FAIL",
+      "notes": [],
+      "conditions": {
+        "with_rule": {
+          "runs_ok": 3,
+          "runs_failed": 0,
+          "runs_missing": 0,
+          "violation_labeled_runs": 2,
+          "violation_flagged_runs": 3,
+          "control_labeled_runs": 2,
+          "control_flagged_runs": 3,
+          "secondary": {
+            "violation_cited_runs": 2,
+            "control_cited_runs": 2
+          },
+          "runs": [
+            {
+              "run": 1,
+              "status": "ok",
+              "findings": 10,
+              "violation_labels": [
+                "rel-1",
+                "p0f-1",
+                "p0f-2",
+                "unmapped",
+                "p0f-1"
+              ],
+              "control_labels": [
+                "unmapped",
+                "rel-1",
+                "p0f-1",
+                "p2-2",
+                "p0f-2"
+              ],
+              "other_file_findings": 0,
+              "attempts": 1,
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": false,
+                "control_cited": false
+              }
+            },
+            {
+              "run": 2,
+              "status": "ok",
+              "findings": 10,
+              "violation_labels": [
+                "rel-1",
+                "p0f-1",
+                "p0f-2",
+                "p0f-1"
+              ],
+              "control_labels": [
+                "rel-1",
+                "unmapped",
+                "p0f-1",
+                "p0f-2",
+                "unmapped",
+                "unmapped"
+              ],
+              "other_file_findings": 0,
+              "attempts": 1,
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": true,
+                "control_cited": true
+              }
+            },
+            {
+              "run": 3,
+              "status": "ok",
+              "findings": 10,
+              "violation_labels": [
+                "unmapped",
+                "unmapped",
+                "unmapped",
+                "unmapped"
+              ],
+              "control_labels": [
+                "unmapped",
+                "unmapped",
+                "unmapped",
+                "unmapped",
+                "unmapped",
+                "unmapped"
+              ],
+              "other_file_findings": 0,
+              "attempts": 1,
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": true,
+                "control_cited": true
+              }
+            }
+          ]
+        },
+        "without_rule": {
+          "runs_ok": 3,
+          "runs_failed": 0,
+          "runs_missing": 0,
+          "violation_labeled_runs": 0,
+          "violation_flagged_runs": 3,
+          "control_labeled_runs": 0,
+          "control_flagged_runs": 3,
+          "secondary": {
+            "violation_cited_runs": 0,
+            "control_cited_runs": 0
+          },
+          "runs": [
+            {
+              "run": 1,
+              "status": "ok",
+              "findings": 10,
+              "violation_labels": [
+                "rel-3",
+                "p0f-1",
+                "p0f-2",
+                "unmapped"
+              ],
+              "control_labels": [
+                "unmapped",
+                "p0f-1",
+                "rel-3",
+                "p0f-2",
+                "p2-2",
+                "p3-2"
+              ],
+              "other_file_findings": 0,
+              "attempts": 1,
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": false,
+                "control_cited": false
+              }
+            },
+            {
+              "run": 2,
+              "status": "ok",
+              "findings": 10,
+              "violation_labels": [
+                "unmapped",
+                "p0f-1",
+                "p0f-2",
+                "unmapped"
+              ],
+              "control_labels": [
+                "unmapped",
+                "unmapped",
+                "p0f-1",
+                "p0f-2",
+                "p2-2",
+                "p1-3"
+              ],
+              "other_file_findings": 0,
+              "attempts": 1,
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": false,
+                "control_cited": false
+              }
+            },
+            {
+              "run": 3,
+              "status": "ok",
+              "findings": 10,
+              "violation_labels": [
+                "unmapped",
+                "unmapped",
+                "unmapped",
+                "unmapped",
+                "unmapped"
+              ],
+              "control_labels": [
+                "unmapped",
+                "unmapped",
+                "unmapped",
+                "unmapped",
+                "unmapped"
+              ],
+              "other_file_findings": 0,
+              "attempts": 1,
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": false,
+                "control_cited": false
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
       "id": "rel-2",
       "clause": "REL.2",
       "label": "rel-2",
@@ -372,6 +568,179 @@
                 "unmapped",
                 "unmapped",
                 "unmapped",
+                "unmapped",
+                "unmapped",
+                "unmapped"
+              ],
+              "control_labels": [
+                "unmapped",
+                "unmapped"
+              ],
+              "other_file_findings": 0,
+              "attempts": 1,
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": false,
+                "control_cited": false
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "rel-2b",
+      "clause": "REL.2",
+      "label": "rel-2",
+      "control_kind": "exempt",
+      "verdict": "FAIL",
+      "notes": [],
+      "conditions": {
+        "with_rule": {
+          "runs_ok": 3,
+          "runs_failed": 0,
+          "runs_missing": 0,
+          "violation_labeled_runs": 1,
+          "violation_flagged_runs": 3,
+          "control_labeled_runs": 0,
+          "control_flagged_runs": 3,
+          "secondary": {
+            "violation_cited_runs": 2,
+            "control_cited_runs": 1
+          },
+          "runs": [
+            {
+              "run": 1,
+              "status": "ok",
+              "findings": 6,
+              "violation_labels": [
+                "unmapped",
+                "unmapped",
+                "unmapped"
+              ],
+              "control_labels": [
+                "unmapped",
+                "unmapped",
+                "unmapped"
+              ],
+              "other_file_findings": 0,
+              "attempts": 1,
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": false,
+                "control_cited": false
+              }
+            },
+            {
+              "run": 2,
+              "status": "ok",
+              "findings": 6,
+              "violation_labels": [
+                "rel-2",
+                "unmapped",
+                "unmapped"
+              ],
+              "control_labels": [
+                "unmapped",
+                "unmapped",
+                "unmapped"
+              ],
+              "other_file_findings": 0,
+              "attempts": 1,
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": true,
+                "control_cited": false
+              }
+            },
+            {
+              "run": 3,
+              "status": "ok",
+              "findings": 7,
+              "violation_labels": [
+                "unmapped",
+                "unmapped",
+                "unmapped"
+              ],
+              "control_labels": [
+                "unmapped",
+                "unmapped",
+                "unmapped",
+                "unmapped"
+              ],
+              "other_file_findings": 0,
+              "attempts": 1,
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": true,
+                "control_cited": true
+              }
+            }
+          ]
+        },
+        "without_rule": {
+          "runs_ok": 3,
+          "runs_failed": 0,
+          "runs_missing": 0,
+          "violation_labeled_runs": 0,
+          "violation_flagged_runs": 3,
+          "control_labeled_runs": 0,
+          "control_flagged_runs": 3,
+          "secondary": {
+            "violation_cited_runs": 0,
+            "control_cited_runs": 0
+          },
+          "runs": [
+            {
+              "run": 1,
+              "status": "ok",
+              "findings": 7,
+              "violation_labels": [
+                "unmapped",
+                "unmapped",
+                "unmapped"
+              ],
+              "control_labels": [
+                "unmapped",
+                "unmapped",
+                "unmapped",
+                "unmapped"
+              ],
+              "other_file_findings": 0,
+              "attempts": 1,
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": false,
+                "control_cited": false
+              }
+            },
+            {
+              "run": 2,
+              "status": "ok",
+              "findings": 6,
+              "violation_labels": [
+                "unmapped",
+                "unmapped",
+                "unmapped"
+              ],
+              "control_labels": [
+                "unmapped",
+                "unmapped",
+                "unmapped"
+              ],
+              "other_file_findings": 0,
+              "attempts": 1,
+              "first_attempt_failure": null,
+              "secondary": {
+                "violation_cited": false,
+                "control_cited": false
+              }
+            },
+            {
+              "run": 3,
+              "status": "ok",
+              "findings": 5,
+              "violation_labels": [
                 "unmapped",
                 "unmapped",
                 "unmapped"
@@ -978,7 +1347,7 @@
   },
   "totals": {
     "PASS": 1,
-    "FAIL": 4,
+    "FAIL": 6,
     "INCOMPLETE": 0
   }
 }
